@@ -118,56 +118,100 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
   try {
     console.log(`🔍 Starting comprehensive multi-query search for: ${textQuery}`);
     
-    // Search 1: Main query with exact match
-    console.log(`🔍 Query 1: Main search "${textQuery}"`);
-    const search1Results = await performSingleSearch(textQuery, apiKey, onProgress);
-    allPlaces = allPlaces.concat(search1Results);
-    console.log(`✅ Query 1: ${search1Results.length} results`);
-    
-    // Search 2: Add "shops" variation (if not already present)
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    if (!keyword.toLowerCase().includes('shop') && !keyword.toLowerCase().includes('store')) {
-      const shopsQuery = textQuery.replace(keyword, `${keyword} shops`);
-      console.log(`🔍 Query 2: Shops variation "${shopsQuery}"`);
-      const search2Results = await performSingleSearch(shopsQuery, apiKey, onProgress);
-      allPlaces = allPlaces.concat(search2Results);
-      console.log(`✅ Query 2: ${search2Results.length} results (${allPlaces.length} total)`);
-    }
-    
-    // Search 3: Try "near" variation for different results
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const nearQuery = textQuery.includes(' in ') ? textQuery.replace(' in ', ' near ') : `${keyword} near ${location}`;
-    console.log(`🔍 Query 3: Near variation "${nearQuery}"`);
-    const search3Results = await performSingleSearch(nearQuery, apiKey, onProgress);
-    allPlaces = allPlaces.concat(search3Results);
-    console.log(`✅ Query 3: ${search3Results.length} results (${allPlaces.length} total)`);
-    
-    // Search 4: Simple location search without prepositions
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const simpleQuery = `${keyword} ${location}`;
-    console.log(`🔍 Query 4: Simple search "${simpleQuery}"`);
-    const search4Results = await performSingleSearch(simpleQuery, apiKey, onProgress);
-    allPlaces = allPlaces.concat(search4Results);
-    console.log(`✅ Query 4: ${search4Results.length} results (${allPlaces.length} total)`);
-    
-    // Search 5: Add category variation if applicable
-    if (category && category !== 'Custom' && category !== 'All') {
+    // Special handling for "All" category - search all business types
+    if (category === 'All') {
+      const businessTypes = ['Retailer', 'Wholesaler', 'Manufacturer', 'Distributor'];
+      console.log(`📋 "All" selected: Searching across ${businessTypes.length} business types`);
+      
+      for (let i = 0; i < businessTypes.length; i++) {
+        const businessType = businessTypes[i];
+        const categoryQuery = textQuery.replace(keyword, `${keyword} ${businessType}`);
+        console.log(`🔍 Category ${i + 1}/${businessTypes.length}: "${categoryQuery}"`);
+        const categoryResults = await performSingleSearch(categoryQuery, apiKey, onProgress);
+        allPlaces = allPlaces.concat(categoryResults);
+        console.log(`✅ Category ${i + 1}: ${categoryResults.length} results (${allPlaces.length} total)`);
+        
+        if (i < businessTypes.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      
+      // Also search without category for general results
       await new Promise(resolve => setTimeout(resolve, 1000));
-      const categoryQuery = `${keyword} ${category.toLowerCase()} ${location}`;
-      console.log(`🔍 Query 5: Category variation "${categoryQuery}"`);
-      const search5Results = await performSingleSearch(categoryQuery, apiKey, onProgress);
-      allPlaces = allPlaces.concat(search5Results);
-      console.log(`✅ Query 5: ${search5Results.length} results (${allPlaces.length} total)`);
+      console.log(`🔍 General search: "${textQuery}"`);
+      const generalResults = await performSingleSearch(textQuery, apiKey, onProgress);
+      allPlaces = allPlaces.concat(generalResults);
+      console.log(`✅ General: ${generalResults.length} results (${allPlaces.length} total)`);
+      
+    } else {
+      // Standard multi-query search for specific categories
+      
+      // Search 1: Main query with exact match
+      console.log(`🔍 Query 1: Main search "${textQuery}"`);
+      const search1Results = await performSingleSearch(textQuery, apiKey, onProgress);
+      allPlaces = allPlaces.concat(search1Results);
+      console.log(`✅ Query 1: ${search1Results.length} results`);
+      
+      // Search 2: Add "shops" variation (if not already present)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (!keyword.toLowerCase().includes('shop') && !keyword.toLowerCase().includes('store')) {
+        const shopsQuery = textQuery.replace(keyword, `${keyword} shops`);
+        console.log(`🔍 Query 2: Shops variation "${shopsQuery}"`);
+        const search2Results = await performSingleSearch(shopsQuery, apiKey, onProgress);
+        allPlaces = allPlaces.concat(search2Results);
+        console.log(`✅ Query 2: ${search2Results.length} results (${allPlaces.length} total)`);
+      }
+      
+      // Search 3: Try "near" variation for different results
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const nearQuery = textQuery.includes(' in ') ? textQuery.replace(' in ', ' near ') : `${keyword} near ${location}`;
+      console.log(`🔍 Query 3: Near variation "${nearQuery}"`);
+      const search3Results = await performSingleSearch(nearQuery, apiKey, onProgress);
+      allPlaces = allPlaces.concat(search3Results);
+      console.log(`✅ Query 3: ${search3Results.length} results (${allPlaces.length} total)`);
+      
+      // Search 4: Simple location search without prepositions
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const simpleQuery = `${keyword} ${location}`;
+      console.log(`🔍 Query 4: Simple search "${simpleQuery}"`);
+      const search4Results = await performSingleSearch(simpleQuery, apiKey, onProgress);
+      allPlaces = allPlaces.concat(search4Results);
+      console.log(`✅ Query 4: ${search4Results.length} results (${allPlaces.length} total)`);
+      
+      // Search 5: Add category variation if applicable
+      if (category && category !== 'Custom') {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const categoryQuery = `${keyword} ${category.toLowerCase()} ${location}`;
+        console.log(`🔍 Query 5: Category variation "${categoryQuery}"`);
+        const search5Results = await performSingleSearch(categoryQuery, apiKey, onProgress);
+        allPlaces = allPlaces.concat(search5Results);
+        console.log(`✅ Query 5: ${search5Results.length} results (${allPlaces.length} total)`);
+      }
     }
     
     console.log(`🎯 All queries completed. Collected ${allPlaces.length} total results before deduplication`);
 
-    // Remove duplicates based on place name and address
+    // Remove duplicates based on multiple criteria (name, address, and phone)
     const uniquePlaces = allPlaces.filter((place, index, self) => {
-      const placeIdentifier = `${place.displayName?.text}-${place.formattedAddress}`;
-      return index === self.findIndex(p => 
-        `${p.displayName?.text}-${p.formattedAddress}` === placeIdentifier
-      );
+      // Create a unique identifier using name + address (case-insensitive)
+      const name = (place.displayName?.text || '').toLowerCase().trim();
+      const address = (place.formattedAddress || '').toLowerCase().trim();
+      const phone = (place.nationalPhoneNumber || '').replace(/\s/g, ''); // Remove spaces from phone
+      
+      const placeIdentifier = `${name}|||${address}`;
+      
+      // Find if this is the first occurrence
+      const firstIndex = self.findIndex(p => {
+        const pName = (p.displayName?.text || '').toLowerCase().trim();
+        const pAddress = (p.formattedAddress || '').toLowerCase().trim();
+        const pPhone = (p.nationalPhoneNumber || '').replace(/\s/g, '');
+        const pIdentifier = `${pName}|||${pAddress}`;
+        
+        // Match by name+address OR by phone number (if both have phone)
+        return pIdentifier === placeIdentifier || (phone && pPhone && phone === pPhone);
+      });
+      
+      return index === firstIndex;
     });
 
     const duplicatesRemoved = allPlaces.length - uniquePlaces.length;
