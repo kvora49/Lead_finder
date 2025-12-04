@@ -94,9 +94,6 @@ function App() {
     setLoadingProgress('Searching for businesses...');
 
     try {
-      // Track API calls for credit calculation
-      let callsInThisSearch = 0;
-      
       // Call the API service to search for businesses with pagination
       const response = await searchBusinesses(
         keyword,
@@ -107,14 +104,14 @@ function App() {
         specificArea,
         // Progress callback
         (progress) => {
-          callsInThisSearch = progress.page;
           if (progress.page > 1) {
             setLoadingProgress(`Loading more results... (Page ${progress.page}, ${progress.total} found)`);
           }
         }
       );
 
-      // Update API call counters
+      // Update API call counters with actual API calls made
+      const callsInThisSearch = response.apiCalls || 0;
       const newSessionCalls = apiCallsThisSession + callsInThisSearch;
       const newTotalCalls = totalApiCalls + callsInThisSearch;
       setApiCallsThisSession(newSessionCalls);

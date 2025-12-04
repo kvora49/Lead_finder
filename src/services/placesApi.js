@@ -65,12 +65,10 @@ const performSingleSearch = async (textQuery, apiKey, onProgress = null) => {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-  } while (nextPageToken && pageCount < maxPages);
+    } while (nextPageToken && pageCount < maxPages);
 
-  return allPlaces;
-};
-
-/**
+  return { results: allPlaces, apiCalls: pageCount };
+};/**
  * Searches for businesses using Google Places API (New) with pagination support
  * Uses multiple search strategies to maximize results
  * 
@@ -114,6 +112,7 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
 
   // Perform multiple searches to maximize results (Google limits each query to ~60 results)
   let allPlaces = [];
+  let totalApiCalls = 0; // Track total API requests made
   
   try {
     console.log(`🔍 Starting comprehensive multi-query search for: ${textQuery}`);
@@ -127,9 +126,10 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
         const businessType = businessTypes[i];
         const categoryQuery = textQuery.replace(keyword, `${keyword} ${businessType}`);
         console.log(`🔍 Category ${i + 1}/${businessTypes.length}: "${categoryQuery}"`);
-        const categoryResults = await performSingleSearch(categoryQuery, apiKey, onProgress);
+        const { results: categoryResults, apiCalls } = await performSingleSearch(categoryQuery, apiKey, onProgress);
+        totalApiCalls += apiCalls;
         allPlaces = allPlaces.concat(categoryResults);
-        console.log(`✅ Category ${i + 1}: ${categoryResults.length} results (${allPlaces.length} total)`);
+        console.log(`✅ Category ${i + 1}: ${categoryResults.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
         
         if (i < businessTypes.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 1000));
@@ -139,53 +139,59 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
       // Also search without category for general results
       await new Promise(resolve => setTimeout(resolve, 1000));
       console.log(`🔍 General search: "${textQuery}"`);
-      const generalResults = await performSingleSearch(textQuery, apiKey, onProgress);
+      const { results: generalResults, apiCalls: generalApiCalls } = await performSingleSearch(textQuery, apiKey, onProgress);
+      totalApiCalls += generalApiCalls;
       allPlaces = allPlaces.concat(generalResults);
-      console.log(`✅ General: ${generalResults.length} results (${allPlaces.length} total)`);
+      console.log(`✅ General: ${generalResults.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
       
     } else {
       // Standard multi-query search for specific categories
       
       // Search 1: Main query with exact match
       console.log(`🔍 Query 1: Main search "${textQuery}"`);
-      const search1Results = await performSingleSearch(textQuery, apiKey, onProgress);
+      const { results: search1Results, apiCalls: apiCalls1 } = await performSingleSearch(textQuery, apiKey, onProgress);
+      totalApiCalls += apiCalls1;
       allPlaces = allPlaces.concat(search1Results);
-      console.log(`✅ Query 1: ${search1Results.length} results`);
+      console.log(`✅ Query 1: ${search1Results.length} results (${totalApiCalls} API calls)`);
       
       // Search 2: Add "shops" variation (if not already present)
       await new Promise(resolve => setTimeout(resolve, 1000));
       if (!keyword.toLowerCase().includes('shop') && !keyword.toLowerCase().includes('store')) {
         const shopsQuery = textQuery.replace(keyword, `${keyword} shops`);
         console.log(`🔍 Query 2: Shops variation "${shopsQuery}"`);
-        const search2Results = await performSingleSearch(shopsQuery, apiKey, onProgress);
+        const { results: search2Results, apiCalls: apiCalls2 } = await performSingleSearch(shopsQuery, apiKey, onProgress);
+        totalApiCalls += apiCalls2;
         allPlaces = allPlaces.concat(search2Results);
-        console.log(`✅ Query 2: ${search2Results.length} results (${allPlaces.length} total)`);
+        console.log(`✅ Query 2: ${search2Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
       }
       
       // Search 3: Try "near" variation for different results
       await new Promise(resolve => setTimeout(resolve, 1000));
       const nearQuery = textQuery.includes(' in ') ? textQuery.replace(' in ', ' near ') : `${keyword} near ${location}`;
       console.log(`🔍 Query 3: Near variation "${nearQuery}"`);
-      const search3Results = await performSingleSearch(nearQuery, apiKey, onProgress);
+      const { results: search3Results, apiCalls: apiCalls3 } = await performSingleSearch(nearQuery, apiKey, onProgress);
+      totalApiCalls += apiCalls3;
       allPlaces = allPlaces.concat(search3Results);
-      console.log(`✅ Query 3: ${search3Results.length} results (${allPlaces.length} total)`);
+      console.log(`✅ Query 3: ${search3Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
       
       // Search 4: Simple location search without prepositions
       await new Promise(resolve => setTimeout(resolve, 1000));
       const simpleQuery = `${keyword} ${location}`;
       console.log(`🔍 Query 4: Simple search "${simpleQuery}"`);
-      const search4Results = await performSingleSearch(simpleQuery, apiKey, onProgress);
+      const { results: search4Results, apiCalls: apiCalls4 } = await performSingleSearch(simpleQuery, apiKey, onProgress);
+      totalApiCalls += apiCalls4;
       allPlaces = allPlaces.concat(search4Results);
-      console.log(`✅ Query 4: ${search4Results.length} results (${allPlaces.length} total)`);
+      console.log(`✅ Query 4: ${search4Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
       
       // Search 5: Add category variation if applicable
       if (category && category !== 'Custom') {
         await new Promise(resolve => setTimeout(resolve, 1000));
         const categoryQuery = `${keyword} ${category.toLowerCase()} ${location}`;
         console.log(`🔍 Query 5: Category variation "${categoryQuery}"`);
-        const search5Results = await performSingleSearch(categoryQuery, apiKey, onProgress);
+        const { results: search5Results, apiCalls: apiCalls5 } = await performSingleSearch(categoryQuery, apiKey, onProgress);
+        totalApiCalls += apiCalls5;
         allPlaces = allPlaces.concat(search5Results);
-        console.log(`✅ Query 5: ${search5Results.length} results (${allPlaces.length} total)`);
+        console.log(`✅ Query 5: ${search5Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
       }
     }
     
@@ -216,10 +222,12 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
 
     const duplicatesRemoved = allPlaces.length - uniquePlaces.length;
     console.log(`🔄 Removed ${duplicatesRemoved} duplicates. Final unique results: ${uniquePlaces.length}`);
+    console.log(`💰 Total API calls made in this search: ${totalApiCalls}`);
 
-    // Return all collected unique places
+    // Return all collected unique places with API call count
     return { 
       places: uniquePlaces,
+      apiCalls: totalApiCalls,
       note: uniquePlaces.length < 100 ? 
         'Google Places API has limitations and may not return all businesses. For comprehensive results, try searching smaller sub-areas.' : 
         undefined
