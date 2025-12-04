@@ -26,7 +26,40 @@ function App() {
   const [requirePhone, setRequirePhone] = useState(false); // Filter to show only businesses with phone numbers
   const [leads, setLeads] = useState([]); // Array of business leads from API
   const [loading, setLoading] = useState(false); // Loading state during API call
+  const [loadingProgress, setLoadingProgress] = useState(''); // Loading progress message
   const [error, setError] = useState(null); // Error message if API call fails
+  
+  // Credit tracking states with monthly reset
+  const [apiCallsThisSession, setApiCallsThisSession] = useState(0); // API calls in current session
+  const [totalApiCalls, setTotalApiCalls] = useState(() => {
+    // Get current month/year
+    const now = new Date();
+    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    
+    // Load saved data
+    const savedMonth = localStorage.getItem('apiCallsMonth');
+    const savedCalls = localStorage.getItem('totalApiCalls');
+    
+    // If it's a new month, reset the counter
+    if (savedMonth !== currentMonth) {
+      localStorage.setItem('apiCallsMonth', currentMonth);
+      localStorage.setItem('totalApiCalls', '0');
+      return 0;
+    }
+    
+    return savedCalls ? parseInt(savedCalls, 10) : 0;
+  });
+  
+  const [currentMonth] = useState(() => {
+    const now = new Date();
+    return now.toLocaleString('default', { month: 'long', year: 'numeric' });
+  });
+  
+  const [nextResetDate] = useState(() => {
+    const now = new Date();
+    const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    return nextMonth.toLocaleDateString('default', { month: 'long', day: 'numeric', year: 'numeric' });
+  });
 
   // Available business categories for search
   const categories = [
@@ -58,17 +91,40 @@ function App() {
     // Reset error and set loading state
     setError(null);
     setLoading(true);
+    setLoadingProgress('Searching for businesses...');
 
     try {
-      // Call the API service to search for businesses
+      // Track API calls for credit calculation
+      let callsInThisSearch = 0;
+      
+      // Call the API service to search for businesses with pagination
       const response = await searchBusinesses(
         keyword,
         selectedCategory,
         location,
         GOOGLE_API_KEY,
         searchScope,
-        specificArea
+        specificArea,
+        // Progress callback
+        (progress) => {
+          callsInThisSearch = progress.page;
+          if (progress.page > 1) {
+            setLoadingProgress(`Loading more results... (Page ${progress.page}, ${progress.total} found)`);
+          }
+        }
       );
+
+      // Update API call counters
+      const newSessionCalls = apiCallsThisSession + callsInThisSearch;
+      const newTotalCalls = totalApiCalls + callsInThisSearch;
+      setApiCallsThisSession(newSessionCalls);
+      setTotalApiCalls(newTotalCalls);
+      
+      // Save with current month marker
+      const now = new Date();
+      const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+      localStorage.setItem('apiCallsMonth', currentMonth);
+      localStorage.setItem('totalApiCalls', newTotalCalls.toString());
 
       // Extract places from response
       let places = response.places || [];
@@ -97,6 +153,7 @@ function App() {
     } finally {
       // Reset loading state
       setLoading(false);
+      setLoadingProgress('');
     }
   };
 
@@ -271,6 +328,90 @@ function App() {
           </p>
         </div>
       </header>
+
+      {/* Credit Usage Tracker */}
+      <div className="bg-gradient-to-r from-green-50 to-blue-50 border-b border-gray-200">
+        <div className="container mx-auto px-4 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            {/* Credit Summary */}
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+                <div>
+                  <span className="text-sm font-semibold text-gray-700 block">API Credits Tracker</span>
+                  <span className="text-xs text-gray-500">{currentMonth}</span>
+                </div>
+              </div>
+              
+              <div className="h-8 w-px bg-gray-300"></div>
+              
+              {/* This Session */}
+              <div>
+                <p className="text-xs text-gray-500">This Session</p>
+                <p className="text-lg font-bold text-blue-600">{apiCallsThisSession} calls</p>
+              </div>
+              
+              {/* Total Used */}
+              <div>
+                <p className="text-xs text-gray-500">Total Used</p>
+                <p className="text-lg font-bold text-purple-600">{totalApiCalls} calls</p>
+              </div>
+              
+              {/* Cost Calculator */}
+              <div>
+                <p className="text-xs text-gray-500">Estimated Cost</p>
+                <p className="text-lg font-bold text-orange-600">${(totalApiCalls * 0.032).toFixed(2)}</p>
+              </div>
+              
+              {/* Free Credit Remaining */}
+              <div>
+                <p className="text-xs text-gray-500">Free Credit Left</p>
+                <p className="text-lg font-bold text-green-600">
+                  ${Math.max(0, 200 - (totalApiCalls * 0.032)).toFixed(2)}
+                </p>
+              </div>
+            </div>
+            
+            {/* Progress Bar */}
+            <div className="flex-1 min-w-[200px] max-w-md">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-gray-600">Free Tier Usage</span>
+                <span className="text-xs font-semibold text-gray-700">
+                  {Math.min(100, ((totalApiCalls * 0.032) / 200 * 100)).toFixed(1)}%
+                </span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2.5">
+                <div 
+                  className={`h-2.5 rounded-full transition-all duration-500 ${
+                    (totalApiCalls * 0.032) > 200 ? 'bg-red-500' :
+                    (totalApiCalls * 0.032) > 150 ? 'bg-orange-500' :
+                    (totalApiCalls * 0.032) > 100 ? 'bg-yellow-500' :
+                    'bg-green-500'
+                  }`}
+                  style={{ width: `${Math.min(100, ((totalApiCalls * 0.032) / 200 * 100))}%` }}
+                ></div>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                💡 $200 free credit/month • Resets on {nextResetDate}
+              </p>
+            </div>
+            
+            {/* Reset Button */}
+            <button
+              onClick={() => {
+                if (window.confirm('Reset all API call tracking? This will clear session and total counts.')) {
+                  setApiCallsThisSession(0);
+                  setTotalApiCalls(0);
+                  localStorage.removeItem('totalApiCalls');
+                }
+              }}
+              className="text-xs px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition-colors"
+            >
+              Reset Tracker
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* Main Content Container */}
       <main className="container mx-auto px-4 py-8">
@@ -449,6 +590,13 @@ function App() {
               </>
             )}
           </button>
+
+          {/* Loading Progress Message */}
+          {loading && loadingProgress && (
+            <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <p className="text-blue-700 text-sm font-medium">{loadingProgress}</p>
+            </div>
+          )}
 
           {/* Error Message Display */}
           {error && (
