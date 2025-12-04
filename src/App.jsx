@@ -128,19 +128,25 @@ function App() {
 
       // Extract places from response
       let places = response.places || [];
+      console.log(`🎯 API returned ${places.length} total unique businesses after pagination`);
 
       // Filter by exact address matching for neighborhood searches
       if (searchScope === 'neighborhood' && specificArea.trim()) {
+        const beforeFilter = places.length;
         places = filterByAddress(places, specificArea);
+        console.log(`📍 Address filter: ${beforeFilter} → ${places.length} (removed ${beforeFilter - places.length} not matching "${specificArea}")`);
       }
 
       // Filter by phone number if required
       if (requirePhone) {
+        const beforeFilter = places.length;
         places = filterByPhoneNumber(places);
+        console.log(`📞 Phone filter: ${beforeFilter} → ${places.length} (removed ${beforeFilter - places.length} without phone)`);
       }
 
       // Update leads state with results
       setLeads(places);
+      console.log(`✅ Final results shown to user: ${places.length} businesses`);
 
       // Show message if no results found
       if (places.length === 0) {
@@ -338,7 +344,7 @@ function App() {
               <div className="flex items-center gap-2">
                 <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
                 <div>
-                  <span className="text-sm font-semibold text-gray-700 block">API Credits Tracker</span>
+                  <span className="text-sm font-semibold text-gray-700 block">Credits Tracker</span>
                   <span className="text-xs text-gray-500">{currentMonth}</span>
                 </div>
               </div>

@@ -4,8 +4,75 @@
  */
 
 /**
+ * Performs a single search query with pagination
+ * 
+ * @param {string} textQuery - The complete search query text
+ * @param {string} apiKey - Google Places API key
+ * @param {Function} onProgress - Optional callback to report progress
+ * @returns {Promise<Array>} - Array of places from this search
+ */
+const performSingleSearch = async (textQuery, apiKey, onProgress = null) => {
+  const endpoint = 'https://places.googleapis.com/v1/places:searchText';
+  
+  let allPlaces = [];
+  let nextPageToken = null;
+  let pageCount = 0;
+  const maxPages = 10;
+
+  do {
+    pageCount++;
+    
+    const requestBody = {
+      textQuery: textQuery,
+      maxResultCount: 20,
+      ...(nextPageToken && { pageToken: nextPageToken })
+    };
+
+    if (onProgress) {
+      onProgress({ query: textQuery, page: pageCount, total: allPlaces.length });
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.businessStatus,nextPageToken'
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`API Error: ${response.status} - ${errorData.error?.message || response.statusText}`);
+    }
+
+    const data = await response.json();
+    
+    console.log(`📄 Query "${textQuery.substring(0, 30)}..." - Page ${pageCount}: ${data.places?.length || 0} places. NextPageToken: ${data.nextPageToken ? 'YES ✅' : 'NO ❌'}`);
+    
+    if (data.places && data.places.length > 0) {
+      allPlaces = allPlaces.concat(data.places);
+    }
+    
+    nextPageToken = data.nextPageToken || null;
+    
+    if (!nextPageToken) {
+      console.log(`🏁 Query completed: ${pageCount} page(s), ${allPlaces.length} results`);
+    }
+
+    if (nextPageToken && pageCount < maxPages) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+  } while (nextPageToken && pageCount < maxPages);
+
+  return allPlaces;
+};
+
+/**
  * Searches for businesses using Google Places API (New) with pagination support
- * Fetches ALL available results by making multiple requests if needed
+ * Uses multiple search strategies to maximize results
  * 
  * @param {string} keyword - The search keyword (e.g., "Kurti", "Electronics")
  * @param {string} category - The business category (e.g., "Wholesaler", "Retailer", "Custom")
@@ -45,71 +112,74 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
     textQuery += ` in ${location}`;
   }
 
-  // Collect all places from multiple pages
+  // Perform multiple searches to maximize results (Google limits each query to ~60 results)
   let allPlaces = [];
-  let nextPageToken = null;
-  let pageCount = 0;
-  const maxPages = 10; // Fetch up to 10 pages (200 results max) to get comprehensive results
-
+  
   try {
-    do {
-      pageCount++;
-      
-      // Request body for the API call
-      const requestBody = {
-        textQuery: textQuery,
-        maxResultCount: 20, // Always fetch 20 per page for consistency
-        // Include pageToken for subsequent requests
-        ...(nextPageToken && { pageToken: nextPageToken })
-      };
+    console.log(`🔍 Starting comprehensive multi-query search for: ${textQuery}`);
+    
+    // Search 1: Main query with exact match
+    console.log(`🔍 Query 1: Main search "${textQuery}"`);
+    const search1Results = await performSingleSearch(textQuery, apiKey, onProgress);
+    allPlaces = allPlaces.concat(search1Results);
+    console.log(`✅ Query 1: ${search1Results.length} results`);
+    
+    // Search 2: Add "shops" variation (if not already present)
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!keyword.toLowerCase().includes('shop') && !keyword.toLowerCase().includes('store')) {
+      const shopsQuery = textQuery.replace(keyword, `${keyword} shops`);
+      console.log(`🔍 Query 2: Shops variation "${shopsQuery}"`);
+      const search2Results = await performSingleSearch(shopsQuery, apiKey, onProgress);
+      allPlaces = allPlaces.concat(search2Results);
+      console.log(`✅ Query 2: ${search2Results.length} results (${allPlaces.length} total)`);
+    }
+    
+    // Search 3: Try "near" variation for different results
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const nearQuery = textQuery.includes(' in ') ? textQuery.replace(' in ', ' near ') : `${keyword} near ${location}`;
+    console.log(`🔍 Query 3: Near variation "${nearQuery}"`);
+    const search3Results = await performSingleSearch(nearQuery, apiKey, onProgress);
+    allPlaces = allPlaces.concat(search3Results);
+    console.log(`✅ Query 3: ${search3Results.length} results (${allPlaces.length} total)`);
+    
+    // Search 4: Simple location search without prepositions
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const simpleQuery = `${keyword} ${location}`;
+    console.log(`🔍 Query 4: Simple search "${simpleQuery}"`);
+    const search4Results = await performSingleSearch(simpleQuery, apiKey, onProgress);
+    allPlaces = allPlaces.concat(search4Results);
+    console.log(`✅ Query 4: ${search4Results.length} results (${allPlaces.length} total)`);
+    
+    // Search 5: Add category variation if applicable
+    if (category && category !== 'Custom' && category !== 'All') {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const categoryQuery = `${keyword} ${category.toLowerCase()} ${location}`;
+      console.log(`🔍 Query 5: Category variation "${categoryQuery}"`);
+      const search5Results = await performSingleSearch(categoryQuery, apiKey, onProgress);
+      allPlaces = allPlaces.concat(search5Results);
+      console.log(`✅ Query 5: ${search5Results.length} results (${allPlaces.length} total)`);
+    }
+    
+    console.log(`🎯 All queries completed. Collected ${allPlaces.length} total results before deduplication`);
 
-      // Report progress if callback provided
-      if (onProgress) {
-        onProgress({ page: pageCount, total: allPlaces.length });
-      }
+    // Remove duplicates based on place name and address
+    const uniquePlaces = allPlaces.filter((place, index, self) => {
+      const placeIdentifier = `${place.displayName?.text}-${place.formattedAddress}`;
+      return index === self.findIndex(p => 
+        `${p.displayName?.text}-${p.formattedAddress}` === placeIdentifier
+      );
+    });
 
-      // Make the POST request to Google Places API
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          // API Key authentication
-          'X-Goog-Api-Key': apiKey,
-          // Field mask specifies which fields to return in the response
-          // This helps reduce response size and improve performance
-          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.businessStatus,nextPageToken'
-        },
-        body: JSON.stringify(requestBody)
-      });
+    const duplicatesRemoved = allPlaces.length - uniquePlaces.length;
+    console.log(`🔄 Removed ${duplicatesRemoved} duplicates. Final unique results: ${uniquePlaces.length}`);
 
-      // Check if the response is successful
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(
-          `API Error: ${response.status} - ${errorData.error?.message || response.statusText}`
-        );
-      }
-
-      // Parse the JSON response
-      const data = await response.json();
-      
-      // Add places from this page to the collection
-      if (data.places && data.places.length > 0) {
-        allPlaces = allPlaces.concat(data.places);
-      }
-      
-      // Get next page token if available
-      nextPageToken = data.nextPageToken || null;
-
-      // Small delay between requests to avoid rate limiting
-      if (nextPageToken && pageCount < maxPages) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-
-    } while (nextPageToken && pageCount < maxPages);
-
-    // Return all collected places
-    return { places: allPlaces };
+    // Return all collected unique places
+    return { 
+      places: uniquePlaces,
+      note: uniquePlaces.length < 100 ? 
+        'Google Places API has limitations and may not return all businesses. For comprehensive results, try searching smaller sub-areas.' : 
+        undefined
+    };
 
   } catch (error) {
     // Handle network errors or other exceptions
