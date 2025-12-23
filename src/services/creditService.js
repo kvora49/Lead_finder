@@ -1,5 +1,5 @@
 import { db } from '../firebase';
-import { doc, getDoc, setDoc, updateDoc, increment } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, increment, onSnapshot } from 'firebase/firestore';
 
 /**
  * Credit Service - Manages user credits synced across all devices via Firestore
@@ -114,9 +114,6 @@ export const addCredits = async (userId, amount = 1) => {
  */
 export const subscribeToCredits = (userId, callback) => {
   const userDocRef = doc(db, CREDITS_COLLECTION, userId);
-
-  // Use Firestore's onSnapshot for real-time updates
-  const { onSnapshot } = require('firebase/firestore');
   
   const unsubscribe = onSnapshot(userDocRef, (doc) => {
     if (doc.exists()) {
