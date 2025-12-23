@@ -48,31 +48,56 @@ const Register = () => {
     setLoading(true);
 
     try {
-      // Send verification email via SMTP
-      const response = await fetch('http://localhost:3001/api/send-verification', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: formData.email,
-          name: formData.name,
-        }),
-      });
+      // Check if backend is available (localhost development)
+      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+      const isBackendAvailable = window.location.hostname === 'localhost';
 
-      const data = await response.json();
+      if (isBackendAvailable) {
+        // Use SMTP backend for email verification
+        try {
+          const response = await fetch(`${backendUrl}/api/send-verification`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              email: formData.email,
+              name: formData.name,
+            }),
+          });
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to send verification email');
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || 'Failed to send verification email');
+          }
+
+          // Store form data temporarily
+          setTempUserData(formData);
+          
+          // Move to verification step
+          setStep(2);
+          return;
+        } catch (backendError) {
+          console.warn('Backend not available, falling back to direct registration:', backendError);
+        }
       }
 
-      // Store form data temporarily
-      setTempUserData(formData);
+      // Fallback: Direct Firebase registration (for production/Cloudflare)
+      const userCredential = await createUserWithEmailAndPassword(
+        auth,
+        formData.email,
+        formData.password
+      );
       
-      // Move to verification step
-      setStep(2);
+      // Update user profile with name
+      await updateProfile(userCredential.user, {
+        displayName: formData.name
+      });
+
+      navigate('/');
     } catch (error) {
-      setError(error.message);
+      setError(error.message.replace('Firebase: ', ''));
     } finally {
       setLoading(false);
     }
