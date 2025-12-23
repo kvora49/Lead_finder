@@ -7,16 +7,19 @@
  */
 
 import { useState } from 'react';
-import { Search, Download, Loader2 } from 'lucide-react';
+import { Search, Download, Loader2, LogOut, User } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import LeadCard from './components/LeadCard';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress } from './services/placesApi';
 import { GOOGLE_API_KEY } from './config';
+import { useAuth } from './contexts/AuthContext';
 
 /**
  * Main App Component
  */
 function App() {
+  const { currentUser, signOut } = useAuth();
+  
   // State Management
   const [keyword, setKeyword] = useState(''); // Search keyword (e.g., "Kurti", "Electronics")
   const [location, setLocation] = useState(''); // Location (e.g., "Mumbai", "New York")
@@ -94,6 +97,9 @@ function App() {
     setLoadingProgress('Searching for businesses...');
 
     try {
+      // Track API calls in real-time
+      let callsInThisSearch = 0;
+      
       // Call the API service to search for businesses with pagination
       const response = await searchBusinesses(
         keyword,
@@ -107,11 +113,20 @@ function App() {
           if (progress.page > 1) {
             setLoadingProgress(`Loading more results... (Page ${progress.page}, ${progress.total} found)`);
           }
+        },
+        // API call callback - fired immediately after each request
+        () => {
+          callsInThisSearch++;
+          const newSessionCalls = apiCallsThisSession + callsInThisSearch;
+          const newTotalCalls = totalApiCalls + callsInThisSearch;
+          setApiCallsThisSession(newSessionCalls);
+          setTotalApiCalls(newTotalCalls);
+          // Save to localStorage immediately
+          localStorage.setItem('apiCallsTotal', newTotalCalls);
         }
       );
 
-      // Update API call counters with actual API calls made
-      const callsInThisSearch = response.apiCalls || 0;
+      // Final save with current month marker
       const newSessionCalls = apiCallsThisSession + callsInThisSearch;
       const newTotalCalls = totalApiCalls + callsInThisSearch;
       setApiCallsThisSession(newSessionCalls);
@@ -323,12 +338,38 @@ function App() {
       {/* Header Section */}
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="container mx-auto px-4 py-6">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">
-            Universal Lead Finder
-          </h1>
-          <p className="text-gray-600 text-lg">
-            Find Wholesalers, Retailers, and Services across the globe
-          </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-4xl font-bold text-gray-900 mb-2">
+                Universal Lead Finder
+              </h1>
+              <p className="text-gray-600 text-lg">
+                Find Wholesalers, Retailers, and Services across the globe
+              </p>
+            </div>
+            
+            {/* User Profile & Logout */}
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 rounded-lg">
+                <User className="w-5 h-5 text-gray-600" />
+                <div className="text-sm">
+                  <p className="font-semibold text-gray-800">
+                    {currentUser?.displayName || 'User'}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {currentUser?.email}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={signOut}
+                className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                <span className="font-medium">Logout</span>
+              </button>
+            </div>
+          </div>
         </div>
       </header>
 
