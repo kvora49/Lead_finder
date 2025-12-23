@@ -6,13 +6,15 @@
  * and search by keyword and location.
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Search, Download, Loader2, LogOut, User } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import LeadCard from './components/LeadCard';
+import CreditSyncStatus from './components/CreditSyncStatus';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress } from './services/placesApi';
 import { GOOGLE_API_KEY } from './config';
 import { useAuth } from './contexts/AuthContext';
+import { subscribeToCredits, addCredits, getCreditStats } from './services/creditService';
 
 /**
  * Main App Component
@@ -32,26 +34,9 @@ function App() {
   const [loadingProgress, setLoadingProgress] = useState(''); // Loading progress message
   const [error, setError] = useState(null); // Error message if API call fails
   
-  // Credit tracking states with monthly reset
+  // Credit tracking states - synced with Firestore
   const [apiCallsThisSession, setApiCallsThisSession] = useState(0); // API calls in current session
-  const [totalApiCalls, setTotalApiCalls] = useState(() => {
-    // Get current month/year
-    const now = new Date();
-    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    
-    // Load saved data
-    const savedMonth = localStorage.getItem('apiCallsMonth');
-    const savedCalls = localStorage.getItem('totalApiCalls');
-    
-    // If it's a new month, reset the counter
-    if (savedMonth !== currentMonth) {
-      localStorage.setItem('apiCallsMonth', currentMonth);
-      localStorage.setItem('totalApiCalls', '0');
-      return 0;
-    }
-    
-    return savedCalls ? parseInt(savedCalls, 10) : 0;
-  });
+  const [totalApiCalls, setTotalApiCalls] = useState(0); // Total API calls from Firestore
   
   const [currentMonth] = useState(() => {
     const now = new Date();
@@ -63,6 +48,17 @@ function App() {
     const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
     return nextMonth.toLocaleDateString('default', { month: 'long', day: 'numeric', year: 'numeric' });
   });
+
+  // Subscribe to credit updates from Firestore
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const unsubscribe = subscribeToCredits(currentUser.uid, (credits) => {
+      setTotalApiCalls(credits);
+    });
+
+    return () => unsubscribe();
+  }, [currentUser]);
 
   // Available business categories for search
   const categories = [
@@ -97,7 +93,7 @@ function App() {
     setLoadingProgress('Searching for businesses...');
 
     try {
-      // Track API calls in real-time
+      // Track API calls - will be synced to Firestore
       let callsInThisSearch = 0;
       
       // Call the API service to search for businesses with pagination
@@ -115,28 +111,22 @@ function App() {
           }
         },
         // API call callback - fired immediately after each request
-        () => {
+        async () => {
           callsInThisSearch++;
           const newSessionCalls = apiCallsThisSession + callsInThisSearch;
-          const newTotalCalls = totalApiCalls + callsInThisSearch;
           setApiCallsThisSession(newSessionCalls);
-          setTotalApiCalls(newTotalCalls);
-          // Save to localStorage immediately
-          localStorage.setItem('apiCallsTotal', newTotalCalls);
+          
+          // Update Firestore immediately (syncs across devices)
+          try {
+            await addCredits(currentUser.uid, 1);
+          } catch (error) {
+            console.error('Error updating credits:', error);
+          }
         }
       );
 
-      // Final save with current month marker
-      const newSessionCalls = apiCallsThisSession + callsInThisSearch;
-      const newTotalCalls = totalApiCalls + callsInThisSearch;
-      setApiCallsThisSession(newSessionCalls);
-      setTotalApiCalls(newTotalCalls);
-      
-      // Save with current month marker
-      const now = new Date();
-      const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-      localStorage.setItem('apiCallsMonth', currentMonth);
-      localStorage.setItem('totalApiCalls', newTotalCalls.toString());
+      // Update session calls
+      setApiCallsThisSession(apiCallsThisSession + callsInThisSearch);
 
       // Extract places from response
       let places = response.places || [];
@@ -399,6 +389,7 @@ function App() {
               <div>
                 <p className="text-xs text-gray-500">Total Used</p>
                 <p className="text-lg font-bold text-purple-600">{totalApiCalls} calls</p>
+                <CreditSyncStatus isOnline={true} />
               </div>
               
               {/* Cost Calculator */}
@@ -442,11 +433,12 @@ function App() {
             
             {/* Reset Button */}
             <button
-              onClick={() => {
-                if (window.confirm('Reset all API call tracking? This will clear session and total counts.')) {
+              onClick={async () => {
+                if (window.confirm('Reset all API call tracking? This will clear session and total counts across all devices.')) {
                   setApiCallsThisSession(0);
-                  setTotalApiCalls(0);
-                  localStorage.removeItem('totalApiCalls');
+                  // Reset in Firestore (syncs across all devices)
+                  const { resetUserCredits } = await import('./services/creditService');
+                  await resetUserCredits(currentUser.uid);
                 }
               }}
               className="text-xs px-3 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition-colors"

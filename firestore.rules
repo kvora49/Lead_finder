@@ -1,0 +1,30 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // User Credits Collection
+    match /userCredits/{userId} {
+      // Users can only read their own credits
+      allow read: if request.auth != null && request.auth.uid == userId;
+      
+      // Users can update their own credits
+      allow write: if request.auth != null && request.auth.uid == userId;
+      
+      // Ensure data integrity - users can't set negative credits
+      allow update: if request.auth != null 
+                    && request.auth.uid == userId
+                    && request.resource.data.totalApiCalls >= 0;
+    }
+    
+    // User Profiles Collection (for future use)
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Deny all other access by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
