@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { signInWithEmailAndPassword, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
+import { signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider } from 'firebase/auth';
 import { auth } from '../firebase';
 import { Link, useNavigate } from 'react-router-dom';
 import { Search, Mail, Lock, AlertCircle, Loader2, Eye, EyeOff } from 'lucide-react';
+import { useEffect } from 'react';
 
 const Login = () => {
   const [email, setEmail] = useState('');
@@ -11,6 +12,23 @@ const Login = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+
+  // Check for redirect result on component mount
+  useEffect(() => {
+    const checkRedirectResult = async () => {
+      try {
+        const result = await getRedirectResult(auth);
+        if (result) {
+          navigate('/');
+        }
+      } catch (error) {
+        if (error.code !== 'auth/popup-closed-by-user') {
+          setError(error.message.replace('Firebase: ', ''));
+        }
+      }
+    };
+    checkRedirectResult();
+  }, [navigate]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -52,12 +70,24 @@ const Login = () => {
     const provider = new GoogleAuthProvider();
 
     try {
+      // Try popup method first
       await signInWithPopup(auth, provider);
       navigate('/');
     } catch (error) {
-      setError(error.message.replace('Firebase: ', ''));
-    } finally {
-      setLoading(false);
+      // If popup is blocked or closed, use redirect method
+      if (error.code === 'auth/popup-blocked' || error.code === 'auth/popup-closed-by-user' || error.code === 'auth/cancelled-popup-request') {
+        try {
+          // Use redirect method as fallback
+          await signInWithRedirect(auth, provider);
+          // Navigation will happen in useEffect after redirect completes
+        } catch (redirectError) {
+          setError(redirectError.message.replace('Firebase: ', ''));
+          setLoading(false);
+        }
+      } else {
+        setError(error.message.replace('Firebase: ', ''));
+        setLoading(false);
+      }
     }
   };
 
