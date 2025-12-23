@@ -14,7 +14,7 @@ import CreditSyncStatus from './components/CreditSyncStatus';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress } from './services/placesApi';
 import { GOOGLE_API_KEY } from './config';
 import { useAuth } from './contexts/AuthContext';
-import { subscribeToCredits, addCredits, getCreditStats } from './services/creditService';
+import { subscribeToCredits, addCredits, getCreditStats, initializeUserCredits } from './services/creditService';
 
 /**
  * Main App Component
@@ -49,10 +49,18 @@ function App() {
     return nextMonth.toLocaleDateString('default', { month: 'long', day: 'numeric', year: 'numeric' });
   });
 
-  // Subscribe to credit updates from Firestore
+  // Initialize and subscribe to credit updates from Firestore
   useEffect(() => {
     if (!currentUser) return;
 
+    // Initialize credits first to ensure document exists
+    initializeUserCredits(currentUser.uid).then((data) => {
+      setTotalApiCalls(data.totalApiCalls || 0);
+    }).catch((error) => {
+      console.error('Error initializing credits:', error);
+    });
+
+    // Subscribe to real-time updates
     const unsubscribe = subscribeToCredits(currentUser.uid, (credits) => {
       setTotalApiCalls(credits);
     });
