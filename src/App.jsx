@@ -21,7 +21,7 @@ import { subscribeToCredits, addCredits, getCreditStats, initializeUserCredits }
  */
 function App() {
   const { currentUser, signOut } = useAuth();
-  
+
   // State Management
   const [keyword, setKeyword] = useState(''); // Search keyword (e.g., "Kurti", "Electronics")
   const [location, setLocation] = useState(''); // Location (e.g., "Mumbai", "New York")
@@ -33,16 +33,16 @@ function App() {
   const [loading, setLoading] = useState(false); // Loading state during API call
   const [loadingProgress, setLoadingProgress] = useState(''); // Loading progress message
   const [error, setError] = useState(null); // Error message if API call fails
-  
+
   // Credit tracking states - synced with Firestore
   const [apiCallsThisSession, setApiCallsThisSession] = useState(0); // API calls in current session
   const [totalApiCalls, setTotalApiCalls] = useState(0); // Total API calls from Firestore
-  
+
   const [currentMonth] = useState(() => {
     const now = new Date();
     return now.toLocaleString('default', { month: 'long', year: 'numeric' });
   });
-  
+
   const [nextResetDate] = useState(() => {
     const now = new Date();
     const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
@@ -54,14 +54,18 @@ function App() {
     if (!currentUser) return;
 
     // Initialize credits first to ensure document exists
+    console.log('🔧 DEBUG: Initializing global credits...');
     initializeUserCredits(currentUser.uid).then((data) => {
+      console.log('🔧 DEBUG: Credits initialized:', data);
       setTotalApiCalls(data.totalApiCalls || 0);
     }).catch((error) => {
-      console.error('Error initializing credits:', error);
+      console.error('❌ ERROR initializing credits:', error);
     });
 
     // Subscribe to real-time updates
+    console.log('🔧 DEBUG: Subscribing to credit updates...');
     const unsubscribe = subscribeToCredits(currentUser.uid, (credits) => {
+      console.log('🔧 DEBUG: Credit update received:', credits);
       setTotalApiCalls(credits);
     });
 
@@ -95,57 +99,134 @@ function App() {
       return;
     }
 
+    // Credit limit check - prevent exceeding $200 free tier
+    const currentCost = totalApiCalls * 0.032;
+    const estimatedSearchCost = 20 * 0.032; // Estimate ~20 API calls per search
+    const projectedCost = currentCost + estimatedSearchCost;
+
+    const CREDIT_LIMIT = 200; // $200 free tier
+    const WARNING_THRESHOLD = 180; // Warn at $180
+    const HARD_LIMIT = 195; // Block at $195 to leave buffer
+
+    // Hard limit - block search
+    if (currentCost >= HARD_LIMIT) {
+      setError(`⛔ Credit limit reached! You've used $${currentCost.toFixed(2)} of $${CREDIT_LIMIT} free credit. Please wait until next month (resets on ${nextResetDate}) or contact support.`);
+      return;
+    }
+
+    // Projected limit - block if this search would exceed limit
+    if (projectedCost > HARD_LIMIT) {
+      setError(`⚠️ Insufficient credits! This search needs ~$${estimatedSearchCost.toFixed(2)}, but you only have $${(HARD_LIMIT - currentCost).toFixed(2)} remaining. Current usage: $${currentCost.toFixed(2)}/${CREDIT_LIMIT}.`);
+      return;
+    }
+
+    // Warning threshold - show warning but allow search
+    if (currentCost >= WARNING_THRESHOLD && currentCost < HARD_LIMIT) {
+      console.warn(`⚠️ Warning: Approaching credit limit. Used $${currentCost.toFixed(2)} of $${CREDIT_LIMIT} free credit.`);
+    }
+
+    // Parse multiple keywords and locations
+    const keywords = keyword.split(',').map(k => k.trim()).filter(k => k.length > 0);
+    const locations = location.split(',').map(l => l.trim()).filter(l => l.length > 0);
+
+    const totalCombinations = keywords.length * locations.length;
+    console.log(`🔍 Multi-search: ${keywords.length} keyword(s) × ${locations.length} location(s) = ${totalCombinations} combination(s)`);
+
     // Reset error and set loading state
     setError(null);
     setLoading(true);
-    setLoadingProgress('Searching for businesses...');
+    setLoadingProgress(`Starting search for ${totalCombinations} combination(s)...`);
 
     try {
       // Track API calls - will be synced to Firestore
       let callsInThisSearch = 0;
-      
-      // Call the API service to search for businesses with pagination
-      const response = await searchBusinesses(
-        keyword,
-        selectedCategory,
-        location,
-        GOOGLE_API_KEY,
-        searchScope,
-        specificArea,
-        // Progress callback
-        (progress) => {
-          if (progress.page > 1) {
-            setLoadingProgress(`Loading more results... (Page ${progress.page}, ${progress.total} found)`);
-          }
-        },
-        // API call callback - fired immediately after each request
-        async () => {
-          callsInThisSearch++;
-          const newSessionCalls = apiCallsThisSession + callsInThisSearch;
-          setApiCallsThisSession(newSessionCalls);
-          
-          // Update Firestore immediately (syncs across devices)
-          try {
-            await addCredits(currentUser.uid, 1);
-          } catch (error) {
-            console.error('Error updating credits:', error);
+      let allPlaces = [];
+      let combinationIndex = 0;
+
+      // Loop through each keyword
+      for (let k = 0; k < keywords.length; k++) {
+        const currentKeyword = keywords[k];
+
+        // Loop through each location
+        for (let l = 0; l < locations.length; l++) {
+          const currentLocation = locations[l];
+          combinationIndex++;
+
+          setLoadingProgress(`Searching: "${currentKeyword}" in "${currentLocation}" (${combinationIndex}/${totalCombinations})...`);
+          console.log(`\n🔍 Combination ${combinationIndex}/${totalCombinations}: "${currentKeyword}" in "${currentLocation}"`);
+
+          // Call the API service to search for businesses with pagination
+          const response = await searchBusinesses(
+            currentKeyword,
+            selectedCategory,
+            currentLocation,
+            GOOGLE_API_KEY,
+            searchScope,
+            specificArea,
+            // Progress callback
+            (progress) => {
+              if (progress.page > 1) {
+                setLoadingProgress(`"${currentKeyword}" in "${currentLocation}" (${combinationIndex}/${totalCombinations}) - Page ${progress.page}, ${progress.total} found`);
+              }
+            },
+            // API call callback - fired immediately after each request
+            async () => {
+              callsInThisSearch++;
+              const newSessionCalls = apiCallsThisSession + callsInThisSearch;
+              setApiCallsThisSession(newSessionCalls);
+
+              // Update Firestore immediately (syncs across devices)
+              try {
+                await addCredits(currentUser.uid, 1);
+              } catch (error) {
+                console.error('Error updating credits:', error);
+              }
+            }
+          );
+
+          // Collect places from this combination
+          const places = response.places || [];
+          allPlaces = allPlaces.concat(places);
+          console.log(`✅ Combination ${combinationIndex}: ${places.length} results (${allPlaces.length} total collected)`);
+
+          // Small delay between combinations to avoid rate limiting
+          if (combinationIndex < totalCombinations) {
+            await new Promise(resolve => setTimeout(resolve, 500));
           }
         }
-      );
+      }
 
       // Update session calls
       setApiCallsThisSession(apiCallsThisSession + callsInThisSearch);
 
-      // Extract places from response
-      let places = response.places || [];
-      console.log(`🎯 API returned ${places.length} total unique businesses after pagination`);
+      setLoadingProgress('Removing duplicates and filtering results...');
+      console.log(`\n🎯 All combinations completed. Collected ${allPlaces.length} total results before deduplication`);
 
-      // Filter by exact address matching for neighborhood searches
-      if (searchScope === 'neighborhood' && specificArea.trim()) {
-        const beforeFilter = places.length;
-        places = filterByAddress(places, specificArea);
-        console.log(`📍 Address filter: ${beforeFilter} → ${places.length} (removed ${beforeFilter - places.length} not matching "${specificArea}")`);
-      }
+      // Remove duplicates across all combinations
+      const uniquePlaces = allPlaces.filter((place, index, self) => {
+        const name = (place.displayName?.text || '').toLowerCase().trim();
+        const address = (place.formattedAddress || '').toLowerCase().trim();
+        const phone = (place.nationalPhoneNumber || '').replace(/\s/g, '');
+        const placeIdentifier = `${name}|||${address}`;
+
+        const firstIndex = self.findIndex(p => {
+          const pName = (p.displayName?.text || '').toLowerCase().trim();
+          const pAddress = (p.formattedAddress || '').toLowerCase().trim();
+          const pPhone = (p.nationalPhoneNumber || '').replace(/\s/g, '');
+          const pIdentifier = `${pName}|||${pAddress}`;
+          return pIdentifier === placeIdentifier || (phone && pPhone && phone === pPhone);
+        });
+
+        return index === firstIndex;
+      });
+
+      const duplicatesRemoved = allPlaces.length - uniquePlaces.length;
+      console.log(`🔄 Removed ${duplicatesRemoved} duplicates. Unique results: ${uniquePlaces.length}`);
+
+      let places = uniquePlaces;
+
+      // Note: Address filtering removed - Google's query already targets the neighborhood
+      // Additional filtering was removing too many valid results
 
       // Filter by phone number if required
       if (requirePhone) {
@@ -157,6 +238,13 @@ function App() {
       // Update leads state with results
       setLeads(places);
       console.log(`✅ Final results shown to user: ${places.length} businesses`);
+      console.log(`📊 Search Statistics:`);
+      console.log(`   - Keywords searched: ${keywords.length}`);
+      console.log(`   - Locations searched: ${locations.length}`);
+      console.log(`   - Total combinations: ${totalCombinations}`);
+      console.log(`   - Total API calls: ${callsInThisSearch}`);
+      console.log(`   - Average API calls per combination: ${(callsInThisSearch / totalCombinations).toFixed(1)}`);
+      console.log(`   - Final unique results: ${places.length}`);
 
       // Show message if no results found
       if (places.length === 0) {
@@ -183,7 +271,7 @@ function App() {
 
     // Split address by comma
     const parts = fullAddress.split(',').map(part => part.trim());
-    
+
     // Try to intelligently parse address components
     const street = parts[0] || 'N/A';
     const city = parts[1] || 'N/A';
@@ -235,7 +323,7 @@ function App() {
     // Add data rows
     leads.forEach((business, index) => {
       const address = parseAddress(business.formattedAddress);
-      
+
       const row = worksheet.addRow({
         srNo: index + 1,
         name: business.displayName?.text || 'N/A',
@@ -264,7 +352,7 @@ function App() {
         (business.websiteUri || '').length,
         (business.displayName?.text || '').length
       );
-      
+
       // Set taller row height for long content
       if (maxLength > 80) {
         row.height = 45;
@@ -276,7 +364,7 @@ function App() {
 
       // Set alignment with wrap text for all cells
       row.alignment = { vertical: 'top', horizontal: 'left', wrapText: true };
-      
+
       // Center align specific columns
       row.getCell('srNo').alignment = { vertical: 'middle', horizontal: 'center' };
       row.getCell('category').alignment = { vertical: 'middle', horizontal: 'center' };
@@ -345,7 +433,7 @@ function App() {
                 Find Wholesalers, Retailers, and Services across the globe
               </p>
             </div>
-            
+
             {/* User Profile & Logout */}
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 rounded-lg">
@@ -380,32 +468,32 @@ function App() {
               <div className="flex items-center gap-2">
                 <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
                 <div>
-                  <span className="text-sm font-semibold text-gray-700 block">Credits Tracker</span>
+                  <span className="text-sm font-semibold text-gray-700 block">Credits Tracker (Shared)</span>
                   <span className="text-xs text-gray-500">{currentMonth}</span>
                 </div>
               </div>
-              
+
               <div className="h-8 w-px bg-gray-300"></div>
-              
+
               {/* This Session */}
               <div>
-                <p className="text-xs text-gray-500">This Session</p>
+                <p className="text-xs text-gray-500">This Session (You)</p>
                 <p className="text-lg font-bold text-blue-600">{apiCallsThisSession} calls</p>
               </div>
-              
+
               {/* Total Used */}
               <div>
-                <p className="text-xs text-gray-500">Total Used</p>
+                <p className="text-xs text-gray-500">Total Used (All Users)</p>
                 <p className="text-lg font-bold text-purple-600">{totalApiCalls} calls</p>
                 <CreditSyncStatus isOnline={true} />
               </div>
-              
+
               {/* Cost Calculator */}
               <div>
                 <p className="text-xs text-gray-500">Estimated Cost</p>
                 <p className="text-lg font-bold text-orange-600">${(totalApiCalls * 0.032).toFixed(2)}</p>
               </div>
-              
+
               {/* Free Credit Remaining */}
               <div>
                 <p className="text-xs text-gray-500">Free Credit Left</p>
@@ -414,7 +502,7 @@ function App() {
                 </p>
               </div>
             </div>
-            
+
             {/* Progress Bar */}
             <div className="flex-1 min-w-[200px] max-w-md">
               <div className="flex items-center justify-between mb-1">
@@ -424,21 +512,33 @@ function App() {
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2.5">
-                <div 
-                  className={`h-2.5 rounded-full transition-all duration-500 ${
-                    (totalApiCalls * 0.032) > 200 ? 'bg-red-500' :
-                    (totalApiCalls * 0.032) > 150 ? 'bg-orange-500' :
-                    (totalApiCalls * 0.032) > 100 ? 'bg-yellow-500' :
-                    'bg-green-500'
-                  }`}
+                <div
+                  className={`h-2.5 rounded-full transition-all duration-500 ${(totalApiCalls * 0.032) >= 195 ? 'bg-red-500 animate-pulse' :
+                    (totalApiCalls * 0.032) >= 180 ? 'bg-orange-500' :
+                      (totalApiCalls * 0.032) >= 150 ? 'bg-yellow-500' :
+                        'bg-green-500'
+                    }`}
                   style={{ width: `${Math.min(100, ((totalApiCalls * 0.032) / 200 * 100))}%` }}
                 ></div>
               </div>
               <p className="text-xs text-gray-500 mt-1">
                 💡 $200 free credit/month • Resets on {nextResetDate}
               </p>
+              {(totalApiCalls * 0.032) >= 180 && (totalApiCalls * 0.032) < 195 && (
+                <p className="text-xs text-orange-600 mt-1 font-semibold">
+                  ⚠️ Warning: Approaching credit limit! ${(195 - (totalApiCalls * 0.032)).toFixed(2)} remaining before searches are blocked.
+                </p>
+              )}
+              {(totalApiCalls * 0.032) >= 195 && (
+                <p className="text-xs text-red-600 mt-1 font-semibold">
+                  ⛔ Credit limit reached! Searches are blocked to prevent charges. Resets {nextResetDate}.
+                </p>
+              )}
+              <p className="text-xs text-blue-600 mt-1 font-medium">
+                👥 Credits are shared across all users
+              </p>
             </div>
-            
+
             {/* Reset Button */}
             <button
               onClick={async () => {
@@ -473,11 +573,10 @@ function App() {
                 <button
                   key={category}
                   onClick={() => setSelectedCategory(category)}
-                  className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
-                    selectedCategory === category
-                      ? 'bg-blue-600 text-white shadow-md'
-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                  }`}
+                  className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${selectedCategory === category
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
                 >
                   {category}
                 </button>
@@ -493,31 +592,28 @@ function App() {
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={() => setSearchScope('wide')}
-                className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
-                  searchScope === 'wide'
-                    ? 'bg-purple-600 text-white shadow-md'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
+                className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${searchScope === 'wide'
+                  ? 'bg-purple-600 text-white shadow-md'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
               >
                 Wide Area (Whole City)
               </button>
               <button
                 onClick={() => setSearchScope('neighborhood')}
-                className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
-                  searchScope === 'neighborhood'
-                    ? 'bg-purple-600 text-white shadow-md'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
+                className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${searchScope === 'neighborhood'
+                  ? 'bg-purple-600 text-white shadow-md'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
               >
                 Neighborhood (Smaller Area)
               </button>
               <button
                 onClick={() => setSearchScope('specific')}
-                className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
-                  searchScope === 'specific'
-                    ? 'bg-purple-600 text-white shadow-md'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
+                className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${searchScope === 'specific'
+                  ? 'bg-purple-600 text-white shadow-md'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
               >
                 Specific Location (Street/Building)
               </button>
@@ -567,9 +663,12 @@ function App() {
                 value={keyword}
                 onChange={(e) => setKeyword(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder="e.g., Kurti, Electronics, Furniture"
+                placeholder="e.g., Kurti, Saree, Bat (comma-separated for multiple)"
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
               />
+              <p className="text-xs text-gray-500 mt-2">
+                💡 Tip: Enter multiple keywords separated by commas to search all at once
+              </p>
             </div>
 
             {/* Location Input */}
@@ -583,9 +682,12 @@ function App() {
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder="e.g., Mumbai, New York, London"
+                placeholder="e.g., Ahmedabad, Agra, Mumbai (comma-separated for multiple)"
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
               />
+              <p className="text-xs text-gray-500 mt-2">
+                💡 Tip: Enter multiple locations separated by commas to search all at once
+              </p>
             </div>
           </div>
 
