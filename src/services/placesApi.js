@@ -14,7 +14,7 @@
  */
 const performSingleSearch = async (textQuery, apiKey, onProgress = null, onApiCall = null) => {
   const endpoint = 'https://places.googleapis.com/v1/places:searchText';
-  
+
   let allPlaces = [];
   let nextPageToken = null;
   let pageCount = 0;
@@ -22,7 +22,7 @@ const performSingleSearch = async (textQuery, apiKey, onProgress = null, onApiCa
 
   do {
     pageCount++;
-    
+
     const requestBody = {
       textQuery: textQuery,
       maxResultCount: 20,
@@ -42,7 +42,7 @@ const performSingleSearch = async (textQuery, apiKey, onProgress = null, onApiCa
       },
       body: JSON.stringify(requestBody)
     });
-    
+
     // Notify immediately after API call is made
     if (onApiCall) {
       onApiCall();
@@ -54,24 +54,41 @@ const performSingleSearch = async (textQuery, apiKey, onProgress = null, onApiCa
     }
 
     const data = await response.json();
-    
+
     console.log(`📄 Query "${textQuery.substring(0, 30)}..." - Page ${pageCount}: ${data.places?.length || 0} places. NextPageToken: ${data.nextPageToken ? 'YES ✅' : 'NO ❌'}`);
-    
+
     if (data.places && data.places.length > 0) {
       allPlaces = allPlaces.concat(data.places);
-    }
-    
-    nextPageToken = data.nextPageToken || null;
-    
-    if (!nextPageToken) {
-      console.log(`🏁 Query completed: ${pageCount} page(s), ${allPlaces.length} results`);
+      nextPageToken = data.nextPageToken || null; // Ensure nextPageToken is null if not present
+
+      console.log(`  📄 Page ${pageCount}: ${data.places.length} results. NextPageToken: ${nextPageToken ? '✅ YES (more available)' : '❌ NO (end of results)'}`);
+
+      if (onProgress) {
+        onProgress({ page: pageCount, total: allPlaces.length });
+      }
+
+      // Stop if no more pages or hit max
+      if (!nextPageToken) {
+        console.log(`  ⛔ Stopping: Google has no more results for this query`);
+        // The loop condition `!nextPageToken` will handle termination
+      }
+
+      if (pageCount >= maxPages) {
+        console.log(`  ⛔ Stopping: Hit maxPages limit (${maxPages}). There may be more results available.`);
+        // The loop condition `pageCount < maxPages` will handle termination
+      }
+    } else {
+      // If no places are returned, there's no next page token
+      nextPageToken = null;
+      console.log(`  ⛔ Stopping: No places returned on this page.`);
     }
 
+    // Add a delay between API calls if there's a next page and we haven't hit max pages
     if (nextPageToken && pageCount < maxPages) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    } while (nextPageToken && pageCount < maxPages);
+  } while (nextPageToken && pageCount < maxPages);
 
   return { results: allPlaces, apiCalls: pageCount };
 };/**
@@ -91,17 +108,17 @@ const performSingleSearch = async (textQuery, apiKey, onProgress = null, onApiCa
 export const searchBusinesses = async (keyword, category, location, apiKey, searchScope = 'wide', specificArea = '', onProgress = null, onApiCall = null) => {
   // Google Places API (New) endpoint for text search
   const endpoint = 'https://places.googleapis.com/v1/places:searchText';
-  
+
   // Construct the search query dynamically based on category and scope
   let textQuery;
-  
+
   // Build base query with category
   if (category === 'Custom' || category === 'All') {
     textQuery = `${keyword}`;
   } else {
     textQuery = `${keyword} ${category}`;
   }
-  
+
   // Add location based on search scope
   if (searchScope === 'specific' && specificArea.trim()) {
     // Specific location: narrow down to a building/street/area
@@ -120,15 +137,15 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
   // Perform multiple searches to maximize results (Google limits each query to ~60 results)
   let allPlaces = [];
   let totalApiCalls = 0; // Track total API requests made
-  
+
   try {
     console.log(`🔍 Starting comprehensive multi-query search for: ${textQuery}`);
-    
+
     // Special handling for "All" category - search all business types
     if (category === 'All') {
       const businessTypes = ['Retailer', 'Wholesaler', 'Manufacturer', 'Distributor'];
       console.log(`📋 "All" selected: Searching across ${businessTypes.length} business types`);
-      
+
       for (let i = 0; i < businessTypes.length; i++) {
         const businessType = businessTypes[i];
         const categoryQuery = textQuery.replace(keyword, `${keyword} ${businessType}`);
@@ -137,12 +154,12 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
         totalApiCalls += apiCalls;
         allPlaces = allPlaces.concat(categoryResults);
         console.log(`✅ Category ${i + 1}: ${categoryResults.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
-        
+
         if (i < businessTypes.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
       }
-      
+
       // Also search without category for general results
       await new Promise(resolve => setTimeout(resolve, 1000));
       console.log(`🔍 General search: "${textQuery}"`);
@@ -150,17 +167,17 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
       totalApiCalls += generalApiCalls;
       allPlaces = allPlaces.concat(generalResults);
       console.log(`✅ General: ${generalResults.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
-      
+
     } else {
       // Standard multi-query search for specific categories
-      
+
       // Search 1: Main query with exact match
       console.log(`🔍 Query 1: Main search "${textQuery}"`);
       const { results: search1Results, apiCalls: apiCalls1 } = await performSingleSearch(textQuery, apiKey, onProgress, onApiCall);
       totalApiCalls += apiCalls1;
       allPlaces = allPlaces.concat(search1Results);
       console.log(`✅ Query 1: ${search1Results.length} results (${totalApiCalls} API calls)`);
-      
+
       // Search 2: Add "shops" variation (if not already present)
       await new Promise(resolve => setTimeout(resolve, 1000));
       if (!keyword.toLowerCase().includes('shop') && !keyword.toLowerCase().includes('store')) {
@@ -171,7 +188,7 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
         allPlaces = allPlaces.concat(search2Results);
         console.log(`✅ Query 2: ${search2Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
       }
-      
+
       // Search 3: Try "near" variation for different results
       await new Promise(resolve => setTimeout(resolve, 1000));
       const nearQuery = textQuery.includes(' in ') ? textQuery.replace(' in ', ' near ') : `${keyword} near ${location}`;
@@ -180,7 +197,7 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
       totalApiCalls += apiCalls3;
       allPlaces = allPlaces.concat(search3Results);
       console.log(`✅ Query 3: ${search3Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
-      
+
       // Search 4: Simple location search without prepositions
       await new Promise(resolve => setTimeout(resolve, 1000));
       const simpleQuery = `${keyword} ${location}`;
@@ -189,7 +206,7 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
       totalApiCalls += apiCalls4;
       allPlaces = allPlaces.concat(search4Results);
       console.log(`✅ Query 4: ${search4Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
-      
+
       // Search 5: Add category variation if applicable
       if (category && category !== 'Custom') {
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -201,7 +218,7 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
         console.log(`✅ Query 5: ${search5Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
       }
     }
-    
+
     console.log(`🎯 All queries completed. Collected ${allPlaces.length} total results before deduplication`);
 
     // Remove duplicates based on multiple criteria (name, address, and phone)
@@ -210,20 +227,20 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
       const name = (place.displayName?.text || '').toLowerCase().trim();
       const address = (place.formattedAddress || '').toLowerCase().trim();
       const phone = (place.nationalPhoneNumber || '').replace(/\s/g, ''); // Remove spaces from phone
-      
+
       const placeIdentifier = `${name}|||${address}`;
-      
+
       // Find if this is the first occurrence
       const firstIndex = self.findIndex(p => {
         const pName = (p.displayName?.text || '').toLowerCase().trim();
         const pAddress = (p.formattedAddress || '').toLowerCase().trim();
         const pPhone = (p.nationalPhoneNumber || '').replace(/\s/g, '');
         const pIdentifier = `${pName}|||${pAddress}`;
-        
+
         // Match by name+address OR by phone number (if both have phone)
         return pIdentifier === placeIdentifier || (phone && pPhone && phone === pPhone);
       });
-      
+
       return index === firstIndex;
     });
 
@@ -232,11 +249,11 @@ export const searchBusinesses = async (keyword, category, location, apiKey, sear
     console.log(`💰 Total API calls made in this search: ${totalApiCalls}`);
 
     // Return all collected unique places with API call count
-    return { 
+    return {
       places: uniquePlaces,
       apiCalls: totalApiCalls,
-      note: uniquePlaces.length < 100 ? 
-        'Google Places API has limitations and may not return all businesses. For comprehensive results, try searching smaller sub-areas.' : 
+      note: uniquePlaces.length < 100 ?
+        'Google Places API has limitations and may not return all businesses. For comprehensive results, try searching smaller sub-areas.' :
         undefined
     };
 
@@ -281,7 +298,7 @@ export const filterByAddress = (places, areaName) => {
   }
 
   const searchTerm = areaName.toLowerCase().trim();
-  
+
   return places.filter(place => {
     const address = (place.formattedAddress || '').toLowerCase();
     // Check if the address contains the specific area name
