@@ -7,13 +7,15 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Search, Download, Loader2, LogOut, User } from 'lucide-react';
+import { Search, Download, Loader2, LogOut, User, Shield } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import ExcelJS from 'exceljs';
 import LeadCard from './components/LeadCard';
 import CreditSyncStatus from './components/CreditSyncStatus';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress } from './services/placesApi';
 import { GOOGLE_API_KEY } from './config';
 import { useAuth } from './contexts/AuthContext';
+import { useAdminAuth } from './contexts/AdminAuthContext';
 import { subscribeToCredits, addCredits, getCreditStats, initializeUserCredits } from './services/creditService';
 
 /**
@@ -21,6 +23,8 @@ import { subscribeToCredits, addCredits, getCreditStats, initializeUserCredits }
  */
 function App() {
   const { currentUser, signOut } = useAuth();
+  const { isAdmin } = useAdminAuth();
+  const navigate = useNavigate();
 
   // State Management
   const [keyword, setKeyword] = useState(''); // Search keyword (e.g., "Kurti", "Electronics")
@@ -434,7 +438,7 @@ function App() {
               </p>
             </div>
 
-            {/* User Profile & Logout */}
+            {/* User Profile & Admin Dashboard & Logout */}
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 rounded-lg">
                 <User className="w-5 h-5 text-gray-600" />
@@ -447,6 +451,19 @@ function App() {
                   </p>
                 </div>
               </div>
+              
+              {/* Admin Dashboard Button - Only visible to admins */}
+              {isAdmin && (
+                <button
+                  onClick={() => navigate('/admin')}
+                  className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all shadow-md hover:shadow-lg transform hover:scale-105"
+                  title="Access Admin Dashboard"
+                >
+                  <Shield className="w-4 h-4" />
+                  <span className="font-medium">Admin Dashboard</span>
+                </button>
+              )}
+              
               <button
                 onClick={signOut}
                 className="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors"
