@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { collection, getDocs, query, orderBy, limit } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, limit, onSnapshot, where, Timestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Search, TrendingUp, Globe, MapPin, Tag, Clock, Download, Filter } from 'lucide-react';
 
 /**
  * SearchAnalytics Component
- * Provides insights into search patterns, popular keywords, locations, and success rates
+ * Provides real-time insights into search patterns, popular keywords, locations, and success rates
  */
 const SearchAnalytics = () => {
   const [loading, setLoading] = useState(true);
@@ -22,84 +22,149 @@ const SearchAnalytics = () => {
   const [timeRange, setTimeRange] = useState('7days');
 
   useEffect(() => {
+    // Set up real-time listener for search logs
+    const unsubscribe = onSnapshot(
+      query(collection(db, 'searchLogs'), orderBy('timestamp', 'desc'), limit(1000)),
+      () => {
+        fetchSearchAnalytics();
+      }
+    );
+    
     fetchSearchAnalytics();
+    
+    return () => unsubscribe();
   }, [timeRange]);
 
   const fetchSearchAnalytics = async () => {
     try {
       setLoading(true);
       
-      // Mock data - replace with actual Firestore queries
-      // In production, fetch from searchAnalytics collection
+      // Fetch search logs from Firestore
+      const daysBack = timeRange === '7days' ? 7 : timeRange === '30days' ? 30 : 90;
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - daysBack);
       
-      // Generate search trends (last 7 days)
-      const trends = generateSearchTrends(timeRange);
+      const searchQuery = query(
+        collection(db, 'searchLogs'),
+        where('timestamp', '>=', Timestamp.fromDate(startDate)),
+        orderBy('timestamp', 'desc')
+      );
+      
+      const searchSnapshot = await getDocs(searchQuery);
+      const searchData = searchSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        timestamp: doc.data().timestamp?.toDate()
+      }));
+      
+      // Calculate trends
+      const trends = calculateSearchTrends(searchData, daysBack);
       setSearchTrends(trends);
-
+      
+      // Aggregate keywords
+      const keywordMap = {};
+      const locationMap = {};
+      let totalTime = 0;
+      let successCount = 0;
+      
+      searchData.forEach(search => {
+        // Keywords
+        const keyword = search.keyword || search.searchQuery || 'Unknown';
+        if (!keywordMap[keyword]) {
+          keywordMap[keyword] = { count: 0, success: 0 };
+        }
+        keywordMap[keyword].count++;
+        if (search.resultCount > 0) {
+          keywordMap[keyword].success++;
+          successCount++;
+        }
+        
+        // Locations
+        const location = search.location || 'Unknown';
+        if (!locationMap[location]) {
+          locationMap[location] = { count: 0, totalResults: 0 };
+        }
+        locationMap[location].count++;
+        locationMap[location].totalResults += search.resultCount || 0;
+        
+        // Response time
+        if (search.responseTime) {
+          totalTime += search.responseTime;
+        }
+      });
+      
       // Top keywords
-      const keywords = [
-        { keyword: 'software engineer', count: 245, successRate: 87 },
-        { keyword: 'marketing manager', count: 198, successRate: 92 },
-        { keyword: 'data scientist', count: 176, successRate: 85 },
-        { keyword: 'sales director', count: 154, successRate: 78 },
-        { keyword: 'product manager', count: 142, successRate: 88 },
-        { keyword: 'business analyst', count: 128, successRate: 81 },
-        { keyword: 'hr manager', count: 115, successRate: 90 },
-        { keyword: 'finance director', count: 98, successRate: 86 },
-        { keyword: 'operations manager', count: 87, successRate: 79 },
-        { keyword: 'ceo', count: 76, successRate: 74 }
-      ];
+      const keywords = Object.entries(keywordMap)
+        .map(([keyword, data]) => ({
+          keyword,
+          count: data.count,
+          successRate: data.count > 0 ? ((data.success / data.count) * 100).toFixed(0) : 0
+        }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
       setTopKeywords(keywords);
-
+      
       // Top locations
-      const locations = [
-        { location: 'New York', count: 456, avgResults: 127 },
-        { location: 'San Francisco', count: 389, avgResults: 98 },
-        { location: 'London', count: 312, avgResults: 145 },
-        { location: 'Los Angeles', count: 287, avgResults: 112 },
-        { location: 'Chicago', count: 245, avgResults: 89 },
-        { location: 'Boston', count: 223, avgResults: 95 },
-        { location: 'Seattle', count: 198, avgResults: 78 },
-        { location: 'Austin', count: 176, avgResults: 82 },
-        { location: 'Toronto', count: 154, avgResults: 91 },
-        { location: 'Singapore', count: 142, avgResults: 103 }
-      ];
+      const locations = Object.entries(locationMap)
+        .map(([location, data]) => ({
+          location,
+          count: data.count,
+          avgResults: data.count > 0 ? Math.round(data.totalResults / data.count) : 0
+        }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
       setTopLocations(locations);
-
+      
       // Calculate stats
-      const totalSearches = keywords.reduce((sum, k) => sum + k.count, 0);
-      const avgSuccessRate = keywords.reduce((sum, k) => sum + k.successRate, 0) / keywords.length;
+      const totalSearches = searchData.length;
+      const avgSuccessRate = totalSearches > 0 ? ((successCount / totalSearches) * 100).toFixed(1) : 0;
+      const avgSearchTime = searchData.length > 0 ? (totalTime / searchData.length / 1000).toFixed(1) : 0;
       
       setStats({
         totalSearches,
-        successRate: avgSuccessRate.toFixed(1),
-        avgSearchTime: 2.4, // seconds
-        uniqueKeywords: keywords.length
+        successRate: avgSuccessRate,
+        avgSearchTime: parseFloat(avgSearchTime),
+        uniqueKeywords: Object.keys(keywordMap).length
       });
-
+      
       setLoading(false);
     } catch (error) {
       console.error('Error fetching search analytics:', error);
       setLoading(false);
     }
   };
-
-  const generateSearchTrends = (range) => {
-    const days = range === '7days' ? 7 : range === '30days' ? 30 : 90;
-    const data = [];
+  
+  const calculateSearchTrends = (searchData, daysBack) => {
+    const trendMap = {};
+    const now = new Date();
     
-    for (let i = days; i >= 0; i--) {
-      const date = new Date();
+    // Initialize all days
+    for (let i = daysBack; i >= 0; i--) {
+      const date = new Date(now);
       date.setDate(date.getDate() - i);
-      data.push({
-        date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        searches: Math.floor(Math.random() * 100) + 50,
-        successful: Math.floor(Math.random() * 80) + 40,
-        failed: Math.floor(Math.random() * 20) + 5
-      });
+      const dateKey = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      trendMap[dateKey] = { searches: 0, successful: 0, failed: 0 };
     }
     
-    return data;
+    // Aggregate search data
+    searchData.forEach(search => {
+      if (search.timestamp) {
+        const dateKey = search.timestamp.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        if (trendMap[dateKey]) {
+          trendMap[dateKey].searches++;
+          if (search.resultCount > 0) {
+            trendMap[dateKey].successful++;
+          } else {
+            trendMap[dateKey].failed++;
+          }
+        }
+      }
+    });
+    
+    return Object.entries(trendMap).map(([date, data]) => ({
+      date,
+      ...data
+    }));
   };
 
   const exportData = () => {

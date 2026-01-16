@@ -13,7 +13,7 @@ import {
   Calendar,
   Activity
 } from 'lucide-react';
-import { collection, getDocs, doc, updateDoc, query, orderBy, limit } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import UserDetailsModal from './UserDetailsModal';
 
@@ -27,46 +27,58 @@ const UserManagement = () => {
   const [showUserModal, setShowUserModal] = useState(false);
 
   useEffect(() => {
-    fetchUsers();
+    // Set up real-time listener for users
+    const unsubscribe = onSnapshot(collection(db, 'users'), async (usersSnapshot) => {
+      try {
+        // Fetch user credits data
+        const creditsSnapshot = await getDocs(collection(db, 'userCredits'));
+        const creditsMap = {};
+        
+        creditsSnapshot.forEach(doc => {
+          const data = doc.data();
+          creditsMap[doc.id] = {
+            creditsUsed: data.creditsUsed || 0,
+            totalApiCalls: data.totalApiCalls || 0,
+            lastUsed: data.lastUsed
+          };
+        });
+        
+        const usersData = usersSnapshot.docs.map(userDoc => {
+          const userData = userDoc.data();
+          const creditData = creditsMap[userDoc.id] || {};
+          
+          return {
+            id: userDoc.id,
+            email: userData.email || 'N/A',
+            displayName: userData.displayName || userData.email?.split('@')[0] || 'N/A',
+            createdAt: userData.createdAt?.toDate() || new Date(),
+            lastActive: userData.lastActive?.toDate() || new Date(),
+            creditsUsed: creditData.creditsUsed || 0,
+            creditLimit: userData.creditLimit || null,
+            status: userData.accountStatus || 'active',
+            emailVerified: userData.emailVerified || false,
+            role: userData.role || 'user'
+          };
+        });
+
+        // Sort by creation date (newest first)
+        usersData.sort((a, b) => b.createdAt - a.createdAt);
+
+        setUsers(usersData);
+        setLoading(false);
+      } catch (error) {
+        console.error('Error processing users:', error);
+        setLoading(false);
+      }
+    });
+
+    // Cleanup listener on unmount
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
     filterUsers();
   }, [searchTerm, filterStatus, users]);
-
-  const fetchUsers = async () => {
-    try {
-      const usersSnapshot = await getDocs(collection(db, 'users'));
-      const userCreditsSnapshot = await getDocs(collection(db, 'userCredits'));
-      
-      const usersData = [];
-      
-      for (const userDoc of usersSnapshot.docs) {
-        const userData = userDoc.data();
-        const creditDoc = userCreditsSnapshot.docs.find(doc => doc.id === userDoc.id);
-        const creditData = creditDoc?.data() || {};
-        
-        usersData.push({
-          id: userDoc.id,
-          email: userData.email || 'N/A',
-          displayName: userData.displayName || 'N/A',
-          createdAt: userData.createdAt || new Date(),
-          lastActive: userData.lastActive || new Date(),
-          creditsUsed: creditData.totalApiCalls || 0,
-          creditLimit: userData.creditLimit || null,
-          status: userData.accountStatus || 'active',
-          emailVerified: userData.emailVerified || false
-        });
-      }
-
-      setUsers(usersData);
-      setFilteredUsers(usersData);
-      setLoading(false);
-    } catch (error) {
-      console.error('Error fetching users:', error);
-      setLoading(false);
-    }
-  };
 
   const filterUsers = () => {
     let filtered = users;
@@ -98,9 +110,10 @@ const UserManagement = () => {
       try {
         const userRef = doc(db, 'users', userId);
         await updateDoc(userRef, {
-          accountStatus: 'suspended'
+          accountStatus: 'suspended',
+          suspendedAt: new Date()
         });
-        fetchUsers();
+        // Real-time listener will update the UI automatically
       } catch (error) {
         console.error('Error suspending user:', error);
         alert('Failed to suspend user');
@@ -112,9 +125,10 @@ const UserManagement = () => {
     try {
       const userRef = doc(db, 'users', userId);
       await updateDoc(userRef, {
-        accountStatus: 'active'
+        accountStatus: 'active',
+        suspendedAt: null
       });
-      fetchUsers();
+      // Real-time listener will update the UI automatically
     } catch (error) {
       console.error('Error activating user:', error);
       alert('Failed to activate user');

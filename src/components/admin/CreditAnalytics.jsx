@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { collection, getDocs, query, orderBy, limit, where } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, limit, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, DollarSign, Users, AlertCircle, Award, Activity, Calendar } from 'lucide-react';
 
 /**
  * CreditAnalytics Component
- * Provides comprehensive credit usage analytics and monitoring
+ * Provides comprehensive credit usage analytics and monitoring with real-time updates
  * Features: Cost trends, user rankings, alerts, credit distribution
  */
 const CreditAnalytics = () => {
@@ -23,7 +23,14 @@ const CreditAnalytics = () => {
   const [alerts, setAlerts] = useState([]);
 
   useEffect(() => {
+    // Set up real-time listener for user credits
+    const unsubscribe = onSnapshot(collection(db, 'userCredits'), async () => {
+      await fetchAnalytics();
+    });
+    
     fetchAnalytics();
+    
+    return () => unsubscribe();
   }, []);
 
   const fetchAnalytics = async () => {

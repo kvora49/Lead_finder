@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { collection, getDocs, query, orderBy, limit, where } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, limit, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { FileText, Download, Filter, Search, AlertCircle, User, Key, Database, Settings, Shield, Activity } from 'lucide-react';
 
 /**
  * SystemLogs Component
- * Comprehensive audit trail and system activity monitoring
+ * Real-time audit trail and system activity monitoring
  * Features: Activity logs, filters, search, export
  */
 const SystemLogs = () => {
@@ -25,139 +25,41 @@ const SystemLogs = () => {
   });
 
   useEffect(() => {
-    fetchLogs();
+    // Set up real-time listener for system logs
+    const unsubscribe = onSnapshot(
+      query(collection(db, 'systemLogs'), orderBy('timestamp', 'desc'), limit(500)),
+      (snapshot) => {
+        const logsData = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+          timestamp: doc.data().timestamp?.toDate() || new Date()
+        }));
+        
+        setLogs(logsData);
+        
+        // Calculate stats
+        const stats = {
+          total: logsData.length,
+          errors: logsData.filter(l => l.severity === 'error').length,
+          warnings: logsData.filter(l => l.severity === 'warning').length,
+          info: logsData.filter(l => l.severity === 'info').length
+        };
+        setStats(stats);
+        
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Error fetching logs:', error);
+        setLoading(false);
+      }
+    );
+    
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
     applyFilters();
   }, [filters, logs]);
-
-  const fetchLogs = async () => {
-    try {
-      setLoading(true);
-      
-      // Mock logs - replace with actual Firestore query
-      const mockLogs = [
-        {
-          id: '1',
-          timestamp: new Date(Date.now() - 300000),
-          type: 'auth',
-          severity: 'info',
-          action: 'User Login',
-          user: 'john.doe@example.com',
-          details: 'Successful login from IP: 192.168.1.100',
-          ip: '192.168.1.100',
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'
-        },
-        {
-          id: '2',
-          timestamp: new Date(Date.now() - 600000),
-          type: 'search',
-          severity: 'info',
-          action: 'Search Performed',
-          user: 'jane.smith@example.com',
-          details: 'Search query: "software engineer, New York" - 127 results',
-          creditsUsed: 5
-        },
-        {
-          id: '3',
-          timestamp: new Date(Date.now() - 900000),
-          type: 'admin',
-          severity: 'warning',
-          action: 'User Suspended',
-          user: 'admin@company.com',
-          details: 'Suspended user: suspicious@example.com - Reason: Unusual activity',
-          targetUser: 'suspicious@example.com'
-        },
-        {
-          id: '4',
-          timestamp: new Date(Date.now() - 1200000),
-          type: 'credit',
-          severity: 'warning',
-          action: 'Credit Limit Reached',
-          user: 'heavy.user@example.com',
-          details: 'User reached 100% of credit limit (1000/1000)'
-        },
-        {
-          id: '5',
-          timestamp: new Date(Date.now() - 1500000),
-          type: 'system',
-          severity: 'error',
-          action: 'API Error',
-          user: 'system',
-          details: 'RapidAPI request failed: Rate limit exceeded',
-          errorCode: 'RATE_LIMIT_EXCEEDED'
-        },
-        {
-          id: '6',
-          timestamp: new Date(Date.now() - 1800000),
-          type: 'export',
-          severity: 'info',
-          action: 'Data Export',
-          user: 'analyst@example.com',
-          details: 'Exported 250 records to CSV',
-          recordCount: 250
-        },
-        {
-          id: '7',
-          timestamp: new Date(Date.now() - 2100000),
-          type: 'auth',
-          severity: 'error',
-          action: 'Failed Login',
-          user: 'attacker@malicious.com',
-          details: 'Failed login attempt - Invalid credentials',
-          ip: '123.45.67.89',
-          attempts: 5
-        },
-        {
-          id: '8',
-          timestamp: new Date(Date.now() - 2400000),
-          type: 'database',
-          severity: 'info',
-          action: 'Database Backup',
-          user: 'system',
-          details: 'Automated backup completed successfully',
-          size: '2.4 GB'
-        },
-        {
-          id: '9',
-          timestamp: new Date(Date.now() - 2700000),
-          type: 'config',
-          severity: 'warning',
-          action: 'Settings Changed',
-          user: 'admin@company.com',
-          details: 'Updated API rate limit: 100 -> 150 requests/min'
-        },
-        {
-          id: '10',
-          timestamp: new Date(Date.now() - 3000000),
-          type: 'security',
-          severity: 'error',
-          action: 'Security Alert',
-          user: 'system',
-          details: 'Detected potential SQL injection attempt from IP: 45.67.89.12',
-          ip: '45.67.89.12',
-          blocked: true
-        }
-      ];
-
-      setLogs(mockLogs);
-      setFilteredLogs(mockLogs);
-
-      // Calculate stats
-      setStats({
-        total: mockLogs.length,
-        errors: mockLogs.filter(l => l.severity === 'error').length,
-        warnings: mockLogs.filter(l => l.severity === 'warning').length,
-        info: mockLogs.filter(l => l.severity === 'info').length
-      });
-
-      setLoading(false);
-    } catch (error) {
-      console.error('Error fetching logs:', error);
-      setLoading(false);
-    }
-  };
 
   const applyFilters = () => {
     let filtered = [...logs];

@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import { createUserWithEmailAndPassword, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, updateProfile } from 'firebase/auth';
-import { auth } from '../firebase';
+import { auth, db } from '../firebase';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { Link, useNavigate } from 'react-router-dom';
 import { Search, Mail, Lock, User, AlertCircle, Loader2, CheckCircle, Eye, EyeOff } from 'lucide-react';
+import { logAuthEvent } from '../services/analyticsService';
 
 const Register = () => {
   const [formData, setFormData] = useState({
@@ -112,6 +114,33 @@ const Register = () => {
         displayName: formData.name
       });
 
+      // Create user document in Firestore
+      await setDoc(doc(db, 'users', userCredential.user.uid), {
+        uid: userCredential.user.uid,
+        email: formData.email,
+        displayName: formData.name,
+        role: 'user',
+        status: 'active',
+        createdAt: serverTimestamp(),
+        lastActive: serverTimestamp()
+      });
+
+      // Initialize user credits
+      await setDoc(doc(db, 'userCredits', userCredential.user.uid), {
+        userId: userCredential.user.uid,
+        userEmail: formData.email,
+        creditsUsed: 0,
+        totalApiCalls: 0,
+        createdAt: serverTimestamp(),
+        lastUsed: null
+      });
+
+      // Log registration event
+      await logAuthEvent(userCredential.user.uid, formData.email, 'User Registration', {
+        provider: 'email',
+        name: formData.name
+      });
+
       navigate('/');
     } catch (error) {
       setError(error.message.replace('Firebase: ', ''));
@@ -154,6 +183,35 @@ const Register = () => {
       // Update user profile with name
       await updateProfile(userCredential.user, {
         displayName: tempUserData.name
+      });
+
+      // Create user document in Firestore
+      await setDoc(doc(db, 'users', userCredential.user.uid), {
+        uid: userCredential.user.uid,
+        email: tempUserData.email,
+        displayName: tempUserData.name,
+        role: 'user',
+        status: 'active',
+        emailVerified: true,
+        createdAt: serverTimestamp(),
+        lastActive: serverTimestamp()
+      });
+
+      // Initialize user credits
+      await setDoc(doc(db, 'userCredits', userCredential.user.uid), {
+        userId: userCredential.user.uid,
+        userEmail: tempUserData.email,
+        creditsUsed: 0,
+        totalApiCalls: 0,
+        createdAt: serverTimestamp(),
+        lastUsed: null
+      });
+
+      // Log registration event
+      await logAuthEvent(userCredential.user.uid, tempUserData.email, 'User Registration', {
+        provider: 'email',
+        emailVerified: true,
+        name: tempUserData.name
       });
 
       navigate('/');
@@ -201,7 +259,44 @@ const Register = () => {
 
     try {
       // Try popup method first
-      await signInWithPopup(auth, provider);
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+
+      // Check if user document exists, create if not
+      const userDocRef = doc(db, 'users', user.uid);
+      const userCreditsRef = doc(db, 'userCredits', user.uid);
+      
+      try {
+        await setDoc(userDocRef, {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName,
+          photoURL: user.photoURL,
+          role: 'user',
+          status: 'active',
+          provider: 'google',
+          createdAt: serverTimestamp(),
+          lastActive: serverTimestamp()
+        }, { merge: true });
+
+        // Initialize user credits if not exists
+        await setDoc(userCreditsRef, {
+          userId: user.uid,
+          userEmail: user.email,
+          creditsUsed: 0,
+          totalApiCalls: 0,
+          createdAt: serverTimestamp(),
+          lastUsed: null
+        }, { merge: true });
+
+        // Log authentication event
+        await logAuthEvent(user.uid, user.email, 'Google Sign Up', {
+          provider: 'google'
+        });
+      } catch (firestoreError) {
+        console.error('Error creating user document:', firestoreError);
+      }
+
       navigate('/');
     } catch (error) {
       // If popup is blocked or closed, use redirect method

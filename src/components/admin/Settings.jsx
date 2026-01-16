@@ -1,16 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { Settings as SettingsIcon, Key, Shield, Bell, Database, Mail, Globe, Save, AlertCircle } from 'lucide-react';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
+import { logAdminAction } from '../../services/analyticsService';
 
 /**
  * Settings Component
- * Global application settings and configuration
+ * Real-time global application settings and configuration
  * Features: API keys, credit limits, notifications, email settings
  */
 const Settings = () => {
-  const { isSuperAdmin } = useAdminAuth();
+  const { isSuperAdmin, currentAdmin } = useAdminAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState({
@@ -41,27 +42,26 @@ const Settings = () => {
   });
 
   useEffect(() => {
-    fetchSettings();
-  }, []);
-
-  const fetchSettings = async () => {
-    try {
-      setLoading(true);
-      
-      // Fetch settings from Firestore
-      const settingsRef = doc(db, 'systemConfig', 'global');
-      const settingsDoc = await getDoc(settingsRef);
-      
-      if (settingsDoc.exists()) {
-        setSettings({ ...settings, ...settingsDoc.data() });
+    // Set up real-time listener for settings
+    const settingsRef = doc(db, 'systemConfig', 'global');
+    
+    const unsubscribe = onSnapshot(
+      settingsRef,
+      (doc) => {
+        if (doc.exists()) {
+          setSettings(prevSettings => ({ ...prevSettings, ...doc.data() }));
+        }
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Error fetching settings:', error);
+        setLoading(false);
       }
-      
-      setLoading(false);
-    } catch (error) {
-      console.error('Error fetching settings:', error);
-      setLoading(false);
-    }
-  };
+    );
+
+    // Cleanup listener
+    return () => unsubscribe();
+  }, []);
 
   const handleSave = async () => {
     if (!isSuperAdmin) {
@@ -74,11 +74,31 @@ const Settings = () => {
       
       // Save settings to Firestore
       const settingsRef = doc(db, 'systemConfig', 'global');
-      await updateDoc(settingsRef, {
-        ...settings,
-        updatedAt: new Date(),
-        updatedBy: 'admin' // Replace with actual admin email
-      });
+      
+      try {
+        await updateDoc(settingsRef, {
+          ...settings,
+          updatedAt: new Date(),
+          updatedBy: currentAdmin?.email || 'admin'
+        });
+      } catch (error) {
+        // If document doesn't exist, create it
+        await setDoc(settingsRef, {
+          ...settings,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          updatedBy: currentAdmin?.email || 'admin'
+        });
+      }
+
+      // Log the admin action
+      await logAdminAction(
+        currentAdmin?.uid,
+        currentAdmin?.email,
+        'Settings Updated',
+        null,
+        'Updated system configuration'
+      );
       
       alert('Settings saved successfully!');
       setSaving(false);

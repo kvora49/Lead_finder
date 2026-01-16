@@ -1,16 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { collection, getDocs, doc, updateDoc, query, where } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, query, where, onSnapshot, orderBy, limit, addDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { Shield, UserCheck, UserX, Clock, CheckCircle, XCircle, Eye, Mail, AlertTriangle } from 'lucide-react';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
+import { logAdminAction } from '../../services/analyticsService';
 
 /**
  * AccessControl Component
- * Manage user access requests, approvals, and permissions
+ * Real-time user access requests, approvals, and permissions management
  * Features: Pending approvals, user status management, role assignments
  */
 const AccessControl = () => {
-  const { isSuperAdmin } = useAdminAuth();
+  const { isSuperAdmin, currentAdmin } = useAdminAuth();
   const [loading, setLoading] = useState(true);
   const [pendingUsers, setPendingUsers] = useState([]);
   const [recentActions, setRecentActions] = useState([]);
@@ -24,18 +25,11 @@ const AccessControl = () => {
   const [showModal, setShowModal] = useState(false);
 
   useEffect(() => {
-    fetchAccessData();
-  }, []);
-
-  const fetchAccessData = async () => {
-    try {
-      setLoading(true);
-      
-      // Fetch all users
-      const usersSnapshot = await getDocs(collection(db, 'users'));
+    // Set up real-time listener for users
+    const usersUnsubscribe = onSnapshot(collection(db, 'users'), (snapshot) => {
       const users = [];
       
-      usersSnapshot.forEach(doc => {
+      snapshot.forEach(doc => {
         const data = doc.data();
         users.push({
           id: doc.id,
@@ -45,7 +39,7 @@ const AccessControl = () => {
         });
       });
 
-      // Filter pending users (not verified or awaiting approval)
+      // Filter pending users
       const pending = users.filter(u => 
         !u.emailVerified || u.status === 'pending'
       );
@@ -54,40 +48,53 @@ const AccessControl = () => {
       // Calculate stats
       const approved = users.filter(u => u.status === 'active').length;
       const suspended = users.filter(u => u.status === 'suspended').length;
+      const rejected = users.filter(u => u.status === 'rejected').length;
       
       setStats({
         pending: pending.length,
         approved,
-        rejected: 0, // Add rejected status tracking if needed
+        rejected,
         suspended
       });
 
-      // Mock recent actions - replace with actual audit log
-      setRecentActions([
-        {
-          id: 1,
-          action: 'approved',
-          userEmail: 'john.doe@example.com',
-          admin: 'admin@company.com',
-          timestamp: new Date(Date.now() - 3600000),
-          reason: 'Verified credentials'
-        },
-        {
-          id: 2,
-          action: 'suspended',
-          userEmail: 'suspicious@example.com',
-          admin: 'admin@company.com',
-          timestamp: new Date(Date.now() - 7200000),
-          reason: 'Unusual activity detected'
-        }
-      ]);
+      setLoading(false);
+    });
 
-      setLoading(false);
-    } catch (error) {
-      console.error('Error fetching access data:', error);
-      setLoading(false);
-    }
-  };
+    // Set up real-time listener for access control actions
+    const actionsUnsubscribe = onSnapshot(
+      query(
+        collection(db, 'systemLogs'),
+        where('type', '==', 'admin'),
+        orderBy('timestamp', 'desc'),
+        limit(20)
+      ),
+      (snapshot) => {
+        const actions = snapshot.docs
+          .map(doc => {
+            const data = doc.data();
+            return {
+              id: doc.id,
+              action: data.action?.toLowerCase().includes('suspend') ? 'suspended' :
+                      data.action?.toLowerCase().includes('approve') ? 'approved' :
+                      data.action?.toLowerCase().includes('reject') ? 'rejected' : 'modified',
+              userEmail: data.targetUser || data.userEmail,
+              admin: data.userEmail,
+              timestamp: data.timestamp?.toDate() || new Date(),
+              reason: data.details
+            };
+          })
+          .filter(a => ['suspended', 'approved', 'rejected'].includes(a.action));
+        
+        setRecentActions(actions);
+      }
+    );
+
+    // Cleanup listeners
+    return () => {
+      usersUnsubscribe();
+      actionsUnsubscribe();
+    };
+  }, []);
 
   const handleApprove = async (userId, userEmail) => {
     try {
@@ -95,8 +102,17 @@ const AccessControl = () => {
       await updateDoc(userRef, {
         status: 'active',
         approvedAt: new Date(),
-        approvedBy: 'admin' // Replace with actual admin email
+        approvedBy: currentAdmin?.email || 'admin'
       });
+
+      // Log the admin action
+      await logAdminAction(
+        currentAdmin?.uid,
+        currentAdmin?.email,
+        'User Approved',
+        userId,
+        `Approved user: ${userEmail}`
+      );
 
       // Update local state
       setPendingUsers(prev => prev.filter(u => u.id !== userId));

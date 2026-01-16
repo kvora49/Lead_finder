@@ -17,6 +17,7 @@ import { GOOGLE_API_KEY } from './config';
 import { useAuth } from './contexts/AuthContext';
 import { useAdminAuth } from './contexts/AdminAuthContext';
 import { subscribeToCredits, addCredits, getCreditStats, initializeUserCredits } from './services/creditService';
+import { logSearch, updateCreditUsage, logExport } from './services/analyticsService';
 
 /**
  * Main App Component
@@ -141,6 +142,9 @@ function App() {
     setLoading(true);
     setLoadingProgress(`Starting search for ${totalCombinations} combination(s)...`);
 
+    // Track search start time for analytics
+    const searchStartTime = Date.now();
+
     try {
       // Track API calls - will be synced to Firestore
       let callsInThisSearch = 0;
@@ -181,7 +185,11 @@ function App() {
 
               // Update Firestore immediately (syncs across devices)
               try {
+                // Update global credits (for Credit Tracker)
                 await addCredits(currentUser.uid, 1);
+                
+                // Update per-user credits (for Admin Dashboard Analytics)
+                await updateCreditUsage(currentUser.uid, 1);
               } catch (error) {
                 console.error('Error updating credits:', error);
               }
@@ -249,6 +257,36 @@ function App() {
       console.log(`   - Total API calls: ${callsInThisSearch}`);
       console.log(`   - Average API calls per combination: ${(callsInThisSearch / totalCombinations).toFixed(1)}`);
       console.log(`   - Final unique results: ${places.length}`);
+
+      // Calculate search response time
+      const searchResponseTime = Date.now() - searchStartTime;
+
+      // Log search to analytics (supports admin dashboard)
+      try {
+        await logSearch(currentUser.uid, currentUser.email, {
+          keyword: keywords.join(', '),
+          location: locations.join(', '),
+          query: `${keywords.join(', ')} in ${locations.join(', ')}`,
+          resultCount: places.length,
+          responseTime: searchResponseTime,
+          creditsUsed: callsInThisSearch,
+          filters: {
+            category: selectedCategory,
+            requirePhone,
+            searchScope,
+            specificArea: specificArea || null
+          },
+          metadata: {
+            totalCombinations,
+            apiCallsUsed: callsInThisSearch,
+            duplicatesRemoved,
+            source: 'web-app'
+          }
+        });
+        console.log('📊 Search logged to analytics');
+      } catch (analyticsError) {
+        console.error('Failed to log search analytics:', analyticsError);
+      }
 
       // Show message if no results found
       if (places.length === 0) {
@@ -408,6 +446,27 @@ function App() {
       link.download = fileName;
       link.click();
       window.URL.revokeObjectURL(url);
+
+      // Log export to analytics (supports admin dashboard)
+      try {
+        await logExport(currentUser.uid, currentUser.email, {
+          recordCount: leads.length,
+          format: 'Excel',
+          fileName,
+          searchCriteria: {
+            keyword: selectedCategory,
+            location: location,
+            filters: {
+              requirePhone,
+              searchScope,
+              specificArea: specificArea || null
+            }
+          }
+        });
+        console.log('📊 Export logged to analytics');
+      } catch (analyticsError) {
+        console.error('Failed to log export analytics:', analyticsError);
+      }
     } catch (error) {
       console.error('Error generating Excel file:', error);
       alert('Failed to generate Excel file. Please try again.');

@@ -8,7 +8,7 @@ import {
   ArrowUp,
   ArrowDown
 } from 'lucide-react';
-import { collection, getDocs, query, where, Timestamp } from 'firebase/firestore';
+import { collection, getDocs, query, where, Timestamp, onSnapshot, orderBy, limit, doc } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { 
   LineChart, 
@@ -35,68 +35,176 @@ const AdminDashboard = () => {
   });
   const [loading, setLoading] = useState(true);
   const [costTrendData, setCostTrendData] = useState([]);
-  const [creditUsagePercent, setCreditUsagePercent] = useState(78);
+  const [creditUsagePercent, setCreditUsagePercent] = useState(0);
+  const [recentActivity, setRecentActivity] = useState([]);
+  const [previousMonthApiCalls, setPreviousMonthApiCalls] = useState(0);
 
   useEffect(() => {
-    fetchDashboardData();
+    // Set up real-time listeners
+    const unsubscribers = [];
+
+    // Real-time user count listener (exclude admins)
+    const usersUnsubscribe = onSnapshot(collection(db, 'users'), (snapshot) => {
+      // Filter out admin and super_admin users
+      let totalUsers = 0;
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        const role = data.role || 'user';
+        // Only count regular users, not admins/super_admins
+        if (role === 'user') {
+          totalUsers++;
+        }
+      });
+      setStats(prev => ({ ...prev, totalUsers }));
+    });
+    unsubscribers.push(usersUnsubscribe);
+
+    // Real-time global credits listener (matches Credit Tracker)
+    const globalCreditsRef = doc(db, 'globalCredits', 'shared');
+    const creditsUnsubscribe = onSnapshot(globalCreditsRef, (docSnapshot) => {
+      if (docSnapshot.exists()) {
+        const data = docSnapshot.data();
+        const totalApiCalls = data.totalApiCalls || 0;
+        
+        // Calculate current cost ($32 per 1000 requests, same as Credit Tracker)
+        const costPerRequest = 32; // $32 per 1000 requests
+        const currentCost = parseFloat(((totalApiCalls * costPerRequest) / 1000).toFixed(2));
+        
+        // Calculate credit usage percentage
+        const creditLimit = 200000; // 200k free tier limit
+        const usagePercent = Math.min(100, parseFloat(((totalApiCalls / creditLimit) * 100).toFixed(1)));
+        
+        setStats(prev => ({ 
+          ...prev, 
+          totalApiCalls,
+          currentCost
+        }));
+        setCreditUsagePercent(usagePercent);
+      }
+    });
+    unsubscribers.push(creditsUnsubscribe);
+
+    // Real-time active users listener (last 30 days, exclude admins)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    const activeUsersUnsubscribe = onSnapshot(
+      query(
+        collection(db, 'users'),
+        where('lastActive', '>=', Timestamp.fromDate(thirtyDaysAgo))
+      ),
+      (snapshot) => {
+        // Filter out admin and super_admin users
+        let activeUsers = 0;
+        snapshot.forEach(doc => {
+          const data = doc.data();
+          const role = data.role || 'user';
+          // Only count regular users, not admins/super_admins
+          if (role === 'user') {
+            activeUsers++;
+          }
+        });
+        setStats(prev => ({ ...prev, activeUsers }));
+      }
+    );
+    unsubscribers.push(activeUsersUnsubscribe);
+
+    // Real-time activity feed listener
+    const activityUnsubscribe = onSnapshot(
+      query(
+        collection(db, 'systemLogs'),
+        orderBy('timestamp', 'desc'),
+        limit(10)
+      ),
+      (snapshot) => {
+        const activities = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            user: data.userEmail || data.user || 'system',
+            action: data.action || data.details || 'Activity',
+            time: formatTimeAgo(data.timestamp?.toDate() || new Date())
+          };
+        });
+        setRecentActivity(activities.slice(0, 4));
+      }
+    );
+    unsubscribers.push(activityUnsubscribe);
+
+    // Fetch monthly trend data and growth calculation
+    fetchMonthlyTrends();
+
+    setLoading(false);
+
+    // Cleanup listeners on unmount
+    return () => {
+      unsubscribers.forEach(unsubscribe => unsubscribe());
+    };
   }, []);
 
-  const fetchDashboardData = async () => {
+  const fetchMonthlyTrends = async () => {
     try {
-      // Fetch total users
-      const usersSnapshot = await getDocs(collection(db, 'users'));
-      const totalUsers = usersSnapshot.size;
-
-      // Fetch active users (last 30 days)
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const activeUsersQuery = query(
-        collection(db, 'userProfiles'),
-        where('lastActive', '>=', Timestamp.fromDate(thirtyDaysAgo))
+      // Fetch monthly analytics if available
+      const analyticsSnapshot = await getDocs(
+        query(
+          collection(db, 'monthlyAnalytics'),
+          orderBy('month', 'desc'),
+          limit(6)
+        )
       );
-      const activeUsersSnapshot = await getDocs(activeUsersQuery);
-      const activeUsers = activeUsersSnapshot.size;
 
-      // Fetch total API calls
-      const creditsSnapshot = await getDocs(collection(db, 'userCredits'));
-      let totalApiCalls = 0;
-      creditsSnapshot.forEach(doc => {
-        totalApiCalls += doc.data().totalApiCalls || 0;
-      });
+      if (!analyticsSnapshot.empty) {
+        const monthlyData = analyticsSnapshot.docs
+          .map(doc => {
+            const data = doc.data();
+            return {
+              month: data.monthLabel || data.month,
+              cost: data.totalCost || 0,
+              apiCalls: data.totalApiCalls || 0
+            };
+          })
+          .reverse();
 
-      // Calculate current cost
-      const currentCost = (totalApiCalls * 0.032).toFixed(2);
+        setCostTrendData(monthlyData);
 
-      // Mock cost trend data (last 6 months)
-      const mockCostTrend = [
-        { month: 'Aug', cost: 85 },
-        { month: 'Sep', cost: 92 },
-        { month: 'Oct', cost: 110 },
-        { month: 'Nov', cost: 135 },
-        { month: 'Dec', cost: 165 },
-        { month: 'Jan', cost: 180.50 }
-      ];
-
-      setStats({
-        totalUsers,
-        activeUsers,
-        totalApiCalls,
-        currentCost: parseFloat(currentCost),
-        userGrowth: 12
-      });
-      setCostTrendData(mockCostTrend);
-      
-      // Calculate credit usage percentage
-      const creditLimit = 200000; // 200k free tier limit
-      const usagePercent = Math.min(100, ((totalApiCalls / creditLimit) * 100).toFixed(1));
-      setCreditUsagePercent(usagePercent);
-
-      setLoading(false);
+        // Calculate growth from last month
+        if (monthlyData.length >= 2) {
+          const currentMonth = monthlyData[monthlyData.length - 1].apiCalls;
+          const lastMonth = monthlyData[monthlyData.length - 2].apiCalls;
+          const growth = lastMonth > 0 
+            ? (((currentMonth - lastMonth) / lastMonth) * 100).toFixed(1)
+            : 0;
+          setStats(prev => ({ ...prev, userGrowth: parseFloat(growth) }));
+        }
+      } else {
+        // Generate default trend from current data
+        generateDefaultTrend();
+      }
     } catch (error) {
-      console.error('Error fetching dashboard data:', error);
-      setLoading(false);
+      console.error('Error fetching monthly trends:', error);
+      generateDefaultTrend();
     }
+  };
+
+  const generateDefaultTrend = () => {
+    // Generate last 6 months data based on current stats
+    const months = ['Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan'];
+    const currentDate = new Date();
+    const data = months.map((month, index) => ({
+      month,
+      cost: parseFloat((stats.currentCost * (0.5 + index * 0.1)).toFixed(2))
+    }));
+    setCostTrendData(data);
+  };
+
+  const formatTimeAgo = (date) => {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   };
 
   const StatCard = ({ title, value, change, icon: Icon, trend, color }) => (
@@ -281,27 +389,29 @@ const AdminDashboard = () => {
       <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl p-6">
         <h3 className="text-xl font-semibold text-white mb-4">Recent Activity</h3>
         <div className="space-y-3">
-          {[
-            { user: 'john@example.com', action: 'Searched for "Kurti Wholesaler" in Mumbai', time: '2 mins ago' },
-            { user: 'jane@example.com', action: 'Exported 45 leads', time: '15 mins ago' },
-            { user: 'mike@example.com', action: 'Registered new account', time: '1 hour ago' },
-            { user: 'sarah@example.com', action: 'Used 5 API credits', time: '2 hours ago' },
-          ].map((activity, index) => (
-            <div key={index} className="flex items-center justify-between py-3 border-b border-slate-700/50 last:border-0">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 bg-blue-500/20 rounded-full flex items-center justify-center">
-                  <span className="text-blue-400 text-sm font-semibold">
-                    {activity.user[0].toUpperCase()}
-                  </span>
+          {recentActivity.length > 0 ? (
+            recentActivity.map((activity, index) => (
+              <div key={index} className="flex items-center justify-between py-3 border-b border-slate-700/50 last:border-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-blue-500/20 rounded-full flex items-center justify-center">
+                    <span className="text-blue-400 text-sm font-semibold">
+                      {activity.user[0]?.toUpperCase() || 'S'}
+                    </span>
+                  </div>
+                  <div>
+                    <p className="text-gray-300 text-sm">{activity.action}</p>
+                    <p className="text-gray-500 text-xs">{activity.user}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-gray-300 text-sm">{activity.action}</p>
-                  <p className="text-gray-500 text-xs">{activity.user}</p>
-                </div>
+                <span className="text-gray-500 text-xs">{activity.time}</span>
               </div>
-              <span className="text-gray-500 text-xs">{activity.time}</span>
+            ))
+          ) : (
+            <div className="text-center text-gray-500 py-8">
+              <Activity className="w-12 h-12 mx-auto mb-2 opacity-50" />
+              <p>No recent activity</p>
             </div>
-          ))}
+          )}
         </div>
       </div>
     </div>

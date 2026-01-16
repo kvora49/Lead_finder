@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider } from 'firebase/auth';
-import { auth } from '../firebase';
+import { auth, db } from '../firebase';
+import { doc, setDoc, updateDoc, serverTimestamp, getDoc } from 'firebase/firestore';
 import { Link, useNavigate } from 'react-router-dom';
 import { Search, Mail, Lock, AlertCircle, Loader2, Eye, EyeOff } from 'lucide-react';
 import { useEffect } from 'react';
+import { logAuthEvent } from '../services/analyticsService';
 
 const Login = () => {
   const [email, setEmail] = useState('');
@@ -19,6 +21,28 @@ const Login = () => {
       try {
         const result = await getRedirectResult(auth);
         if (result) {
+          // Check if user is an admin
+          const adminDocRef = doc(db, 'adminUsers', result.user.email);
+          const adminDocSnap = await getDoc(adminDocRef);
+          const isAdmin = adminDocSnap.exists();
+          const adminRole = isAdmin ? adminDocSnap.data().role : 'user';
+
+          // Update user document with correct role
+          try {
+            await setDoc(doc(db, 'users', result.user.uid), {
+              uid: result.user.uid,
+              email: result.user.email,
+              role: adminRole,
+              lastActive: serverTimestamp()
+            }, { merge: true });
+          } catch (docError) {
+            console.error('Error updating user document:', docError);
+          }
+
+          await logAuthEvent(result.user.uid, result.user.email, 'User Login', {
+            method: 'Google Redirect',
+            role: adminRole
+          });
           navigate('/');
         }
       } catch (error) {
@@ -36,7 +60,30 @@ const Login = () => {
     setLoading(true);
 
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      const userCredential = await signInWithEmailAndPassword(auth, email, password);
+      
+      // Check if user is an admin
+      const adminDocRef = doc(db, 'adminUsers', userCredential.user.email);
+      const adminDocSnap = await getDoc(adminDocRef);
+      const isAdmin = adminDocSnap.exists();
+      const adminRole = isAdmin ? adminDocSnap.data().role : 'user';
+      
+      // Update user document with correct role
+      try {
+        await setDoc(doc(db, 'users', userCredential.user.uid), {
+          uid: userCredential.user.uid,
+          email: userCredential.user.email,
+          role: adminRole,
+          lastActive: serverTimestamp()
+        }, { merge: true });
+      } catch (docError) {
+        console.error('Error updating user document:', docError);
+      }
+
+      await logAuthEvent(userCredential.user.uid, userCredential.user.email, 'User Login', {
+        method: 'Email/Password',
+        role: adminRole
+      });
       navigate('/');
     } catch (error) {
       // Better error messages
@@ -71,7 +118,52 @@ const Login = () => {
 
     try {
       // Try popup method first
-      await signInWithPopup(auth, provider);
+      const result = await signInWithPopup(auth, provider);
+      const user = result.user;
+
+      // Check if user is an admin
+      const adminDocRef = doc(db, 'adminUsers', user.email);
+      const adminDocSnap = await getDoc(adminDocRef);
+      const isAdmin = adminDocSnap.exists();
+      const adminRole = isAdmin ? adminDocSnap.data().role : 'user';
+
+      // Create or update user document in Firestore
+      const userDocRef = doc(db, 'users', user.uid);
+      const userCreditsRef = doc(db, 'userCredits', user.uid);
+      
+      try {
+        // Create/update user document
+        await setDoc(userDocRef, {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName,
+          photoURL: user.photoURL,
+          role: adminRole,
+          status: 'active',
+          provider: 'google',
+          lastActive: serverTimestamp()
+        }, { merge: true });
+
+        // Initialize user credits if not exists (only for regular users)
+        if (adminRole === 'user') {
+          await setDoc(userCreditsRef, {
+            userId: user.uid,
+            userEmail: user.email,
+            creditsUsed: 0,
+            totalApiCalls: 0
+          }, { merge: true });
+        }
+
+        // Log authentication event
+        await logAuthEvent(user.uid, user.email, 'User Login', {
+          method: 'Google',
+          provider: 'google',
+          role: adminRole
+        });
+      } catch (firestoreError) {
+        console.error('Error updating user document:', firestoreError);
+      }
+
       navigate('/');
     } catch (error) {
       // If popup is blocked or closed, use redirect method
