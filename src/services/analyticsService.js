@@ -15,13 +15,17 @@ export const logActivity = async (activityData) => {
       severity: activityData.severity || 'info',
       action: activityData.action,
       user: activityData.user || activityData.userEmail,
-      userEmail: activityData.userEmail,
-      userId: activityData.userId,
-      details: activityData.details,
-      ip: activityData.ip,
-      userAgent: activityData.userAgent,
+      userEmail: activityData.userEmail || '',
+      userId: activityData.userId || '',
+      details: activityData.details || '',
+      userAgent: activityData.userAgent || navigator.userAgent || '',
       ...activityData.metadata
     };
+
+    // Only add ip field if it exists (remove undefined fields)
+    if (activityData.ip) {
+      logEntry.ip = activityData.ip;
+    }
 
     await addDoc(collection(db, 'systemLogs'), logEntry);
     return true;
@@ -34,7 +38,7 @@ export const logActivity = async (activityData) => {
 // Log user authentication events
 export const logAuthEvent = async (userId, userEmail, eventType, details = {}) => {
   try {
-    await logActivity({
+    const logData = {
       type: 'auth',
       severity: 'info',
       action: eventType,
@@ -42,9 +46,15 @@ export const logAuthEvent = async (userId, userEmail, eventType, details = {}) =
       userEmail,
       userId,
       details: typeof details === 'string' ? details : JSON.stringify(details),
-      ip: details.ip,
       userAgent: navigator.userAgent
-    });
+    };
+
+    // Only add ip if provided
+    if (details.ip) {
+      logData.ip = details.ip;
+    }
+
+    await logActivity(logData);
 
     // Update user's last active timestamp
     if (userId) {
