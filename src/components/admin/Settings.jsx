@@ -5,6 +5,7 @@ import { Settings as SettingsIcon, Key, Shield, Bell, Database, Mail, Globe, Sav
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
 import CreditSettingsModal from './CreditSettingsModal';
+import DataSeeder from './DataSeeder';
 
 /**
  * Settings Component
@@ -443,6 +444,11 @@ const Settings = () => {
             </label>
           </div>
         </div>
+      </div>
+
+      {/* Data Seeder Section */}
+      <div className="mb-8">
+        <DataSeeder />
       </div>
 
       {/* Credit Settings Modal */}

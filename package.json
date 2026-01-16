@@ -10,7 +10,8 @@
     "dev:all": "concurrently \"npm run dev\" \"npm run server\"",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0"
+    "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
+    "seed": "node scripts/seedData.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -18,7 +19,7 @@
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "firebase": "^12.7.0",
-    "firebase-admin": "^13.6.0",
+    "firebase-admin": "^13.0.2",
     "lucide-react": "^0.294.0",
     "nodemailer": "^7.0.12",
     "react": "^18.2.0",
