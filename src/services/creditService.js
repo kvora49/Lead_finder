@@ -1,5 +1,5 @@
 import { db } from '../firebase';
-import { doc, getDoc, setDoc, updateDoc, increment, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, increment, onSnapshot, collection, getDocs } from 'firebase/firestore';
 
 /**
  * Credit Service - Manages GLOBAL credits synced across ALL users via Firestore
@@ -19,6 +19,7 @@ const getCurrentMonth = () => {
 
 /**
  * Initialize global credits (shared by all users)
+ * Checks for old credit data and migrates if needed
  * @returns {Promise<Object>} Credit data
  */
 export const initializeGlobalCredits = async () => {
@@ -29,7 +30,39 @@ export const initializeGlobalCredits = async () => {
     const docSnap = await getDoc(docRef);
 
     if (!docSnap.exists()) {
-      // First time - create initial credit document
+      console.log('📝 globalCredits/shared not found, checking for old data...');
+      
+      // Check if old data exists in globalCredits collection (different doc IDs)
+      try {
+        const collectionRef = collection(db, CREDITS_COLLECTION);
+        const snapshot = await getDocs(collectionRef);
+        
+        let oldData = null;
+        snapshot.forEach(doc => {
+          if (doc.id !== GLOBAL_DOC_ID) {
+            console.log('🔍 Found old credit document:', doc.id, doc.data());
+            oldData = doc.data();
+          }
+        });
+
+        // If old data found, migrate it to the new 'shared' document
+        if (oldData && oldData.totalApiCalls) {
+          console.log('🔄 Migrating old credit data:', oldData.totalApiCalls);
+          const migratedData = {
+            currentMonth,
+            totalApiCalls: oldData.totalApiCalls || 0,
+            lastUpdated: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+            migratedFrom: 'old-structure'
+          };
+          await setDoc(docRef, migratedData);
+          return migratedData;
+        }
+      } catch (migrationError) {
+        console.warn('Could not check for old data:', migrationError);
+      }
+
+      // No old data - create fresh document
       const initialData = {
         currentMonth,
         totalApiCalls: 0,
