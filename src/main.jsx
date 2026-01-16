@@ -20,6 +20,7 @@ import SearchAnalytics from './components/admin/SearchAnalytics.jsx';
 import AccessControl from './components/admin/AccessControl.jsx';
 import SystemLogs from './components/admin/SystemLogs.jsx';
 import Settings from './components/admin/Settings.jsx';
+import MyLists from './components/MyLists.jsx';
 import { AuthProvider } from './contexts/AuthContext.jsx';
 import { AdminAuthProvider } from './contexts/AdminAuthContext.jsx';
 import './index.css';
@@ -45,6 +46,16 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               element={
                 <ProtectedRoute>
                   <App />
+                </ProtectedRoute>
+              } 
+            />
+            
+            {/* My Lists page */}
+            <Route 
+              path="/my-lists" 
+              element={
+                <ProtectedRoute>
+                  <MyLists />
                 </ProtectedRoute>
               } 
             />

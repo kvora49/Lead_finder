@@ -3,6 +3,8 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import admin from 'firebase-admin';
+import { readFileSync } from 'fs';
 
 dotenv.config();
 
@@ -13,7 +15,21 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json());
 
-// In-memory store for verification codes (use Redis/database in production)
+// Initialize Firebase Admin SDK
+try {
+  const serviceAccount = JSON.parse(readFileSync('./serviceAccountKey.json', 'utf8'));
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log('✅ Firebase Admin initialized');
+} catch (error) {
+  console.warn('⚠️ Firebase Admin not initialized - verification codes will use in-memory fallback');
+  console.warn('To enable persistent storage, add serviceAccountKey.json file');
+}
+
+const db = admin.firestore ? admin.firestore() : null;
+
+// Fallback in-memory store if Firestore is not available
 const verificationCodes = new Map();
 
 // Create transporter using SMTP
@@ -54,8 +70,19 @@ app.post('/api/send-verification', async (req, res) => {
     const code = generateCode();
     const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes
 
-    // Store code
-    verificationCodes.set(email, { code, expiresAt });
+    // Store code in Firestore (persistent) or memory (fallback)
+    if (db) {
+      await db.collection('verificationCodes').doc(email).set({
+        code,
+        expiresAt,
+        createdAt: Date.now(),
+        email
+      });
+      console.log(`✅ Verification code stored in Firestore for ${email}`);
+    } else {
+      verificationCodes.set(email, { code, expiresAt });
+      console.log(`⚠️ Verification code stored in memory for ${email} (will be lost on restart)`);
+    }
 
     // Send email
     await transporter.sendMail({
@@ -115,33 +142,59 @@ app.post('/api/send-verification', async (req, res) => {
 });
 
 // Verify code
-app.post('/api/verify-code', (req, res) => {
+app.post('/api/verify-code', async (req, res) => {
   const { email, code } = req.body;
 
   if (!email || !code) {
     return res.status(400).json({ error: 'Email and code are required' });
   }
 
-  const stored = verificationCodes.get(email);
+  try {
+    let stored;
+    
+    // Try Firestore first, fallback to memory
+    if (db) {
+      const docRef = db.collection('verificationCodes').doc(email);
+      const doc = await docRef.get();
+      
+      if (doc.exists) {
+        stored = doc.data();
+      }
+    } else {
+      stored = verificationCodes.get(email);
+    }
 
-  if (!stored) {
-    return res.status(400).json({ error: 'No verification code found. Please request a new one.' });
+    if (!stored) {
+      return res.status(400).json({ error: 'No verification code found. Please request a new one.' });
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      // Clean up expired code
+      if (db) {
+        await db.collection('verificationCodes').doc(email).delete();
+      } else {
+        verificationCodes.delete(email);
+      }
+      return res.status(400).json({ error: 'Verification code expired. Please request a new one.' });
+    }
+
+    if (stored.code !== code) {
+      return res.status(400).json({ error: 'Invalid verification code' });
+    }
+
+    // Code is valid - remove it
+    if (db) {
+      await db.collection('verificationCodes').doc(email).delete();
+    } else {
+      verificationCodes.delete(email);
+    }
+    console.log(`✅ Email verified: ${email}`);
+
+    res.json({ success: true, message: 'Email verified successfully' });
+  } catch (error) {
+    console.error('Error verifying code:', error);
+    res.status(500).json({ error: 'Failed to verify code' });
   }
-
-  if (Date.now() > stored.expiresAt) {
-    verificationCodes.delete(email);
-    return res.status(400).json({ error: 'Verification code expired. Please request a new one.' });
-  }
-
-  if (stored.code !== code) {
-    return res.status(400).json({ error: 'Invalid verification code' });
-  }
-
-  // Code is valid - remove it
-  verificationCodes.delete(email);
-  console.log(`✅ Email verified: ${email}`);
-
-  res.json({ success: true, message: 'Email verified successfully' });
 });
 
 // Health check

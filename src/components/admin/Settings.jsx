@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { doc, getDoc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
-import { Settings as SettingsIcon, Key, Shield, Bell, Database, Mail, Globe, Save, AlertCircle } from 'lucide-react';
+import { Settings as SettingsIcon, Key, Shield, Bell, Database, Mail, Globe, Save, AlertCircle, DollarSign } from 'lucide-react';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
+import CreditSettingsModal from './CreditSettingsModal';
 
 /**
  * Settings Component
@@ -14,6 +15,7 @@ const Settings = () => {
   const { isSuperAdmin, currentAdmin } = useAdminAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [showCreditSettings, setShowCreditSettings] = useState(false);
   const [settings, setSettings] = useState({
     // API Settings
     rapidApiKey: '',
@@ -150,6 +152,30 @@ const Settings = () => {
           </div>
         </div>
       )}
+
+      {/* Credit System Settings */}
+      <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+            <DollarSign className="w-5 h-5 text-green-400" />
+            Credit System Configuration
+          </h3>
+          <button
+            onClick={() => setShowCreditSettings(true)}
+            disabled={!isSuperAdmin}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            <SettingsIcon className="w-4 h-4" />
+            Configure Credit Mode
+          </button>
+        </div>
+        <div className="bg-blue-500/10 border border-blue-500/50 rounded-lg p-4">
+          <p className="text-blue-400 text-sm">
+            <strong>Credit Mode:</strong> Determines whether users share a global credit pool or have individual limits.
+            Click "Configure Credit Mode" to change between global and individual credit systems.
+          </p>
+        </div>
+      </div>
 
       {/* API Settings */}
       <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700/50 rounded-xl p-6">
@@ -418,6 +444,17 @@ const Settings = () => {
           </div>
         </div>
       </div>
+
+      {/* Credit Settings Modal */}
+      {showCreditSettings && (
+        <CreditSettingsModal
+          adminUser={currentAdmin}
+          onClose={() => setShowCreditSettings(false)}
+          onUpdate={() => {
+            // Settings updated successfully
+          }}
+        />
+      )}
     </div>
   );
 };

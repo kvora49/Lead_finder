@@ -2,24 +2,88 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // User Credits Collection
-    match /userCredits/{userId} {
-      // Users can only read their own credits
-      allow read: if request.auth != null && request.auth.uid == userId;
-      
-      // Users can update their own credits
-      allow write: if request.auth != null && request.auth.uid == userId;
-      
-      // Ensure data integrity - users can't set negative credits
-      allow update: if request.auth != null 
-                    && request.auth.uid == userId
-                    && request.resource.data.totalApiCalls >= 0;
+    // Helper function to check if user is admin
+    function isAdmin() {
+      return request.auth != null && 
+             (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin');
     }
     
-    // User Profiles Collection (for future use)
+    // Global Credits Collection (shared counter)
+    match /globalCredits/{docId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+    
+    // User Credits Collection
+    match /userCredits/{userId} {
+      // Users can read their own credits, admins can read all
+      allow read: if request.auth != null && 
+                     (request.auth.uid == userId || isAdmin());
+      
+      // Users can update their own credits, admins can update all
+      allow write: if request.auth != null && 
+                      (request.auth.uid == userId || isAdmin());
+      
+      // Ensure data integrity - users can't set negative credits
+      allow update: if request.auth != null && 
+                       request.resource.data.totalApiCalls >= 0;
+    }
+    
+    // User Profiles Collection
     match /users/{userId} {
+      // Users can read their own profile, admins can read all
+      allow read: if request.auth != null && 
+                     (request.auth.uid == userId || isAdmin());
+      
+      // Users can update their own profile, admins can update all
+      allow write: if request.auth != null && 
+                      (request.auth.uid == userId || isAdmin());
+    }
+    
+    // Admin Users Collection (admin roles and permissions)
+    match /adminUsers/{email} {
+      allow read: if request.auth != null && isAdmin();
+      allow write: if request.auth != null && 
+                      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin';
+    }
+    
+    // System Logs Collection (activity tracking)
+    match /systemLogs/{logId} {
+      allow read: if request.auth != null && isAdmin();
+      allow write: if request.auth != null; // Any authenticated user can write logs
+    }
+    
+    // Search Logs Collection (search analytics)
+    match /searchLogs/{logId} {
+      allow read: if request.auth != null && isAdmin();
+      allow write: if request.auth != null;
+    }
+    
+    // Monthly Analytics Collection
+    match /monthlyAnalytics/{monthId} {
+      allow read: if request.auth != null && isAdmin();
+      allow write: if request.auth != null && isAdmin();
+    }
+    
+    // System Config Collection (global settings)
+    match /systemConfig/{configId} {
+      allow read: if request.auth != null && isAdmin();
+      allow write: if request.auth != null && isAdmin();
+    }
+    
+    // Saved Lists Collection (user's saved lead lists)
+    match /savedLists/{userId}/lists/{listId} {
+      // Users can only access their own saved lists
       allow read: if request.auth != null && request.auth.uid == userId;
       allow write: if request.auth != null && request.auth.uid == userId;
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Verification Codes Collection (for email verification)
+    match /verificationCodes/{email} {
+      allow read, write: if request.auth == null; // Public access for registration
+      allow delete: if request.auth == null; // Allow cleanup after verification
     }
     
     // Deny all other access by default

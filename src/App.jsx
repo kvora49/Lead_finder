@@ -7,11 +7,13 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Search, Download, Loader2, LogOut, User, Shield } from 'lucide-react';
+import { Search, Download, Loader2, LogOut, User, Shield, BookmarkCheck, Save } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import ExcelJS from 'exceljs';
 import LeadCard from './components/LeadCard';
 import CreditSyncStatus from './components/CreditSyncStatus';
+import SaveLeadsModal from './components/SaveLeadsModal';
+import RecentSearches from './components/RecentSearches';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress } from './services/placesApi';
 import { GOOGLE_API_KEY } from './config';
 import { useAuth } from './contexts/AuthContext';
@@ -26,6 +28,28 @@ function App() {
   const { currentUser, signOut } = useAuth();
   const { isAdmin } = useAdminAuth();
   const navigate = useNavigate();
+
+  // Check for admin impersonation
+  const [impersonationMode, setImpersonationMode] = useState(null);
+
+  useEffect(() => {
+    // Check if admin is impersonating a user
+    const urlParams = new URLSearchParams(window.location.search);
+    const impersonateUserId = urlParams.get('impersonate');
+    
+    if (impersonateUserId) {
+      const impersonationData = sessionStorage.getItem('adminImpersonation');
+      if (impersonationData) {
+        const data = JSON.parse(impersonationData);
+        setImpersonationMode(data);
+      }
+    }
+  }, []);
+
+  const exitImpersonation = () => {
+    sessionStorage.removeItem('adminImpersonation');
+    window.location.href = '/admin';
+  };
 
   // State Management
   const [keyword, setKeyword] = useState(''); // Search keyword (e.g., "Kurti", "Electronics")
@@ -42,6 +66,9 @@ function App() {
   // Credit tracking states - synced with Firestore
   const [apiCallsThisSession, setApiCallsThisSession] = useState(0); // API calls in current session
   const [totalApiCalls, setTotalApiCalls] = useState(0); // Total API calls from Firestore
+
+  // Save leads modal
+  const [showSaveModal, setShowSaveModal] = useState(false);
 
   const [currentMonth] = useState(() => {
     const now = new Date();
@@ -484,6 +511,31 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
+      {/* Admin Impersonation Banner */}
+      {impersonationMode && (
+        <div className="bg-gradient-to-r from-yellow-500 to-orange-500 text-white py-3 px-4 shadow-lg">
+          <div className="container mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <Shield className="w-5 h-5" />
+              <div>
+                <p className="font-bold text-sm">
+                  Admin Mode: Viewing as {impersonationMode.targetUserEmail}
+                </p>
+                <p className="text-xs opacity-90">
+                  You are seeing the application from this user's perspective
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={exitImpersonation}
+              className="px-4 py-2 bg-white/20 hover:bg-white/30 backdrop-blur-sm rounded-lg font-medium text-sm transition-colors"
+            >
+              Exit Admin Mode
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header Section */}
       <header className="bg-white shadow-sm border-b border-gray-200">
         <div className="container mx-auto px-4 py-6">
@@ -522,6 +574,16 @@ function App() {
                   <span className="font-medium">Admin Dashboard</span>
                 </button>
               )}
+
+              {/* My Lists Button */}
+              <button
+                onClick={() => navigate('/my-lists')}
+                className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-green-600 to-teal-600 text-white rounded-lg hover:from-green-700 hover:to-teal-700 transition-all shadow-md hover:shadow-lg transform hover:scale-105"
+                title="View Saved Lists"
+              >
+                <BookmarkCheck className="w-4 h-4" />
+                <span className="font-medium">My Lists</span>
+              </button>
               
               <button
                 onClick={signOut}
@@ -635,6 +697,23 @@ function App() {
 
       {/* Main Content Container */}
       <main className="container mx-auto px-4 py-8">
+        {/* Recent Searches */}
+        {!loading && leads.length === 0 && (
+          <div className="mb-8">
+            <RecentSearches 
+              userId={currentUser?.uid} 
+              onSearchSelect={(search) => {
+                setKeyword(search.keyword);
+                setLocation(search.location);
+                // Auto-scroll to search button
+                setTimeout(() => {
+                  document.getElementById('search-button')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 100);
+              }}
+            />
+          </div>
+        )}
+
         {/* Search Section */}
         <div className="glass-panel bg-white rounded-xl shadow-lg p-6 mb-8">
           <h2 className="text-2xl font-semibold text-gray-800 mb-6">Search Criteria</h2>
@@ -796,6 +875,7 @@ function App() {
 
           {/* Search Button */}
           <button
+            id="search-button"
             onClick={handleSearch}
             disabled={loading}
             className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold py-4 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 shadow-md hover:shadow-lg"
@@ -836,13 +916,22 @@ function App() {
               <h2 className="text-2xl font-semibold text-gray-800">
                 Results ({leads.length} {leads.length === 1 ? 'lead' : 'leads'} found)
               </h2>
-              <button
-                onClick={exportToExcel}
-                className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white font-medium px-6 py-3 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
-              >
-                <Download className="w-5 h-5" />
-                <span>Download Excel</span>
-              </button>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowSaveModal(true)}
+                  className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium px-6 py-3 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
+                >
+                  <Save className="w-5 h-5" />
+                  <span>Save to My Lists</span>
+                </button>
+                <button
+                  onClick={exportToExcel}
+                  className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white font-medium px-6 py-3 rounded-lg transition-colors duration-200 shadow-md hover:shadow-lg"
+                >
+                  <Download className="w-5 h-5" />
+                  <span>Download Excel</span>
+                </button>
+              </div>
             </div>
 
             {/* Results Grid - Responsive layout */}
@@ -864,6 +953,19 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Save Leads Modal */}
+      {showSaveModal && (
+        <SaveLeadsModal
+          leads={leads}
+          searchQuery={{ keyword, location, category }}
+          onClose={() => setShowSaveModal(false)}
+          onSuccess={() => {
+            setShowSaveModal(false);
+            alert('✅ Leads saved successfully! Check "My Lists" to view.');
+          }}
+        />
+      )}
 
       {/* Footer */}
       <footer className="bg-white border-t border-gray-200 mt-12">

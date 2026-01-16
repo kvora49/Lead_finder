@@ -3,6 +3,7 @@ import { collection, getDocs, query, orderBy, limit, where, onSnapshot } from 'f
 import { db } from '../../firebase';
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, DollarSign, Users, AlertCircle, Award, Activity, Calendar } from 'lucide-react';
+import { CREDIT_PRICING } from '../../config';
 
 /**
  * CreditAnalytics Component
@@ -23,17 +24,33 @@ const CreditAnalytics = () => {
   const [alerts, setAlerts] = useState([]);
 
   useEffect(() => {
-    // Set up real-time listener for user credits
-    const unsubscribe = onSnapshot(collection(db, 'userCredits'), async () => {
-      await fetchAnalytics();
+    const unsubscribers = [];
+    
+    // Real-time listener for users (prevents stale data)
+    const usersMap = {};
+    const usersUnsubscribe = onSnapshot(collection(db, 'users'), (snapshot) => {
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        usersMap[doc.id] = {
+          email: data.email,
+          name: data.displayName || data.email?.split('@')[0]
+        };
+      });
+      // Trigger analytics refresh when users change
+      fetchAnalytics(usersMap);
     });
+    unsubscribers.push(usersUnsubscribe);
     
-    fetchAnalytics();
+    // Set up real-time listener for user credits
+    const creditsUnsubscribe = onSnapshot(collection(db, 'userCredits'), () => {
+      fetchAnalytics(usersMap);
+    });
+    unsubscribers.push(creditsUnsubscribe);
     
-    return () => unsubscribe();
+    return () => unsubscribers.forEach(unsub => unsub());
   }, []);
 
-  const fetchAnalytics = async () => {
+  const fetchAnalytics = async (usersMap = {}) => {
     try {
       setLoading(true);
       
@@ -44,7 +61,8 @@ const CreditAnalytics = () => {
       
       creditsSnapshot.forEach(doc => {
         const data = doc.data();
-        const cost = (data.creditsUsed || 0) * 0.002; // Example: $0.002 per credit
+        // Use centralized pricing config
+        const cost = CREDIT_PRICING.calculateCost(data.creditsUsed || 0);
         totalCost += cost;
         creditsData.push({
           id: doc.id,
@@ -53,22 +71,24 @@ const CreditAnalytics = () => {
         });
       });
 
-      // Fetch user profiles for names
-      const usersSnapshot = await getDocs(collection(db, 'users'));
-      const usersMap = {};
-      usersSnapshot.forEach(doc => {
-        const data = doc.data();
-        usersMap[doc.id] = {
-          email: data.email,
-          name: data.displayName || data.email?.split('@')[0]
-        };
-      });
+      // Use provided usersMap (from real-time listener) or fetch if not available
+      let finalUsersMap = usersMap;
+      if (Object.keys(finalUsersMap).length === 0) {
+        const usersSnapshot = await getDocs(collection(db, 'users'));
+        usersSnapshot.forEach(doc => {
+          const data = doc.data();
+          finalUsersMap[doc.id] = {
+            email: data.email,
+            name: data.displayName || data.email?.split('@')[0]
+          };
+        });
+      }
 
       // Calculate top users by credit usage
       const sortedUsers = creditsData
         .map(credit => ({
           ...credit,
-          ...usersMap[credit.id]
+          ...finalUsersMap[credit.id]
         }))
         .sort((a, b) => (b.creditsUsed || 0) - (a.creditsUsed || 0))
         .slice(0, 10);
@@ -84,7 +104,7 @@ const CreditAnalytics = () => {
       setCreditDistribution(distribution);
 
       // Generate alerts
-      const generatedAlerts = generateAlerts(creditsData, usersMap);
+      const generatedAlerts = generateAlerts(creditsData, finalUsersMap);
       setAlerts(generatedAlerts);
 
       // Calculate stats

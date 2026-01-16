@@ -39,16 +39,21 @@ const AccessControl = () => {
         });
       });
 
-      // Filter pending users
-      const pending = users.filter(u => 
-        !u.emailVerified || u.status === 'pending'
-      );
+      // Filter pending users (exclude admin/super_admin roles)
+      const pending = users.filter(u => {
+        const role = u.role || 'user';
+        // Don't show admins or super_admins in pending list
+        if (role === 'admin' || role === 'super_admin') return false;
+        // Show users with pending status OR unverified email with no status
+        return u.status === 'pending' || (!u.status && !u.emailVerified);
+      });
       setPendingUsers(pending);
 
-      // Calculate stats
-      const approved = users.filter(u => u.status === 'active').length;
-      const suspended = users.filter(u => u.status === 'suspended').length;
-      const rejected = users.filter(u => u.status === 'rejected').length;
+      // Calculate stats (only for regular users, exclude admins)
+      const regularUsers = users.filter(u => (u.role || 'user') === 'user');
+      const approved = regularUsers.filter(u => u.status === 'active').length;
+      const suspended = regularUsers.filter(u => u.status === 'suspended').length;
+      const rejected = regularUsers.filter(u => u.status === 'rejected').length;
       
       setStats({
         pending: pending.length,
@@ -114,15 +119,8 @@ const AccessControl = () => {
         `Approved user: ${userEmail}`
       );
 
-      // Update local state
-      setPendingUsers(prev => prev.filter(u => u.id !== userId));
-      setStats(prev => ({ ...prev, pending: prev.pending - 1, approved: prev.approved + 1 }));
-      
-      // Log action
       console.log(`Approved user: ${userEmail}`);
-      
-      // Refresh data
-      fetchAccessData();
+      alert('User approved successfully!');
     } catch (error) {
       console.error('Error approving user:', error);
       alert('Failed to approve user');
@@ -139,12 +137,8 @@ const AccessControl = () => {
         rejectionReason: reason
       });
 
-      // Update local state
-      setPendingUsers(prev => prev.filter(u => u.id !== userId));
-      setStats(prev => ({ ...prev, pending: prev.pending - 1, rejected: prev.rejected + 1 }));
-      
       console.log(`Rejected user: ${userEmail}`);
-      fetchAccessData();
+      alert('User rejected successfully!');
     } catch (error) {
       console.error('Error rejecting user:', error);
       alert('Failed to reject user');
@@ -162,7 +156,7 @@ const AccessControl = () => {
       });
 
       console.log(`Suspended user: ${userEmail}`);
-      fetchAccessData();
+      alert('User suspended successfully!');
     } catch (error) {
       console.error('Error suspending user:', error);
       alert('Failed to suspend user');

@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { collection, getDocs, query, where, Timestamp, onSnapshot, orderBy, limit, doc } from 'firebase/firestore';
 import { db } from '../../firebase';
+import { CREDIT_PRICING } from '../../config';
 import { 
   LineChart, 
   Line, 
@@ -66,13 +67,11 @@ const AdminDashboard = () => {
         const data = docSnapshot.data();
         const totalApiCalls = data.totalApiCalls || 0;
         
-        // Calculate current cost ($32 per 1000 requests, same as Credit Tracker)
-        const costPerRequest = 32; // $32 per 1000 requests
-        const currentCost = parseFloat(((totalApiCalls * costPerRequest) / 1000).toFixed(2));
+        // Calculate current cost using centralized pricing config
+        const currentCost = CREDIT_PRICING.calculateCost(totalApiCalls);
         
         // Calculate credit usage percentage
-        const creditLimit = 200000; // 200k free tier limit
-        const usagePercent = Math.min(100, parseFloat(((totalApiCalls / creditLimit) * 100).toFixed(1)));
+        const usagePercent = Math.min(100, parseFloat(((totalApiCalls / CREDIT_PRICING.FREE_TIER_LIMIT) * 100).toFixed(1)));
         
         setStats(prev => ({ 
           ...prev, 
