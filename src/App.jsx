@@ -86,18 +86,21 @@ function App() {
     if (!currentUser) return;
 
     // Initialize credits first to ensure document exists
-    console.log('🔧 DEBUG: Initializing global credits...');
+    console.log('🔧 DEBUG: Initializing global credits for user:', currentUser.email);
     initializeUserCredits(currentUser.uid).then((data) => {
-      console.log('🔧 DEBUG: Credits initialized:', data);
+      console.log('✅ DEBUG: Credits initialized successfully:', data);
       setTotalApiCalls(data.totalApiCalls || 0);
     }).catch((error) => {
       console.error('❌ ERROR initializing credits:', error);
+      console.error('Full error details:', error.message, error.code);
+      // Set to 0 to prevent UI issues
+      setTotalApiCalls(0);
     });
 
     // Subscribe to real-time updates
     console.log('🔧 DEBUG: Subscribing to credit updates...');
     const unsubscribe = subscribeToCredits(currentUser.uid, (credits) => {
-      console.log('🔧 DEBUG: Credit update received:', credits);
+      console.log('📊 DEBUG: Credit update received:', credits);
       setTotalApiCalls(credits);
     });
 

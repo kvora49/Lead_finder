@@ -122,18 +122,28 @@ export const subscribeToGlobalCredits = (callback) => {
         // Month changed - reset credits
         initializeGlobalCredits().then((resetData) => {
           callback(resetData.totalApiCalls || 0);
+        }).catch(err => {
+          console.error('Error resetting credits:', err);
+          callback(0);
         });
       } else {
         callback(data.totalApiCalls || 0);
       }
     } else {
-      // Document doesn't exist yet - initialize
+      // Document doesn't exist yet - initialize it
+      console.log('📝 Global credits document not found, creating...');
       initializeGlobalCredits().then((data) => {
+        console.log('✅ Global credits initialized:', data);
         callback(data.totalApiCalls || 0);
+      }).catch(err => {
+        console.error('❌ Error initializing credits:', err);
+        callback(0);
       });
     }
   }, (error) => {
     console.error('Error subscribing to global credits:', error);
+    // Still call callback with 0 to avoid UI freeze
+    callback(0);
   });
 
   return unsubscribe;
