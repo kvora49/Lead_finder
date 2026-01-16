@@ -68,7 +68,9 @@ service cloud.firestore {
     
     // Search Logs Collection (search analytics)
     match /searchLogs/{logId} {
-      allow read: if request.auth != null && isAdmin();
+      // Users can read their own search logs, admins can read all
+      allow read: if request.auth != null && 
+                     (resource.data.userId == request.auth.uid || isAdmin());
       allow write: if request.auth != null;
     }
     
