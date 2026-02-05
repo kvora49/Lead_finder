@@ -134,30 +134,30 @@ function App() {
       return;
     }
 
-    // Credit limit check - prevent exceeding $200 free tier
-    const currentCost = totalApiCalls * 0.032;
-    const estimatedSearchCost = 20 * 0.032; // Estimate ~20 API calls per search
-    const projectedCost = currentCost + estimatedSearchCost;
+    // Credit limit check - prevent exceeding credit limit
+    const creditsUsed = totalApiCalls;
+    const estimatedSearchCost = 500; // Estimate ~500 credits per search
+    const projectedCredits = creditsUsed + estimatedSearchCost;
 
-    const CREDIT_LIMIT = 200; // $200 free tier
-    const WARNING_THRESHOLD = 180; // Warn at $180
-    const HARD_LIMIT = 195; // Block at $195 to leave buffer
+    const CREDIT_LIMIT = 200000; // 200,000 credits
+    const WARNING_THRESHOLD = 180000; // Warn at 180,000
+    const HARD_LIMIT = 195000; // Block at 195,000 to leave buffer
 
     // Hard limit - block search
-    if (currentCost >= HARD_LIMIT) {
-      setError(`⛔ Credit limit reached! You've used $${currentCost.toFixed(2)} of $${CREDIT_LIMIT} free credit. Please wait until next month (resets on ${nextResetDate}) or contact support.`);
+    if (creditsUsed >= HARD_LIMIT) {
+      setError(`⛔ Credit limit reached! You've used ${creditsUsed.toLocaleString()} of ${CREDIT_LIMIT.toLocaleString()} credits. Please wait until next month (resets on ${nextResetDate}) or contact support.`);
       return;
     }
 
     // Projected limit - block if this search would exceed limit
-    if (projectedCost > HARD_LIMIT) {
-      setError(`⚠️ Insufficient credits! This search needs ~$${estimatedSearchCost.toFixed(2)}, but you only have $${(HARD_LIMIT - currentCost).toFixed(2)} remaining. Current usage: $${currentCost.toFixed(2)}/${CREDIT_LIMIT}.`);
+    if (projectedCredits > HARD_LIMIT) {
+      setError(`⚠️ Insufficient credits! This search needs ~${estimatedSearchCost.toLocaleString()} credits, but you only have ${(HARD_LIMIT - creditsUsed).toLocaleString()} remaining. Current usage: ${creditsUsed.toLocaleString()}/${CREDIT_LIMIT.toLocaleString()}.`);
       return;
     }
 
     // Warning threshold - show warning but allow search
-    if (currentCost >= WARNING_THRESHOLD && currentCost < HARD_LIMIT) {
-      console.warn(`⚠️ Warning: Approaching credit limit. Used $${currentCost.toFixed(2)} of $${CREDIT_LIMIT} free credit.`);
+    if (creditsUsed >= WARNING_THRESHOLD && creditsUsed < HARD_LIMIT) {
+      console.warn(`⚠️ Warning: Approaching credit limit. Used ${creditsUsed.toLocaleString()} of ${CREDIT_LIMIT.toLocaleString()} credits.`);
     }
 
     // Parse multiple keywords and locations
@@ -647,7 +647,7 @@ function App() {
             {/* Progress Bar */}
             <div className="flex-1 min-w-[200px] max-w-md">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-gray-600">Free Tier Usage</span>
+                <span className="text-xs text-gray-600">Credit Usage</span>
                 <span className="text-xs font-semibold text-gray-700">
                   {Math.min(100, ((totalApiCalls * 0.032) / 200 * 100)).toFixed(1)}%
                 </span>
@@ -663,13 +663,13 @@ function App() {
                 ></div>
               </div>
               <p className="text-xs text-gray-500 mt-1">
-                💡 $200 free credit/month • Resets on {nextResetDate}
+                💡 200000 credits left • Resets on {nextResetDate}
               </p>
               {(totalApiCalls * 0.032) >= 180 && (totalApiCalls * 0.032) < 195 && (
                 <p className="text-xs text-orange-600 mt-1 font-semibold">
-                  ⚠️ Warning: Approaching credit limit! ${(195 - (totalApiCalls * 0.032)).toFixed(2)} remaining before searches are blocked.
+                  ⚠️ Warning: Approaching credit limit! {Math.round((195 - (totalApiCalls * 0.032)) / 0.032)} credits remaining before searches are blocked.
                 </p>
-              )}
+              )}}
               {(totalApiCalls * 0.032) >= 195 && (
                 <p className="text-xs text-red-600 mt-1 font-semibold">
                   ⛔ Credit limit reached! Searches are blocked to prevent charges. Resets {nextResetDate}.

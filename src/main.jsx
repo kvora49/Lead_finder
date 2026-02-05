@@ -12,14 +12,14 @@ import Register from './components/Register.jsx';
 import ForgotPassword from './components/ForgotPassword.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import AdminRoute from './components/admin/AdminRoute.jsx';
-import AdminLayout from './components/admin/AdminLayout.jsx';
-import AdminDashboard from './components/admin/Dashboard.jsx';
+import AdminLayoutNew from './components/admin/AdminLayoutNew.jsx';
+import DashboardNew from './components/admin/DashboardNew.jsx';
 import UserManagement from './components/admin/UserManagement.jsx';
-import CreditAnalytics from './components/admin/CreditAnalytics.jsx';
-import SearchAnalytics from './components/admin/SearchAnalytics.jsx';
-import AccessControl from './components/admin/AccessControl.jsx';
-import SystemLogs from './components/admin/SystemLogs.jsx';
-import Settings from './components/admin/Settings.jsx';
+import CreditAnalyticsNew from './components/admin/CreditAnalyticsNew.jsx';
+import SearchAnalyticsNew from './components/admin/SearchAnalyticsNew.jsx';
+import AccessControlNew from './components/admin/AccessControlNew.jsx';
+import SystemLogsNew from './components/admin/SystemLogsNew.jsx';
+import SettingsNew from './components/admin/SettingsNew.jsx';
 import MyLists from './components/MyLists.jsx';
 import { AuthProvider } from './contexts/AuthContext.jsx';
 import { AdminAuthProvider } from './contexts/AdminAuthContext.jsx';
@@ -65,17 +65,17 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               path="/admin" 
               element={
                 <AdminRoute>
-                  <AdminLayout />
+                  <AdminLayoutNew />
                 </AdminRoute>
               }
             >
-              <Route index element={<AdminDashboard />} />
+              <Route index element={<DashboardNew />} />
               <Route path="users" element={<UserManagement />} />
-              <Route path="credits" element={<CreditAnalytics />} />
-              <Route path="access" element={<AccessControl />} />
-              <Route path="analytics" element={<SearchAnalytics />} />
-              <Route path="logs" element={<SystemLogs />} />
-              <Route path="settings" element={<Settings />} />
+              <Route path="credits" element={<CreditAnalyticsNew />} />
+              <Route path="access" element={<AccessControlNew />} />
+              <Route path="analytics" element={<SearchAnalyticsNew />} />
+              <Route path="logs" element={<SystemLogsNew />} />
+              <Route path="settings" element={<SettingsNew />} />
             </Route>
             
             <Route path="*" element={<Navigate to="/" />} />
