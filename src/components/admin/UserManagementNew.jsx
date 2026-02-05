@@ -65,26 +65,25 @@ const UserManagementNew = () => {
       return;
     }
 
-    console.log('Starting user data load...');
+    console.log('Starting user data load... Admin:', adminUser.uid);
     const unsubscribers = [];
-    
-    let creditsMap = {}; // Shared state
+    const creditsMapRef = { current: {} }; // Use ref to maintain state across listener calls
     
     // First, get all credit data
     const creditsUnsubscribe = onSnapshot(
       collection(db, 'userCredits'),
       (snapshot) => {
         console.log('Credits update received:', snapshot.docs.length, 'records');
-        creditsMap = {}; // Reset map
+        creditsMapRef.current = {}; // Reset map
         snapshot.forEach(doc => {
-          creditsMap[doc.id] = {
+          creditsMapRef.current[doc.id] = {
             creditsUsed: doc.data().creditsUsed || 0,
             totalApiCalls: doc.data().totalApiCalls || 0,
             lastUsed: doc.data().lastUsed,
             creditLimit: doc.data().creditLimit || 'unlimited'
           };
         });
-        console.log('CreditsMap updated:', Object.keys(creditsMap).length, 'users with credit data');
+        console.log('CreditsMap updated:', Object.keys(creditsMapRef.current).length, 'users with credit data');
       },
       (error) => {
         console.error('Credits listener error:', error);
@@ -98,18 +97,20 @@ const UserManagementNew = () => {
       query(collection(db, 'users'), orderBy('createdAt', 'desc')),
       (usersSnapshot) => {
         try {
-          console.log('Users update received:', usersSnapshot.docs.length, 'total docs');
+          console.log('🔍 Users snapshot received:', usersSnapshot.docs.length, 'total docs');
+          console.log('📊 Collection path:', usersSnapshot.query.path || 'default users');
           
           const usersData = usersSnapshot.docs
             .filter(userDoc => {
               const userData = userDoc.data();
               const role = userData.role || 'user';
+              console.log('User doc:', userDoc.id, '- role:', role, '- email:', userData.email);
               return role === 'user'; // Only include regular users, not admins
             })
             .map(userDoc => {
               try {
                 const userData = userDoc.data();
-                const creditData = creditsMap[userDoc.id] || { creditsUsed: 0, totalApiCalls: 0, creditLimit: 'unlimited' };
+                const creditData = creditsMapRef.current[userDoc.id] || { creditsUsed: 0, totalApiCalls: 0, creditLimit: 'unlimited' };
                 
                 return {
                   id: userDoc.id,
@@ -133,7 +134,10 @@ const UserManagementNew = () => {
             })
             .filter(u => u !== null); // Remove failed entries
           
-          console.log('Processed users:', usersData.length, 'regular users with credit data');
+          console.log('✅ Processed users:', usersData.length, 'regular users');
+          if (usersData.length === 0) {
+            console.warn('⚠️ No users found! Check Firestore for users collection.');
+          }
 
           setUsers(usersData);
           calculateStats(usersData);
@@ -147,6 +151,7 @@ const UserManagementNew = () => {
       },
       (error) => {
         console.error('Users listener error:', error);
+        console.error('Error code:', error.code);
         setError(error.message || 'Error loading users from database');
         setLoading(false);
       }
