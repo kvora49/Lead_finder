@@ -14,7 +14,7 @@ import ProtectedRoute from './components/ProtectedRoute.jsx';
 import AdminRoute from './components/admin/AdminRoute.jsx';
 import AdminLayoutNew from './components/admin/AdminLayoutNew.jsx';
 import DashboardNew from './components/admin/DashboardNew.jsx';
-import UserManagement from './components/admin/UserManagement.jsx';
+import UserManagementNew from './components/admin/UserManagementNew.jsx';
 import CreditAnalyticsNew from './components/admin/CreditAnalyticsNew.jsx';
 import SearchAnalyticsNew from './components/admin/SearchAnalyticsNew.jsx';
 import AccessControlNew from './components/admin/AccessControlNew.jsx';
@@ -70,7 +70,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               }
             >
               <Route index element={<DashboardNew />} />
-              <Route path="users" element={<UserManagement />} />
+              <Route path="users" element={<UserManagementNew />} />
               <Route path="credits" element={<CreditAnalyticsNew />} />
               <Route path="access" element={<AccessControlNew />} />
               <Route path="analytics" element={<SearchAnalyticsNew />} />

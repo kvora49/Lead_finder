@@ -22,7 +22,8 @@ import {
   ChevronLeft,
   ChevronRight,
   RefreshCw,
-  BarChart3
+  BarChart3,
+  Users
 } from 'lucide-react';
 import { collection, getDocs, doc, updateDoc, query, orderBy, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
 import { db } from '../../firebase';
@@ -31,6 +32,8 @@ import { logAdminAction } from '../../services/analyticsService';
 
 const UserManagementNew = () => {
   const { adminUser } = useAdminAuth();
+  console.log('🎯 UserManagementNew component rendered. Admin user:', adminUser?.uid || 'NOT AUTHENTICATED');
+  
   const [users, setUsers] = useState([]);
   const [filteredUsers, setFilteredUsers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -94,7 +97,7 @@ const UserManagementNew = () => {
     
     // Users listener - will use creditsMap
     const usersUnsubscribe = onSnapshot(
-      query(collection(db, 'users'), orderBy('createdAt', 'desc')),
+      collection(db, 'users'),
       (usersSnapshot) => {
         try {
           console.log('🔍 Users snapshot received:', usersSnapshot.docs.length, 'total docs');
