@@ -69,8 +69,8 @@ const SystemLogsNew = () => {
           startDate.setDate(now.getDate() - 7);
       }
 
-      // Fetch admin activity logs
-      const adminLogsRef = collection(db, 'adminActivityLogs');
+      // Fetch system logs
+      const adminLogsRef = collection(db, 'systemLogs');
       const q = query(
         adminLogsRef,
         where('timestamp', '>=', Timestamp.fromDate(startDate)),
