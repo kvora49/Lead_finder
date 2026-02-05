@@ -1,0 +1,307 @@
+/**
+ * Google Places API Service
+ * Handles communication with Google Places API (New) for searching businesses
+ */
+
+/**
+ * Performs a single search query with pagination
+ * 
+ * @param {string} textQuery - The complete search query text
+ * @param {string} apiKey - Google Places API key
+ * @param {Function} onProgress - Optional callback to report progress
+ * @param {Function} onApiCall - Callback fired immediately after each API call
+ * @returns {Promise<Array>} - Array of places from this search
+ */
+const performSingleSearch = async (textQuery, apiKey, onProgress = null, onApiCall = null) => {
+  const endpoint = 'https://places.googleapis.com/v1/places:searchText';
+
+  let allPlaces = [];
+  let nextPageToken = null;
+  let pageCount = 0;
+  const maxPages = 10;
+
+  do {
+    pageCount++;
+
+    const requestBody = {
+      textQuery: textQuery,
+      maxResultCount: 20,
+      ...(nextPageToken && { pageToken: nextPageToken })
+    };
+
+    if (onProgress) {
+      onProgress({ query: textQuery, page: pageCount, total: allPlaces.length });
+    }
+
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.businessStatus,nextPageToken'
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    // Notify immediately after API call is made
+    if (onApiCall) {
+      onApiCall();
+    }
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`API Error: ${response.status} - ${errorData.error?.message || response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    console.log(`📄 Query "${textQuery.substring(0, 30)}..." - Page ${pageCount}: ${data.places?.length || 0} places. NextPageToken: ${data.nextPageToken ? 'YES ✅' : 'NO ❌'}`);
+
+    if (data.places && data.places.length > 0) {
+      allPlaces = allPlaces.concat(data.places);
+      nextPageToken = data.nextPageToken || null; // Ensure nextPageToken is null if not present
+
+      console.log(`  📄 Page ${pageCount}: ${data.places.length} results. NextPageToken: ${nextPageToken ? '✅ YES (more available)' : '❌ NO (end of results)'}`);
+
+      if (onProgress) {
+        onProgress({ page: pageCount, total: allPlaces.length });
+      }
+
+      // Stop if no more pages or hit max
+      if (!nextPageToken) {
+        console.log(`  ⛔ Stopping: Google has no more results for this query`);
+        // The loop condition `!nextPageToken` will handle termination
+      }
+
+      if (pageCount >= maxPages) {
+        console.log(`  ⛔ Stopping: Hit maxPages limit (${maxPages}). There may be more results available.`);
+        // The loop condition `pageCount < maxPages` will handle termination
+      }
+    } else {
+      // If no places are returned, there's no next page token
+      nextPageToken = null;
+      console.log(`  ⛔ Stopping: No places returned on this page.`);
+    }
+
+    // Add a delay between API calls if there's a next page and we haven't hit max pages
+    if (nextPageToken && pageCount < maxPages) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+  } while (nextPageToken && pageCount < maxPages);
+
+  return { results: allPlaces, apiCalls: pageCount };
+};/**
+ * Searches for businesses using Google Places API (New) with pagination support
+ * Uses multiple search strategies to maximize results
+ * 
+ * @param {string} keyword - The search keyword (e.g., "Kurti", "Electronics")
+ * @param {string} category - The business category (e.g., "Wholesaler", "Retailer", "Custom")
+ * @param {string} location - The location to search in (e.g., "Mumbai", "New York")
+ * @param {string} apiKey - Google Places API key
+ * @param {string} searchScope - Search area scope: 'wide', 'neighborhood', or 'specific'
+ * @param {string} specificArea - Specific area/building/street name (optional)
+ * @param {Function} onProgress - Optional callback to report progress (current, total)
+ * @param {Function} onApiCall - Callback fired immediately after each API call for real-time counting
+ * @returns {Promise<Object>} - Returns the API response with all places data
+ */
+export const searchBusinesses = async (keyword, category, location, apiKey, searchScope = 'wide', specificArea = '', onProgress = null, onApiCall = null) => {
+  // Google Places API (New) endpoint for text search
+  const endpoint = 'https://places.googleapis.com/v1/places:searchText';
+
+  // Construct the search query dynamically based on category and scope
+  let textQuery;
+
+  // Build base query with category
+  if (category === 'Custom' || category === 'All') {
+    textQuery = `${keyword}`;
+  } else {
+    textQuery = `${keyword} ${category}`;
+  }
+
+  // Add location based on search scope
+  if (searchScope === 'specific' && specificArea.trim()) {
+    // Specific location: narrow down to a building/street/area
+    textQuery += ` in ${specificArea}, ${location}`;
+  } else if (searchScope === 'neighborhood' && specificArea.trim()) {
+    // Neighborhood search with specific area: search in that exact neighborhood
+    textQuery += ` in ${specificArea}, ${location}`;
+  } else if (searchScope === 'neighborhood') {
+    // Neighborhood search without specific area
+    textQuery += ` near ${location}`;
+  } else {
+    // Wide search: whole city
+    textQuery += ` in ${location}`;
+  }
+
+  // Perform multiple searches to maximize results (Google limits each query to ~60 results)
+  let allPlaces = [];
+  let totalApiCalls = 0; // Track total API requests made
+
+  try {
+    console.log(`🔍 Starting comprehensive multi-query search for: ${textQuery}`);
+
+    // Special handling for "All" category - search all business types
+    if (category === 'All') {
+      const businessTypes = ['Retailer', 'Wholesaler', 'Manufacturer', 'Distributor'];
+      console.log(`📋 "All" selected: Searching across ${businessTypes.length} business types`);
+
+      for (let i = 0; i < businessTypes.length; i++) {
+        const businessType = businessTypes[i];
+        const categoryQuery = textQuery.replace(keyword, `${keyword} ${businessType}`);
+        console.log(`🔍 Category ${i + 1}/${businessTypes.length}: "${categoryQuery}"`);
+        const { results: categoryResults, apiCalls } = await performSingleSearch(categoryQuery, apiKey, onProgress, onApiCall);
+        totalApiCalls += apiCalls;
+        allPlaces = allPlaces.concat(categoryResults);
+        console.log(`✅ Category ${i + 1}: ${categoryResults.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
+
+        if (i < businessTypes.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+
+      // Also search without category for general results
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      console.log(`🔍 General search: "${textQuery}"`);
+      const { results: generalResults, apiCalls: generalApiCalls } = await performSingleSearch(textQuery, apiKey, onProgress, onApiCall);
+      totalApiCalls += generalApiCalls;
+      allPlaces = allPlaces.concat(generalResults);
+      console.log(`✅ General: ${generalResults.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
+
+    } else {
+      // Standard multi-query search for specific categories
+
+      // Search 1: Main query with exact match
+      console.log(`🔍 Query 1: Main search "${textQuery}"`);
+      const { results: search1Results, apiCalls: apiCalls1 } = await performSingleSearch(textQuery, apiKey, onProgress, onApiCall);
+      totalApiCalls += apiCalls1;
+      allPlaces = allPlaces.concat(search1Results);
+      console.log(`✅ Query 1: ${search1Results.length} results (${totalApiCalls} API calls)`);
+
+      // Search 2: Add "shops" variation (if not already present)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (!keyword.toLowerCase().includes('shop') && !keyword.toLowerCase().includes('store')) {
+        const shopsQuery = textQuery.replace(keyword, `${keyword} shops`);
+        console.log(`🔍 Query 2: Shops variation "${shopsQuery}"`);
+        const { results: search2Results, apiCalls: apiCalls2 } = await performSingleSearch(shopsQuery, apiKey, onProgress, onApiCall);
+        totalApiCalls += apiCalls2;
+        allPlaces = allPlaces.concat(search2Results);
+        console.log(`✅ Query 2: ${search2Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
+      }
+
+      // Search 3: Try "near" variation for different results
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const nearQuery = textQuery.includes(' in ') ? textQuery.replace(' in ', ' near ') : `${keyword} near ${location}`;
+      console.log(`🔍 Query 3: Near variation "${nearQuery}"`);
+      const { results: search3Results, apiCalls: apiCalls3 } = await performSingleSearch(nearQuery, apiKey, onProgress, onApiCall);
+      totalApiCalls += apiCalls3;
+      allPlaces = allPlaces.concat(search3Results);
+      console.log(`✅ Query 3: ${search3Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
+
+      // Search 4: Simple location search without prepositions
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const simpleQuery = `${keyword} ${location}`;
+      console.log(`🔍 Query 4: Simple search "${simpleQuery}"`);
+      const { results: search4Results, apiCalls: apiCalls4 } = await performSingleSearch(simpleQuery, apiKey, onProgress, onApiCall);
+      totalApiCalls += apiCalls4;
+      allPlaces = allPlaces.concat(search4Results);
+      console.log(`✅ Query 4: ${search4Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
+
+      // Search 5: Add category variation if applicable
+      if (category && category !== 'Custom') {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const categoryQuery = `${keyword} ${category.toLowerCase()} ${location}`;
+        console.log(`🔍 Query 5: Category variation "${categoryQuery}"`);
+        const { results: search5Results, apiCalls: apiCalls5 } = await performSingleSearch(categoryQuery, apiKey, onProgress, onApiCall);
+        totalApiCalls += apiCalls5;
+        allPlaces = allPlaces.concat(search5Results);
+        console.log(`✅ Query 5: ${search5Results.length} results (${allPlaces.length} total, ${totalApiCalls} API calls)`);
+      }
+    }
+
+    console.log(`🎯 All queries completed. Collected ${allPlaces.length} total results before deduplication`);
+
+    // Remove duplicates based on multiple criteria (name, address, and phone)
+    const uniquePlaces = allPlaces.filter((place, index, self) => {
+      // Create a unique identifier using name + address (case-insensitive)
+      const name = (place.displayName?.text || '').toLowerCase().trim();
+      const address = (place.formattedAddress || '').toLowerCase().trim();
+      const phone = (place.nationalPhoneNumber || '').replace(/\s/g, ''); // Remove spaces from phone
+
+      const placeIdentifier = `${name}|||${address}`;
+
+      // Find if this is the first occurrence
+      const firstIndex = self.findIndex(p => {
+        const pName = (p.displayName?.text || '').toLowerCase().trim();
+        const pAddress = (p.formattedAddress || '').toLowerCase().trim();
+        const pPhone = (p.nationalPhoneNumber || '').replace(/\s/g, '');
+        const pIdentifier = `${pName}|||${pAddress}`;
+
+        // Match by name+address OR by phone number (if both have phone)
+        return pIdentifier === placeIdentifier || (phone && pPhone && phone === pPhone);
+      });
+
+      return index === firstIndex;
+    });
+
+    const duplicatesRemoved = allPlaces.length - uniquePlaces.length;
+    console.log(`🔄 Removed ${duplicatesRemoved} duplicates. Final unique results: ${uniquePlaces.length}`);
+    console.log(`💰 Total API calls made in this search: ${totalApiCalls}`);
+
+    // Return all collected unique places with API call count
+    return {
+      places: uniquePlaces,
+      apiCalls: totalApiCalls,
+      note: uniquePlaces.length < 100 ?
+        'Google Places API has limitations and may not return all businesses. For comprehensive results, try searching smaller sub-areas.' :
+        undefined
+    };
+
+  } catch (error) {
+    // Handle network errors or other exceptions
+    console.error('Error searching businesses:', error);
+    throw error;
+  }
+};
+
+/**
+ * Helper function to validate if the API response contains results
+ * 
+ * @param {Object} response - API response object
+ * @returns {boolean} - True if response contains places
+ */
+export const hasResults = (response) => {
+  return response && response.places && response.places.length > 0;
+};
+
+/**
+ * Helper function to filter businesses that have phone numbers
+ * 
+ * @param {Array} places - Array of place objects
+ * @returns {Array} - Filtered array containing only places with phone numbers
+ */
+export const filterByPhoneNumber = (places) => {
+  return places.filter(place => place.nationalPhoneNumber && place.nationalPhoneNumber.trim() !== '');
+};
+
+/**
+ * Helper function to filter places by exact address matching
+ * Only returns businesses whose address contains the specific area name
+ * 
+ * @param {Array} places - Array of place objects
+ * @param {string} areaName - The specific area/neighborhood name to match
+ * @returns {Array} - Filtered array containing only places with matching address
+ */
+export const filterByAddress = (places, areaName) => {
+  if (!areaName || areaName.trim() === '') {
+    return places; // Return all if no area specified
+  }
+
+  const searchTerm = areaName.toLowerCase().trim();
+
+  return places.filter(place => {
+    const address = (place.formattedAddress || '').toLowerCase();
+    // Check if the address contains the specific area name
+    return address.includes(searchTerm);
+  });
+};

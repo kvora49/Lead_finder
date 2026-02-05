@@ -92,6 +92,15 @@ service cloud.firestore {
       allow write: if request.auth != null && isAdmin();
     }
     
+    // Search Cache Collection (cached scraping results)
+    match /searchCache/{cacheId} {
+      // Any authenticated user can read cache (improve performance)
+      allow read: if request.auth != null;
+      // Only Cloud Functions can write (via setDoc in placesApi.js)
+      // In practice, frontend can write too (they trigger the cache)
+      allow write: if request.auth != null;
+    }
+    
     // Saved Lists Collection (user's saved lead lists)
     match /savedLists/{userId}/lists/{listId} {
       // Users can only access their own saved lists
