@@ -5,9 +5,15 @@ service cloud.firestore {
     // Helper function to check if user is admin (safe version)
     function isAdmin() {
       return request.auth != null && 
-             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-             (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin');
+             (
+               // Check if user is admin in users collection
+               (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+                 get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin')) ||
+               // OR check if user's email is in adminUsers collection
+               exists(/databases/$(database)/documents/adminUsers/$(request.auth.token.email)) &&
+               get(/databases/$(database)/documents/adminUsers/$(request.auth.token.email)).data.role != null
+             );
     }
     
     // Global Credits Collection (shared counter)
