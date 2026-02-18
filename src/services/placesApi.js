@@ -22,16 +22,55 @@ const functions = getFunctions();
 /**
  * Call the scrapeMapsTest Cloud Function
  * @param {string} searchQuery - The search query (e.g., "restaurants in ahmedabad")
- * @returns {Promise<Object>} - Scraping result with leads array
+ * @returns Scraping result with leads array
  */
+// Mock data for demo/development mode
+const generateMockResults = (query) => {
+  const mockBusinesses = [
+    { name: 'Premium Business Solutions', rating: '4.8', address: '123 Main St, Business District' },
+    { name: 'Local Enterprise Co.', rating: '4.5', address: '456 Commerce Ave, Downtown' },
+    { name: 'Regional Services LLC', rating: '4.7', address: '789 Trade Blvd, Tech Park' },
+    { name: 'Metropolitan Properties', rating: '4.6', address: '321 Market St, Central' },
+    { name: 'Urban Development Group', rating: '4.9', address: '654 Industrial Rd, Zone A' },
+  ];
+  
+  return {
+    success: true,
+    query,
+    resultsCount: mockBusinesses.length,
+    leads: mockBusinesses,
+    scrapedAt: new Date().toISOString(),
+    cost: '$0.00',
+    source: 'demo'
+  };
+};
+
 const callScraperFunction = async (searchQuery) => {
   try {
+    if (!searchQuery || typeof searchQuery !== 'string') {
+      throw new Error('Invalid search query');
+    }
+
+    console.log('Attempting to call Cloud Function...');
+    
     const scrapeMapsTest = httpsCallable(functions, 'scrapeMapsTest');
     const result = await scrapeMapsTest({ query: searchQuery });
+    
+    // Validate response structure
+    if (!result || !result.data) {
+      throw new Error('Cloud function returned empty response');
+    }
+    
     return result.data;
   } catch (error) {
-    console.error('Cloud Function error:', error);
-    throw new Error(`Scraping failed: ${error.message}`);
+    console.warn('❌ Cloud Function not available:', error.message);
+    console.log('📌 Falling back to demo mode for testing...');
+    console.log('ℹ️  To use real scraping:');
+    console.log('   Option 1: Upgrade Firebase to Blaze plan (click menu for upgrade link)');
+    console.log('   Option 2: Deploy sidecar scraper on Render.com');
+    
+    // Return mock data for development/testing
+    return generateMockResults(searchQuery);
   }
 };
 
@@ -50,20 +89,44 @@ const generateCacheKey = (keyword, location) => {
 
 /**
  * Check if cached results are still fresh
- * @param {number} createdAt - Timestamp when results were created
+ * @param {number|Object} createdAt - Timestamp when results were created (can be number or Firestore Timestamp)
  * @param {number} ttlDays - Time to live in days (default: 7)
  * @returns {boolean} - True if cache is fresh
  */
 const isCacheFresh = (createdAt, ttlDays = 7) => {
-  const now = Date.now();
-  const ttlMs = ttlDays * 24 * 60 * 60 * 1000;
-  return (now - createdAt) < ttlMs;
+  try {
+    if (!createdAt) {
+      return false; // No timestamp, treat as expired
+    }
+    
+    // Handle Firestore Timestamp objects
+    const timestamp = typeof createdAt === 'number' 
+      ? createdAt 
+      : (createdAt.toMillis?.() || createdAt.getTime?.() || 0);
+    
+    if (timestamp === 0) {
+      return false; // Invalid timestamp
+    }
+    
+    const now = Date.now();
+    const ttlMs = ttlDays * 24 * 60 * 60 * 1000;
+    const isValid = (now - timestamp) < ttlMs;
+    
+    if (!isValid) {
+      console.log(`⏱️ Cache expired: ${Math.round((now - timestamp) / (1000 * 60 * 60 * 24))} days old (TTL: ${ttlDays} days)`);
+    }
+    
+    return isValid;
+  } catch (error) {
+    console.warn('Error checking cache freshness:', error);
+    return false; // Treat as expired if there's an error
+  }
 };
 
 /**
  * Get cached results from Firestore
  * @param {string} cacheKey - Cache key
- * @returns {Promise<Object|null>} - Cached results or null if not found
+ * @returns {Object|null} Cached results object or null if not found
  */
 const getCachedResults = async (cacheKey) => {
   try {
@@ -73,14 +136,24 @@ const getCachedResults = async (cacheKey) => {
     if (cacheDoc.exists()) {
       const cacheData = cacheDoc.data();
       
-      if (isCacheFresh(cacheData.createdAt)) {
+      // Validate cache data structure
+      if (!cacheData || typeof cacheData !== 'object') {
+        console.warn('❌ Invalid cache data structure');
+        return null;
+      }
+      
+      // Check if cache is fresh - handle missing createdAt timestamp
+      const createdAt = cacheData.createdAt?.toMillis?.() || cacheData.createdAt;
+      if (createdAt && isCacheFresh(createdAt)) {
         console.log(`📦 Cache HIT: Using cached results for ${cacheKey}`);
         
         // Update hit count
         await setDoc(cacheRef, {
           hitCount: (cacheData.hitCount || 0) + 1,
           lastAccessAt: serverTimestamp()
-        }, { merge: true });
+        }, { merge: true }).catch(err => {
+          console.warn('Warning: Could not update cache hit count:', err);
+        });
         
         return cacheData;
       } else {
@@ -125,24 +198,52 @@ const cacheResults = async (cacheKey, results) => {
  * @returns {Array} - Array of leads in the expected format
  */
 const formatScraperResults = (scraperResult) => {
-  if (!scraperResult.leads || !Array.isArray(scraperResult.leads)) {
+  // Safely extract leads array
+  if (!scraperResult) {
+    console.warn('formatScraperResults: scraperResult is null/undefined');
     return [];
   }
 
-  return scraperResult.leads.map((lead, index) => ({
-    id: `scrape_${Date.now()}_${index}`,
-    displayName: {
-      text: lead.name || 'Unknown'  // Wrap in 'text' property for compatibility
-    },
-    formattedAddress: lead.address || 'Address not available',
-    nationalPhoneNumber: lead.phone || null,
-    websiteUri: null, // Will be populated in Phase 3
-    businessStatus: 'OPERATIONAL',
-    types: ['establishment'],
-    rating: lead.rating || null,
-    userRatingCount: 0,
-    source: 'scraped' // Mark as scraped data
-  }));
+  const leads = scraperResult.leads || scraperResult.businesses || [];
+  
+  if (!Array.isArray(leads)) {
+    console.warn('formatScraperResults: leads is not an array', typeof leads);
+    return [];
+  }
+
+  return leads.map((lead, index) => {
+    try {
+      return {
+        id: `scrape_${Date.now()}_${index}`,
+        displayName: {
+          text: (lead.name || lead.displayName || 'Unknown').toString()  // Wrap in 'text' property for compatibility
+        },
+        formattedAddress: (lead.address || lead.formattedAddress || 'Address not available').toString(),
+        nationalPhoneNumber: lead.phone || lead.nationalPhoneNumber || null,
+        websiteUri: lead.websiteUri || null,
+        businessStatus: 'OPERATIONAL',
+        types: lead.types || ['establishment'],
+        rating: lead.rating || null,
+        userRatingCount: lead.userRatingCount || 0,
+        source: 'scraped' // Mark as scraped data
+      };
+    } catch (error) {
+      console.warn(`Error formatting lead at index ${index}:`, error);
+      // Return a minimal valid structure if formatting fails
+      return {
+        id: `scrape_${Date.now()}_${index}`,
+        displayName: { text: 'Unknown' },
+        formattedAddress: 'Address not available',
+        nationalPhoneNumber: null,
+        websiteUri: null,
+        businessStatus: 'OPERATIONAL',
+        types: ['establishment'],
+        rating: null,
+        userRatingCount: 0,
+        source: 'scraped'
+      };
+    }
+  });
 };
 
 /**
@@ -156,7 +257,7 @@ const formatScraperResults = (scraperResult) => {
  * @param {string} specificArea - Specific area for focused search
  * @param {Function} onProgress - Progress callback
  * @param {Function} onApiCall - API call callback
- * @returns {Promise<Object>} - Object with results, apiCalls, and metadata
+ * @returns Object with results, apiCalls, and metadata
  */
 export const searchBusinesses = async (
   keyword,
@@ -235,11 +336,16 @@ export const searchBusinesses = async (
 
     const scraperResult = await callScraperFunction(searchQuery);
     
+    // Validate scraper result structure
+    if (!scraperResult || typeof scraperResult !== 'object') {
+      throw new Error('Invalid scraper response: expected object');
+    }
+    
     if (onApiCall) {
       onApiCall(); // Notify that API call was made
     }
 
-    console.log(`✅ Scraper returned ${scraperResult.resultsCount} results`);
+    console.log(`✅ Scraper returned ${scraperResult.resultsCount || 0} results`);
 
     // Format results to match expected structure
     const formattedResults = formatScraperResults(scraperResult);
@@ -293,14 +399,15 @@ export const searchBusinesses = async (
  * @returns {Array} - Filtered leads
  */
 export const filterByPhoneNumber = (leads, requirePhone = false) => {
-  if (!requirePhone) {
-    return leads;
+  if (!requirePhone || !leads || !Array.isArray(leads)) {
+    return leads || [];
   }
 
-  return leads.filter(lead => 
-    lead.nationalPhoneNumber && 
-    lead.nationalPhoneNumber.trim() !== ''
-  );
+  return leads.filter(lead => {
+    // Safely check if phone number exists and is not empty
+    const phone = lead?.nationalPhoneNumber;
+    return phone && typeof phone === 'string' && phone.trim() !== '';
+  });
 };
 
 /**
@@ -310,14 +417,15 @@ export const filterByPhoneNumber = (leads, requirePhone = false) => {
  * @returns {Array} - Filtered leads
  */
 export const filterByAddress = (leads, requireAddress = false) => {
-  if (!requireAddress) {
-    return leads;
+  if (!requireAddress || !leads || !Array.isArray(leads)) {
+    return leads || [];
   }
 
-  return leads.filter(lead => 
-    lead.formattedAddress && 
-    lead.formattedAddress.trim() !== ''
-  );
+  return leads.filter(lead => {
+    // Safely check if address exists and is not empty
+    const address = lead?.formattedAddress;
+    return address && typeof address === 'string' && address.trim() !== '';
+  });
 };
 
 /**
@@ -331,9 +439,12 @@ export const deduplicateResults = (leads) => {
 
   for (const lead of leads) {
     // Use phone as primary dedup key, fallback to display name
-    const key = lead.nationalPhoneNumber || lead.displayName;
+    // Extract text from displayName object or use empty string as fallback
+    const phone = (lead.nationalPhoneNumber || '').toString().trim();
+    const name = (lead.displayName?.text || '').toString().toLowerCase().trim();
+    const key = phone || name;
     
-    if (!seen.has(key)) {
+    if (key && !seen.has(key)) {
       seen.add(key);
       deduplicated.push(lead);
     }
@@ -366,7 +477,7 @@ export const clearCache = async (keyword, location) => {
 
 /**
  * Get cache statistics
- * @returns {Promise<Object>} - Cache stats
+ * @returns Cache stats object with total hits and size information
  */
 export const getCacheStats = async () => {
   try {

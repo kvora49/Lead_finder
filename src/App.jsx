@@ -244,22 +244,33 @@ function App() {
       setLoadingProgress('Removing duplicates and filtering results...');
       console.log(`\n🎯 All combinations completed. Collected ${allPlaces.length} total results before deduplication`);
 
-      // Remove duplicates across all combinations
+      // Remove duplicates across all combinations - safely handle null/undefined values
       const uniquePlaces = allPlaces.filter((place, index, self) => {
-        const name = (place.displayName?.text || '').toLowerCase().trim();
-        const address = (place.formattedAddress || '').toLowerCase().trim();
-        const phone = (place.nationalPhoneNumber || '').replace(/\s/g, '');
-        const placeIdentifier = `${name}|||${address}`;
+        try {
+          // Safely extract properties with multiple fallbacks
+          const name = (place?.displayName?.text || place?.displayName || '').toString().toLowerCase().trim();
+          const address = (place?.formattedAddress || '').toString().toLowerCase().trim();
+          const phone = (place?.nationalPhoneNumber || '').toString().replace(/\s/g, '');
+          const placeIdentifier = `${name}|||${address}`;
 
-        const firstIndex = self.findIndex(p => {
-          const pName = (p.displayName?.text || '').toLowerCase().trim();
-          const pAddress = (p.formattedAddress || '').toLowerCase().trim();
-          const pPhone = (p.nationalPhoneNumber || '').replace(/\s/g, '');
-          const pIdentifier = `${pName}|||${pAddress}`;
-          return pIdentifier === placeIdentifier || (phone && pPhone && phone === pPhone);
-        });
+          const firstIndex = self.findIndex(p => {
+            try {
+              const pName = (p?.displayName?.text || p?.displayName || '').toString().toLowerCase().trim();
+              const pAddress = (p?.formattedAddress || '').toString().toLowerCase().trim();
+              const pPhone = (p?.nationalPhoneNumber || '').toString().replace(/\s/g, '');
+              const pIdentifier = `${pName}|||${pAddress}`;
+              return pIdentifier === placeIdentifier || (phone && pPhone && phone === pPhone);
+            } catch (e) {
+              console.warn('Error comparing places:', e);
+              return false;
+            }
+          });
 
-        return index === firstIndex;
+          return index === firstIndex;
+        } catch (error) {
+          console.error('Error in deduplication:', error);
+          return true; // Keep the item if there's an error
+        }
       });
 
       const duplicatesRemoved = allPlaces.length - uniquePlaces.length;
@@ -325,7 +336,21 @@ function App() {
     } catch (err) {
       // Handle errors from API call
       console.error('Search error:', err);
-      setError(err.message || 'Failed to search businesses. Please check your API key and try again.');
+      
+      // Check if it's a demo mode message (mock data used)
+      if (err.message && err.message.includes('demo')) {
+        setLoadingProgress('');
+        // Continue - demo data will be shown, no error needed
+      } else {
+        const errorMsg = err.message || 'Failed to search businesses. Please try again.';
+        
+        // Provide helpful suggestions based on error
+        if (errorMsg.includes('Cloud Function') || errorMsg.includes('Firebase')) {
+          setError(`${errorMsg}\n\n💡 To fix this:\n1. Upgrade Firebase to Blaze plan (required for Cloud Functions)\n2. OR use the Sidecar Scraper service\n\nFalling back to demo mode for now.`);
+        } else {
+          setError(errorMsg);
+        }
+      }
     } finally {
       // Reset loading state
       setLoading(false);
@@ -669,7 +694,7 @@ function App() {
                 <p className="text-xs text-orange-600 mt-1 font-semibold">
                   ⚠️ Warning: Approaching credit limit! {Math.round((195 - (totalApiCalls * 0.032)) / 0.032)} credits remaining before searches are blocked.
                 </p>
-              )}}
+              )}
               {(totalApiCalls * 0.032) >= 195 && (
                 <p className="text-xs text-red-600 mt-1 font-semibold">
                   ⛔ Credit limit reached! Searches are blocked to prevent charges. Resets {nextResetDate}.
