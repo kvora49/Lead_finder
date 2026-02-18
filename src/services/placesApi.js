@@ -1,76 +1,234 @@
 /**
- * Places API Service (Refactored for Zero-Cost Scraping)
- * Migrated from Google Places API to Firebase Cloud Functions
+ * Places API Service - Google Maps Places Service Library
  * 
- * This service uses Puppeteer-Stealth scraping via Firebase Cloud Functions
- * instead of the expensive Google Places API.
+ * Uses Google Maps JavaScript API Places Service (browser-compatible)
  * 
- * Key Benefits:
- * - Cost: $0.00 per 1,000 leads (vs $32 with Google API)
- * - Results: 200+ leads per query (vs ~60 with Google API)
- * - Data: Includes emails and social media (not available in Google API)
+ * Key Features:
+ * - Works from browser without CORS issues
+ * - Cost: $32 per 1,000 requests (same as REST API)
+ * - Results: ~60 businesses per query
+ * - No backend/Firebase Functions needed
  */
 
-import { httpsCallable } from 'firebase/functions';
 import { db } from '../firebase';
 import { collection, doc, getDoc, setDoc, query, where, getDocs, serverTimestamp } from 'firebase/firestore';
-import { getFunctions } from 'firebase/functions';
 
-// Get Firebase Functions instance
-const functions = getFunctions();
-
-/**
- * Call the scrapeMapsTest Cloud Function
- * @param {string} searchQuery - The search query (e.g., "restaurants in ahmedabad")
- * @returns Scraping result with leads array
- */
-// Mock data for demo/development mode
-const generateMockResults = (query) => {
-  const mockBusinesses = [
-    { name: 'Premium Business Solutions', rating: '4.8', address: '123 Main St, Business District' },
-    { name: 'Local Enterprise Co.', rating: '4.5', address: '456 Commerce Ave, Downtown' },
-    { name: 'Regional Services LLC', rating: '4.7', address: '789 Trade Blvd, Tech Park' },
-    { name: 'Metropolitan Properties', rating: '4.6', address: '321 Market St, Central' },
-    { name: 'Urban Development Group', rating: '4.9', address: '654 Industrial Rd, Zone A' },
-  ];
-  
-  return {
-    success: true,
-    query,
-    resultsCount: mockBusinesses.length,
-    leads: mockBusinesses,
-    scrapedAt: new Date().toISOString(),
-    cost: '$0.00',
-    source: 'demo'
-  };
+// Check if Google Maps API is loaded
+const isGoogleMapsLoaded = () => {
+  return typeof google !== 'undefined' && google.maps && google.maps.places;
 };
 
-const callScraperFunction = async (searchQuery) => {
+/**
+ * Wait for Google Maps API to load
+ * @returns {Promise<void>}
+ */
+const waitForGoogleMaps = async () => {
+  let attempts = 0;
+  while (!isGoogleMapsLoaded() && attempts < 50) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    attempts++;
+  }
+
+  if (!isGoogleMapsLoaded()) {
+    throw new Error('Google Maps API failed to load. Check your API key in index.html');
+  }
+
+  console.log('✅ Google Maps API loaded successfully');
+};
+
+/**
+ * Call Google Maps Places Service for text search with multi-query strategy
+ * @param {string} keyword - E.g., "kurti"
+ * @param {string} category - E.g., "Retailer", "Wholesaler", or "All"
+ * @param {string} location - E.g., "Ahmedabad"
+ * @param {Function} onProgress - Progress callback
+ * @returns {Promise<Object>} Results object with array of businesses
+ */
+const callPlacesService = async (keyword, category, location, searchScope = 'wide', specificArea = '', onProgress = null) => {
   try {
-    if (!searchQuery || typeof searchQuery !== 'string') {
-      throw new Error('Invalid search query');
+    if (!keyword || !location) {
+      throw new Error('Invalid search parameters');
     }
 
-    console.log('Attempting to call Cloud Function...');
-    
-    const scrapeMapsTest = httpsCallable(functions, 'scrapeMapsTest');
-    const result = await scrapeMapsTest({ query: searchQuery });
-    
-    // Validate response structure
-    if (!result || !result.data) {
-      throw new Error('Cloud function returned empty response');
+    console.log('🔍 Calling Google Maps Places Service with multi-query strategy');
+
+    // Ensure Google Maps is loaded
+    await waitForGoogleMaps();
+
+    // Create a hidden map element (required by PlacesService)
+    const mapDiv = document.createElement('div');
+    mapDiv.id = 'places-search-map';
+    mapDiv.style.display = 'none';
+    document.body.appendChild(mapDiv);
+
+    const map = new google.maps.Map(mapDiv, {
+      center: { lat: 20, lng: 0 },
+      zoom: 2
+    });
+
+    // Create Places Service
+    const service = new google.maps.places.PlacesService(map);
+
+    // Build the location string based on search scope
+    let searchLocation = location;
+    if ((searchScope === 'specific' || searchScope === 'neighborhood') && specificArea.trim()) {
+      // For specific area searches, use "area, city" format
+      searchLocation = `${specificArea}, ${location}`;
     }
+
+    // Build queries to search - create 5-6 variations for maximum coverage
+    let queries = [];
+
+    if (category === 'All') {
+      // Search multiple business types with different query variations
+      const businessTypes = ['Retailer', 'Wholesaler', 'Manufacturer', 'Distributor', 'Dealer', 'Shop'];
+      
+      businessTypes.forEach(type => {
+        // Variation 1: "keyword type in location"
+        queries.push(`${keyword} ${type} in ${searchLocation}`);
+        
+        // Variation 2: "type of keyword in location" (only for first few to avoid explosion)
+        if (queries.length < (businessTypes.length * 2)) {
+          queries.push(`${type} of ${keyword} in ${searchLocation}`);
+        }
+      });
+    } else if (category === 'Custom') {
+      // Multiple query variations for custom category
+      queries = [
+        `${keyword} in ${searchLocation}`,
+        `${keyword} shop in ${searchLocation}`,
+        `${keyword} store in ${searchLocation}`,
+        `${keyword} seller in ${searchLocation}`,
+        `${keyword} dealer in ${searchLocation}`,
+        `buy ${keyword} in ${searchLocation}`
+      ];
+    } else {
+      // Multiple query variations for specific category
+      queries = [
+        `${keyword} ${category} in ${searchLocation}`,
+        `${category} of ${keyword} in ${searchLocation}`,
+        `${keyword} ${category.toLowerCase()} in ${searchLocation}`,
+        `${category} selling ${keyword} in ${searchLocation}`,
+        `${keyword} - ${category} in ${searchLocation}`,
+        `${keyword} ${category} near ${searchLocation}`
+      ];
+    }
+
+    // Limit queries to avoid too many API calls
+    queries = queries.slice(0, 6);
     
-    return result.data;
+    console.log(`🔍 Searching ${queries.length} query variations for "${keyword}" in "${searchLocation}"`);
+    console.log(`   Queries: ${queries.join(' | ')}`);
+
+    let allResults = [];
+    let uniquePlaceIds = new Set();
+    let totalApiCalls = 0;
+
+    // Execute each query
+    for (let queryIndex = 0; queryIndex < queries.length; queryIndex++) {
+      const query = queries[queryIndex];
+      console.log(`\n📄 Query ${queryIndex + 1}/${queries.length}: "${query}"`);
+
+      if (onProgress) {
+        onProgress({
+          query: query,
+          status: 'searching',
+          message: `[${queryIndex + 1}/${queries.length}] Searching: ${query}...`
+        });
+      }
+
+      // Perform text search with pagination for this query
+      const queryResults = await new Promise((resolve, reject) => {
+        let resultsForQuery = [];
+        let pageCount = 0;
+        let pagination = null;
+        const maxPages = 5; // 5 pages = ~100 results per query
+
+        const formatPlace = (place) => ({
+          displayName: { text: place.name },
+          formattedAddress: place.formatted_address,
+          lat: place.geometry?.location?.lat(),
+          lng: place.geometry?.location?.lng(),
+          rating: place.rating || null,
+          userRatingCount: place.user_ratings_total || 0,
+          types: place.types || [],
+          placeId: place.place_id,
+          nationalPhoneNumber: place.formatted_phone_number || null,
+          websiteUri: place.website || null,
+          businessStatus: place.business_status || 'OPERATIONAL',
+          openingHours: place.opening_hours || null
+        });
+
+        const performPageSearch = () => {
+          service.textSearch({ query }, (results, status, paginationInfo) => {
+            if (status === google.maps.places.PlacesServiceStatus.OK) {
+              pageCount++;
+              console.log(`  📄 Page ${pageCount}: ${results.length} results`);
+
+              // Add unique results (avoid duplicates across queries)
+              results.forEach(place => {
+                if (!uniquePlaceIds.has(place.place_id)) {
+                  uniquePlaceIds.add(place.place_id);
+                  resultsForQuery.push(formatPlace(place));
+                }
+              });
+
+              totalApiCalls++;
+
+              // Check if we should fetch next page
+              if (paginationInfo?.hasNextPage && pageCount < maxPages) {
+                console.log(`  📄 Page ${pageCount + 1}...`);
+                // Delay before fetching next page (API rate limiting)
+                setTimeout(() => {
+                  paginationInfo.nextPage();
+                }, 200);
+              } else {
+                // Done with this query
+                console.log(`  ✅ Query ${queryIndex + 1} complete: ${resultsForQuery.length} unique results`);
+                resolve(resultsForQuery);
+              }
+            } else if (status === google.maps.places.PlacesServiceStatus.ZERO_RESULTS) {
+              console.log(`  ⚠️ No results for this query`);
+              resolve(resultsForQuery);
+            } else {
+              console.error(`  ❌ Places Service error: ${status}`);
+              reject(new Error(`Places Service error: ${status}`));
+            }
+          });
+        };
+
+        // Start first search for this query
+        performPageSearch();
+      });
+
+      allResults = allResults.concat(queryResults);
+
+      // Delay between queries (avoid rate limiting)
+      if (queryIndex < queries.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    // Clean up map element
+    mapDiv.remove();
+
+    console.log(`\n✅ All queries complete. Total unique results: ${allResults.length}`);
+
+    return {
+      success: true,
+      resultsCount: allResults.length,
+      places: allResults,
+      timestamp: new Date().toISOString(),
+      cost: `$${(allResults.length * (32 / 1000)).toFixed(2)}`,
+      source: 'google-places-service-multi-query',
+      queriesExecuted: queries.length,
+      apiCalls: totalApiCalls,
+      searchArea: searchLocation,
+      scope: searchScope
+    };
   } catch (error) {
-    console.warn('❌ Cloud Function not available:', error.message);
-    console.log('📌 Falling back to demo mode for testing...');
-    console.log('ℹ️  To use real scraping:');
-    console.log('   Option 1: Upgrade Firebase to Blaze plan (click menu for upgrade link)');
-    console.log('   Option 2: Deploy sidecar scraper on Render.com');
-    
-    // Return mock data for development/testing
-    return generateMockResults(searchQuery);
+    console.error('❌ Places Service error:', error.message);
+    throw error;
   }
 };
 
@@ -135,33 +293,32 @@ const getCachedResults = async (cacheKey) => {
 
     if (cacheDoc.exists()) {
       const cacheData = cacheDoc.data();
-      
-      // Validate cache data structure
+
       if (!cacheData || typeof cacheData !== 'object') {
         console.warn('❌ Invalid cache data structure');
         return null;
       }
-      
-      // Check if cache is fresh - handle missing createdAt timestamp
+
       const createdAt = cacheData.createdAt?.toMillis?.() || cacheData.createdAt;
       if (createdAt && isCacheFresh(createdAt)) {
         console.log(`📦 Cache HIT: Using cached results for ${cacheKey}`);
-        
+
         // Update hit count
-        await setDoc(cacheRef, {
-          hitCount: (cacheData.hitCount || 0) + 1,
-          lastAccessAt: serverTimestamp()
-        }, { merge: true }).catch(err => {
-          console.warn('Warning: Could not update cache hit count:', err);
+        await setDoc(
+          doc(db, 'searchCache', cacheKey),
+          { hitCount: (cacheData.hitCount || 0) + 1, lastAccessAt: serverTimestamp() },
+          { merge: true }
+        ).catch(err => {
+          console.warn('Could not update cache hit count:', err);
         });
-        
+
         return cacheData;
       } else {
         console.log(`⏱️ Cache EXPIRED: Results are older than 7 days`);
         return null;
       }
     }
-    
+
     return null;
   } catch (error) {
     console.error('Error reading cache:', error);
@@ -186,71 +343,48 @@ const cacheResults = async (cacheKey, results) => {
     console.log(`💾 Results cached: ${cacheKey}`);
   } catch (error) {
     console.error('Error caching results:', error);
-    // Don't throw - caching failure shouldn't block the search
   }
 };
 
 /**
- * Convert scraper results to the same format as Google Places API
- * This maintains compatibility with existing frontend code
+ * Convert API results to the same format expected by frontend
+ * This maintains compatibility with existing code
  * 
- * @param {Object} scraperResult - Result from scrapeMapsTest Cloud Function
+ * @param {Array} results - Results from Google Places API
  * @returns {Array} - Array of leads in the expected format
  */
-const formatScraperResults = (scraperResult) => {
-  // Safely extract leads array
-  if (!scraperResult) {
-    console.warn('formatScraperResults: scraperResult is null/undefined');
+const formatAPIResults = (results) => {
+  if (!Array.isArray(results)) {
+    console.warn('formatAPIResults: results is not an array');
     return [];
   }
 
-  const leads = scraperResult.leads || scraperResult.businesses || [];
-  
-  if (!Array.isArray(leads)) {
-    console.warn('formatScraperResults: leads is not an array', typeof leads);
-    return [];
-  }
-
-  return leads.map((lead, index) => {
+  return results.map((place, index) => {
     try {
       return {
-        id: `scrape_${Date.now()}_${index}`,
-        displayName: {
-          text: (lead.name || lead.displayName || 'Unknown').toString()  // Wrap in 'text' property for compatibility
-        },
-        formattedAddress: (lead.address || lead.formattedAddress || 'Address not available').toString(),
-        nationalPhoneNumber: lead.phone || lead.nationalPhoneNumber || null,
-        websiteUri: lead.websiteUri || null,
-        businessStatus: 'OPERATIONAL',
-        types: lead.types || ['establishment'],
-        rating: lead.rating || null,
-        userRatingCount: lead.userRatingCount || 0,
-        source: 'scraped' // Mark as scraped data
+        id: place.placeId || `place_${Date.now()}_${index}`,
+        displayName: place.displayName || { text: 'Unknown' },
+        formattedAddress: place.formattedAddress || 'Address not available',
+        nationalPhoneNumber: place.nationalPhoneNumber || null,
+        websiteUri: place.websiteUri || null,
+        businessStatus: place.businessStatus || 'OPERATIONAL',
+        types: place.types || ['establishment'],
+        rating: place.rating || null,
+        userRatingCount: place.userRatingCount || 0,
+        source: 'google-places-api'
       };
     } catch (error) {
-      console.warn(`Error formatting lead at index ${index}:`, error);
-      // Return a minimal valid structure if formatting fails
-      return {
-        id: `scrape_${Date.now()}_${index}`,
-        displayName: { text: 'Unknown' },
-        formattedAddress: 'Address not available',
-        nationalPhoneNumber: null,
-        websiteUri: null,
-        businessStatus: 'OPERATIONAL',
-        types: ['establishment'],
-        rating: null,
-        userRatingCount: 0,
-        source: 'scraped'
-      };
+      console.warn(`Error formatting result at index ${index}:`, error);
+      return null;
     }
-  });
+  }).filter(Boolean);
 };
 
 /**
- * Main search function - replaces old Google Places API call
+ * Main search function - official Google Places API
  * 
  * @param {string} keyword - Business keyword to search
- * @param {string} category - Business category (not used in scraper, but kept for compatibility)
+ * @param {string} category - Business category (kept for compatibility)
  * @param {string} location - Location to search in
  * @param {string} apiKey - Unused (kept for compatibility)
  * @param {string} searchScope - Search scope ('wide', 'neighborhood', 'specific')
@@ -263,7 +397,7 @@ export const searchBusinesses = async (
   keyword,
   category = 'All',
   location,
-  apiKey = null, // Not needed anymore
+  apiKey = null,
   searchScope = 'wide',
   specificArea = '',
   onProgress = null,
@@ -273,7 +407,7 @@ export const searchBusinesses = async (
     throw new Error('Keyword and location are required');
   }
 
-  console.log(`🚀 Starting zero-cost scraping search: "${keyword}" in "${location}"`);
+  console.log(`🚀 Starting search: "${keyword}" in "${location}"`);
 
   // Build search query
   let searchQuery = keyword;
@@ -301,9 +435,9 @@ export const searchBusinesses = async (
     // Check cache first
     let cacheData = await getCachedResults(cacheKey);
     
-    if (cacheData) {
+    if (cacheData && cacheData.places) {
       // Return cached results
-      const formattedResults = formatScraperResults(cacheData);
+      const formattedResults = formatAPIResults(cacheData.places);
       
       if (onProgress) {
         onProgress({
@@ -315,47 +449,43 @@ export const searchBusinesses = async (
 
       return {
         results: formattedResults,
-        places: formattedResults, // For backward compatibility
-        apiCalls: 0, // Cache hit doesn't count as API call
+        places: formattedResults,
+        apiCalls: 0,
         query: searchQuery,
         cached: true,
         totalResults: formattedResults.length
       };
     }
 
-    // Cache miss - call Cloud Function
-    console.log(`🌐 Cache miss - calling Cloud Function`);
+    // Cache miss - call Google Maps Places Service
+    console.log(`🌐 Cache miss - calling Google Maps Places Service`);
     
     if (onProgress) {
       onProgress({
         query: searchQuery,
-        status: 'scraping',
-        message: 'Scraping Google Maps data...'
+        status: 'searching',
+        message: 'Searching for businesses...'
       });
     }
 
-    const scraperResult = await callScraperFunction(searchQuery);
-    
-    // Validate scraper result structure
-    if (!scraperResult || typeof scraperResult !== 'object') {
-      throw new Error('Invalid scraper response: expected object');
-    }
+    // Fetch with multi-query strategy (searches different business types & query variations)
+    const apiResponse = await callPlacesService(keyword, category, location, searchScope, specificArea, onProgress);
     
     if (onApiCall) {
-      onApiCall(); // Notify that API call was made
+      onApiCall();
     }
 
-    console.log(`✅ Scraper returned ${scraperResult.resultsCount || 0} results`);
+    console.log(`✅ Got ${apiResponse.resultsCount || 0} results`);
 
-    // Format results to match expected structure
-    const formattedResults = formatScraperResults(scraperResult);
+    // Format results
+    const formattedResults = formatAPIResults(apiResponse.places || []);
 
     // Cache the results
     await cacheResults(cacheKey, {
       query: searchQuery,
-      leads: scraperResult.leads,
-      resultsCount: scraperResult.resultsCount,
-      scrapedAt: scraperResult.scrapedAt
+      places: apiResponse.places,
+      resultsCount: apiResponse.resultsCount,
+      timestamp: new Date().toISOString()
     });
 
     // Update progress
@@ -364,22 +494,22 @@ export const searchBusinesses = async (
         query: searchQuery,
         total: formattedResults.length,
         status: 'complete',
-        cost: '$0.00'
+        cost: apiResponse.cost
       });
     }
 
     return {
       results: formattedResults,
-      places: formattedResults, // For backward compatibility
-      apiCalls: 1, // One Cloud Function call
+      places: formattedResults,
+      apiCalls: 1,
       query: searchQuery,
       cached: false,
       totalResults: formattedResults.length,
-      cost: 0 // $0.00 - completely free!
+      cost: apiResponse.cost
     };
 
   } catch (error) {
-    console.error('Search error:', error);
+    console.error('❌ Search error:', error);
     
     if (onProgress) {
       onProgress({

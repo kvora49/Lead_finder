@@ -345,8 +345,8 @@ function App() {
         const errorMsg = err.message || 'Failed to search businesses. Please try again.';
         
         // Provide helpful suggestions based on error
-        if (errorMsg.includes('Cloud Function') || errorMsg.includes('Firebase')) {
-          setError(`${errorMsg}\n\n💡 To fix this:\n1. Upgrade Firebase to Blaze plan (required for Cloud Functions)\n2. OR use the Sidecar Scraper service\n\nFalling back to demo mode for now.`);
+        if (errorMsg.includes('Google Maps') || errorMsg.includes('API')) {
+          setError(`${errorMsg}\n\n💡 Info:\nUsing Google Maps Places Service.\nMake sure your API key is valid.\n\nCheck browser console for details.`);
         } else {
           setError(errorMsg);
         }
