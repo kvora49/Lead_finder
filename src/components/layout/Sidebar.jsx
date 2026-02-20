@@ -24,7 +24,7 @@ const NavItem = ({ to, icon: Icon, label, end, onClick }) => (
     end={end}
     onClick={onClick}
     className={({ isActive }) =>
-      `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 ${
+      `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 active:scale-[0.97] ${
         isActive
           ? 'bg-indigo-600 text-white shadow-md shadow-indigo-900/40'
           : 'text-slate-400 hover:bg-slate-800 hover:text-white'
@@ -135,7 +135,7 @@ const SidebarContent = () => {
         <button
           onClick={handleSignOut}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm
-            text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-colors"
+            text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all active:scale-[0.97]"
         >
           <LogOut className="w-4 h-4 flex-none" strokeWidth={2} />
           Sign out

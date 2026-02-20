@@ -19,11 +19,11 @@ const AppLayout = () => {
 
       {/* ── Fixed top header ─────────────────────────────────────────────── */}
       <header className="fixed top-0 left-0 right-0 z-50 h-16 bg-white border-b border-slate-200
-        flex items-center px-4 shadow-sm">
+        flex items-center px-4 shadow-md">
         {/* 1 — Hamburger toggle */}
         <button
           onClick={() => setSidebarOpen(o => !o)}
-          className="p-2 rounded-xl hover:bg-slate-100 text-slate-500 transition-colors flex-none"
+          className="p-2 rounded-xl hover:bg-slate-100 text-slate-500 transition-all flex-none active:scale-[0.97]"
           aria-label="Toggle sidebar"
         >
           <Menu className="w-5 h-5" />

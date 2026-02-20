@@ -170,8 +170,9 @@ const ProgressBar = ({ progress }) => {
   );
 };
 
-/** Single lead card — rebuilt with new Tailwind aesthetic */
+/** Single lead card — premium compact mobile-first design with accordion contact */
 const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle }) => {
+  const [contactOpen, setContactOpen] = useState(false);
   const name    = lead.displayName?.text || 'Unknown Business';
   const address = lead.formattedAddress  || 'Address not available';
   const phone   = lead.nationalPhoneNumber;
@@ -182,83 +183,111 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
   return (
     <div
       onClick={selectionMode ? onToggle : undefined}
-      className={`bg-white rounded-2xl border shadow-sm transition-all duration-200 p-5 flex flex-col gap-3 group break-words overflow-hidden
+      className={`bg-white rounded-2xl border transition-all duration-300 flex flex-col overflow-hidden
         ${ selectionMode ? 'cursor-pointer' : '' }
         ${ isSelected
             ? 'border-indigo-400 ring-2 ring-indigo-200 shadow-indigo-100'
-            : 'border-slate-200 hover:shadow-md' }`}>
+            : 'border-slate-200 hover:-translate-y-1 hover:shadow-xl shadow-sm' }`}>
 
-      {/* Header */}
-      <div className="flex items-start gap-2">
-        {/* Checkbox — only in selection mode */}
-        {selectionMode && (
-          <div className={`mt-0.5 w-4.5 h-4.5 flex-none rounded border-2 flex items-center justify-center transition-colors
-            ${ isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300 bg-white' }`}
-            style={{ width: 18, height: 18, minWidth: 18 }}>
-            {isSelected && (
-              <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-              </svg>
+      {/* Card body */}
+      <div className="p-3 md:p-5 flex flex-col gap-2">
+
+        {/* Header row */}
+        <div className="flex items-start gap-2">
+          {selectionMode && (
+            <div className={`mt-0.5 flex-none rounded border-2 flex items-center justify-center transition-colors
+              ${ isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300 bg-white' }`}
+              style={{ width: 16, height: 16, minWidth: 16 }}>
+              {isSelected && (
+                <svg className="w-2 h-2 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+            </div>
+          )}
+          <h3 className="text-sm font-semibold text-slate-900 line-clamp-2 flex-1 break-words">{name}</h3>
+          {lead.businessStatus && lead.businessStatus !== 'OPERATIONAL' && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 flex-none whitespace-nowrap">
+              {lead.businessStatus.replace('_', ' ')}
+            </span>
+          )}
+        </div>
+
+        {/* Address */}
+        <p className="text-xs text-slate-500 flex items-start gap-1.5 leading-relaxed">
+          <MapPin className="w-3 h-3 mt-0.5 flex-none text-slate-400" />
+          <span className="line-clamp-2 break-words">{address}</span>
+        </p>
+
+        {/* Rating */}
+        {rating && (
+          <p className="text-xs text-slate-500 flex items-center gap-1">
+            <Star className="w-3 h-3 flex-none text-amber-400 fill-amber-400" />
+            <span className="font-medium text-slate-700">{rating}</span>
+            {lead.userRatingCount > 0 && (
+              <span className="text-slate-400">({lead.userRatingCount.toLocaleString()})</span>
+            )}
+          </p>
+        )}
+
+        {/* Accordion: contact info */}
+        {(phone || website) && (
+          <div>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setContactOpen(o => !o); }}
+              className="flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 transition-colors active:scale-[0.97]"
+            >
+              <ChevronDown className={`w-3 h-3 transition-transform duration-200 ${contactOpen ? 'rotate-180' : ''}`} />
+              {contactOpen ? 'Hide' : 'Show'} contact
+            </button>
+            {contactOpen && (
+              <div className="mt-1.5 space-y-1 pl-2 border-l-2 border-indigo-100">
+                {phone && (
+                  <p className="text-xs text-slate-700 flex items-center gap-1.5 font-medium">
+                    <Phone className="w-3 h-3 flex-none text-emerald-500" />
+                    {phone}
+                  </p>
+                )}
+                {website && (
+                  <p className="text-xs text-slate-500 flex items-center gap-1.5 overflow-hidden">
+                    <Globe className="w-3 h-3 flex-none text-indigo-400" />
+                    <span className="truncate">{website.replace(/^https?:\/\//, '')}</span>
+                  </p>
+                )}
+              </div>
             )}
           </div>
         )}
-        <h3 className="text-sm font-semibold text-slate-900 line-clamp-2 flex-1">{name}</h3>
-        {lead.businessStatus && lead.businessStatus !== 'OPERATIONAL' && (
-          <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 flex-none">
-            {lead.businessStatus.replace('_', ' ')}
-          </span>
-        )}
       </div>
 
-      {/* Address */}
-      <p className="text-xs text-slate-500 flex items-start gap-1.5 leading-relaxed">
-        <MapPin className="w-3.5 h-3.5 mt-0.5 flex-none text-slate-400" />
-        <span className="line-clamp-2">{address}</span>
-      </p>
-
-      {/* Phone */}
-      {phone && (
-        <p className="text-xs text-slate-700 flex items-center gap-1.5 font-medium">
-          <Phone className="w-3.5 h-3.5 flex-none text-emerald-500" />
-          {phone}
-        </p>
-      )}
-
-      {/* Rating */}
-      {rating && (
-        <p className="text-xs text-slate-500 flex items-center gap-1">
-          <Star className="w-3.5 h-3.5 flex-none text-amber-400 fill-amber-400" />
-          <span className="font-medium text-slate-700">{rating}</span>
-          {lead.userRatingCount > 0 && (
-            <span className="text-slate-400">({lead.userRatingCount.toLocaleString()})</span>
-          )}
-        </p>
-      )}
-
-      {/* Action buttons */}
-      <div className="flex flex-col sm:flex-row gap-2 mt-auto pt-1" onClick={(e) => e.stopPropagation()}>
+      {/* Action buttons — icon-only on mobile, icon+label on sm+ */}
+      <div
+        className="flex border-t border-slate-100 divide-x divide-slate-100 mt-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         {phone && (
           <a href={`tel:${phone}`}
-            className="flex-1 flex items-center justify-center gap-1 text-xs font-semibold
-              py-2 px-3 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100
-              transition-colors border border-emerald-200">
-            <Phone className="w-3.5 h-3.5" /> Call
+            className="flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-semibold
+              text-emerald-700 hover:bg-emerald-50 transition-colors active:scale-[0.97]">
+            <Phone className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Call</span>
           </a>
         )}
         {website && (
           <a href={website.startsWith('http') ? website : `https://${website}`}
             target="_blank" rel="noopener noreferrer"
-            className="flex-1 flex items-center justify-center gap-1 text-xs font-semibold
-              py-2 px-3 rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100
-              transition-colors border border-indigo-200">
-            <Globe className="w-3.5 h-3.5" /> Website
+            className="flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-semibold
+              text-indigo-700 hover:bg-indigo-50 transition-colors active:scale-[0.97]">
+            <Globe className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Web</span>
           </a>
         )}
         <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
-          className="flex-1 flex items-center justify-center gap-1 text-xs font-semibold
-            py-2 px-3 rounded-lg bg-slate-50 text-slate-700 hover:bg-slate-100
-            transition-colors border border-slate-200">
-          <MapPin className="w-3.5 h-3.5" /> Map
+          className="flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-semibold
+            text-slate-700 hover:bg-slate-50 transition-colors active:scale-[0.97]">
+          <MapPin className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Map</span>
         </a>
       </div>
     </div>
@@ -413,20 +442,20 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className={hasResults
-      ? 'space-y-6 px-4 sm:px-6 py-6'
+      ? 'space-y-4 px-4 sm:px-6 py-6'
       : 'flex flex-col items-center justify-center min-h-[50vh] md:min-h-[calc(100vh-5rem)] py-8 px-4'
     }>
 
       {/* ── Hero headline (pre-search only) ─────────────────────────── */}
       {!hasResults && !searching && (
-        <div className="text-center mb-10 max-w-2xl w-full">
-          <h1 className="text-4xl sm:text-5xl font-extrabold text-slate-900 leading-tight mb-4">
+        <div className="text-center mb-6 max-w-2xl w-full">
+          <h1 className="text-2xl sm:text-4xl md:text-5xl font-extrabold text-slate-900 leading-tight mb-3">
             Find Business
             <span className="block bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent">
               Leads Instantly
             </span>
           </h1>
-          <p className="text-lg text-slate-500">
+          <p className="text-sm sm:text-base md:text-lg text-slate-500">
             Search across multiple keywords and cities in one click — powered by the Google Places API.
           </p>
         </div>
@@ -434,7 +463,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
       {/* ── Search Form ──────────────────────────────────────────────── */}
       <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm w-full ${
-        hasResults ? 'p-6' : 'max-w-4xl p-8 shadow-xl shadow-slate-200/60'
+        hasResults ? 'p-3 md:p-6' : 'max-w-4xl p-4 md:p-8 shadow-xl shadow-slate-200/60'
       }`}>
         {hasResults && (
           <div className="flex items-center gap-2 mb-5">
@@ -484,7 +513,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 onChange={(e) => setKeyword(e.target.value)}
                 placeholder="e.g. Kurti, Hardware shop, Pharmacy…"
                 required
-                className="w-full pl-10 pr-4 py-3.5 text-base border border-slate-200 rounded-xl
+                className="w-full pl-10 pr-4 py-2.5 md:py-3.5 text-sm md:text-base border border-slate-200 rounded-xl
                   bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
                   focus:ring-indigo-100 outline-none transition-all placeholder-slate-400 text-slate-800"
               />
@@ -498,7 +527,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 onChange={(e) => setLocation(e.target.value)}
                 placeholder={searchScope === 'city' ? 'e.g. Ahmedabad, Surat, Mumbai…' : 'City (e.g. Ahmedabad)…'}
                 required
-                className="w-full pl-10 pr-4 py-3.5 text-base border border-slate-200 rounded-xl
+                className="w-full pl-10 pr-4 py-2.5 md:py-3.5 text-sm md:text-base border border-slate-200 rounded-xl
                   bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
                   focus:ring-indigo-100 outline-none transition-all placeholder-slate-400 text-slate-800"
               />
@@ -532,7 +561,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                     : 'Building / Market / Street (e.g. Lal Darwaja Market, Relief Road…)'
                 }
                 required
-                className="w-full pl-10 pr-36 py-3.5 text-sm border border-indigo-200 rounded-xl
+                className="w-full pl-10 pr-36 py-2.5 md:py-3.5 text-sm border border-indigo-200 rounded-xl
                   bg-indigo-50 focus:bg-white focus:border-indigo-400 focus:ring-2
                   focus:ring-indigo-100 outline-none transition-all placeholder-indigo-300 text-slate-800"
               />
@@ -570,10 +599,10 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             ) : (
               <button type="submit"
                 disabled={!keyword.trim() || !location.trim()}
-                className="flex items-center gap-2 px-6 py-3.5 text-sm font-semibold rounded-xl
+                className="flex items-center gap-2 px-5 py-2.5 md:py-3.5 text-sm font-semibold rounded-xl
                   bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm
                   hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed
-                  transition-all hover:-translate-y-px active:translate-y-0 whitespace-nowrap">
+                  transition-all hover:-translate-y-px active:scale-[0.97] whitespace-nowrap">
                 <Search className="w-4 h-4" />
                 {isMultiSearch ? `Search · ${searchCount} queries` : 'Search'}
               </button>
@@ -605,6 +634,40 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       {/* ── Results area ──────────────────────────────────────────────── */}
       {results.length > 0 && (
         <div className="space-y-4">
+
+          {/* Sticky mini-search bar — collapses the hero form while scrolling results */}
+          <div className="sticky top-16 z-20 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 bg-white/95 backdrop-blur-sm border-b border-slate-200 shadow-sm">
+            <form onSubmit={handleSearch} className="flex items-center gap-2">
+              <div className="relative flex-1 min-w-0">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                <input
+                  value={keyword}
+                  onChange={(e) => setKeyword(e.target.value)}
+                  placeholder="Keywords…"
+                  className="w-full pl-8 pr-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:border-indigo-400 outline-none transition-all text-slate-800"
+                />
+              </div>
+              <div className="relative flex-1 min-w-0">
+                <MapPin className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                <input
+                  value={location}
+                  onChange={(e) => setLocation(e.target.value)}
+                  placeholder="Location…"
+                  className="w-full pl-8 pr-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:border-indigo-400 outline-none transition-all text-slate-800"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={!keyword.trim() || !location.trim()}
+                className="flex-none flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg
+                  bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50
+                  transition-all active:scale-[0.97]">
+                <Search className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Search</span>
+              </button>
+            </form>
+          </div>
+
           {/* Toolbar */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             {/* Result count + cache badge */}
@@ -724,7 +787,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
           {/* Grid */}
           {visible.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
               {visible.map((lead) => {
                 const key        = getLeadKey(lead);
                 const isSelected = selected.has(key);
