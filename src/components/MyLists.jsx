@@ -1,342 +1,592 @@
-import { useState, useEffect } from 'react';
-import { collection, query, orderBy, getDocs, doc, deleteDoc } from 'firebase/firestore';
-import { db } from '../firebase';
-import { useAuth } from '../contexts/AuthContext';
-import { BookmarkCheck, Download, Trash2, Search, Calendar, MapPin, ChevronRight, FileSpreadsheet, Loader2 } from 'lucide-react';
-import ExcelJS from 'exceljs';
-import { useNavigate } from 'react-router-dom';
-
 /**
- * MyLists Component
- * View and manage all saved lead lists
+ * My Lists  (Phase 4)
+ *
+ * Full-featured lead list manager:
+ *  • Browse all saved lists
+ *  • View leads in a chosen list
+ *  • Export leads as CSV  (papaparse)
+ *  • Export leads as PDF  (jspdf + autotable)
+ *  • Import leads from CSV (papaparse)
+ *  • Delete individual leads or entire lists
+ *
+ * Firestore paths (via listService):
+ *   users/{uid}/lists/{listId}                ← list metadata
+ *   users/{uid}/lists/{listId}/leads/{leadId} ← individual leads
  */
+
+import { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
+import Papa from 'papaparse';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import {
+  BookmarkCheck, Trash2, ArrowLeft,
+  FileText, Table2, Upload, Loader2, Search,
+  Phone, Globe, Star, MapPin, X, AlertCircle,
+  ChevronRight, FolderOpen, Plus, Download,
+} from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import {
+  getLists,
+  getLeads,
+  deleteList,
+  deleteLead,
+  bulkSaveLeads,
+} from '../services/listService';
+
+// ─── CSV row → normalised lead ────────────────────────────────────────────────
+const csvRowToLead = (row) => ({
+  name:        row.name        || row.Name        || '',
+  address:     row.address     || row.Address     || '',
+  phone:       row.phone       || row.Phone       || '',
+  website:     row.website     || row.Website     || '',
+  rating:      parseFloat(row.rating  || row.Rating)  || null,
+  reviewCount: parseInt(row.reviewCount || row.Reviews || '0') || 0,
+  placeId:     row.placeId     || row.place_id    || '',
+  status:      row.status      || row.Status      || '',
+  lat:         parseFloat(row.lat) || null,
+  lng:         parseFloat(row.lng) || null,
+  savedAt:     row.savedAt     || new Date().toISOString(),
+});
+
+// ─── Export helpers ───────────────────────────────────────────────────────────
+const exportCsv = (leads, listName) => {
+  const csv = Papa.unparse(
+    leads.map((l) => ({
+      name:        l.name,
+      address:     l.address,
+      phone:       l.phone,
+      website:     l.website,
+      rating:      l.rating ?? '',
+      reviewCount: l.reviewCount ?? '',
+      status:      l.status,
+      placeId:     l.placeId,
+    })),
+    { header: true }
+  );
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `${listName.replace(/[^a-z0-9]/gi, '_')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const exportPdf = (leads, listName) => {
+  const doc = new jsPDF({ orientation: 'landscape' });
+  doc.setFontSize(14);
+  doc.text(listName, 14, 16);
+  doc.setFontSize(9);
+  doc.setTextColor(100);
+  doc.text(`${leads.length} leads · Exported ${new Date().toLocaleDateString()}`, 14, 22);
+
+  autoTable(doc, {
+    startY: 27,
+    head: [['Business Name', 'Address', 'Phone', 'Website', 'Rating', 'Reviews']],
+    body: leads.map((l) => [
+      l.name    || '',
+      l.address || '',
+      l.phone   || '',
+      l.website || '',
+      l.rating  ?? '',
+      l.reviewCount ?? '',
+    ]),
+    styles:             { fontSize: 8, cellPadding: 3 },
+    headStyles:         { fillColor: [79, 70, 229], textColor: 255, fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [248, 250, 252] },
+    columnStyles: {
+      0: { cellWidth: 50 },
+      1: { cellWidth: 75 },
+      2: { cellWidth: 35 },
+      3: { cellWidth: 55 },
+      4: { cellWidth: 17 },
+      5: { cellWidth: 22 },
+    },
+  });
+
+  doc.save(`${listName.replace(/[^a-z0-9]/gi, '_')}.pdf`);
+};
+
+// ─── Lead row ─────────────────────────────────────────────────────────────────
+const LeadRow = ({ lead, onDelete }) => (
+  <tr className="hover:bg-slate-50 transition-colors group">
+    <td className="px-4 py-3 text-sm font-medium text-slate-900 max-w-[200px]">
+      <span className="line-clamp-1">{lead.name || '—'}</span>
+    </td>
+    <td className="px-4 py-3 text-xs text-slate-600 max-w-[200px]">
+      <span className="flex items-start gap-1 line-clamp-2">
+        <MapPin className="w-3 h-3 mt-0.5 flex-none text-slate-400" />
+        {lead.address || '—'}
+      </span>
+    </td>
+    <td className="px-4 py-3 text-xs text-slate-700">
+      {lead.phone
+        ? <a href={`tel:${lead.phone}`}
+            className="flex items-center gap-1 text-emerald-700 hover:underline">
+            <Phone className="w-3 h-3" />{lead.phone}
+          </a>
+        : <span className="text-slate-300">—</span>
+      }
+    </td>
+    <td className="px-4 py-3 text-xs max-w-[160px] truncate">
+      {lead.website
+        ? <a href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`}
+            target="_blank" rel="noopener noreferrer"
+            className="flex items-center gap-1 text-indigo-600 hover:underline truncate">
+            <Globe className="w-3 h-3 flex-none" />
+            <span className="truncate">{lead.website.replace(/^https?:\/\//, '').split('/')[0]}</span>
+          </a>
+        : <span className="text-slate-300">—</span>
+      }
+    </td>
+    <td className="px-4 py-3 text-xs text-slate-600">
+      {lead.rating
+        ? <span className="flex items-center gap-1">
+            <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+            {lead.rating}
+            {lead.reviewCount > 0 && (
+              <span className="text-slate-400">({lead.reviewCount})</span>
+            )}
+          </span>
+        : <span className="text-slate-300">—</span>
+      }
+    </td>
+    <td className="px-4 py-3">
+      <button
+        onClick={() => onDelete(lead.id)}
+        className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500
+          transition-all p-1 rounded">
+        <Trash2 className="w-3.5 h-3.5" />
+      </button>
+    </td>
+  </tr>
+);
+
+// ─── Main component ───────────────────────────────────────────────────────────
 const MyLists = () => {
   const { currentUser } = useAuth();
-  const navigate = useNavigate();
-  const [lists, setLists] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedList, setSelectedList] = useState(null);
-  const [exporting, setExporting] = useState(null);
+  const uid = currentUser?.uid;
 
-  useEffect(() => {
-    if (currentUser) {
-      fetchLists();
-    }
-  }, [currentUser]);
+  const [lists,          setLists]          = useState([]);
+  const [loadingLists,   setLoadingLists]   = useState(true);
+  const [selectedList,   setSelectedList]   = useState(null);
+  const [leads,          setLeads]          = useState([]);
+  const [loadingLeads,   setLoadingLeads]   = useState(false);
+  const [exporting,      setExporting]      = useState(null);   // 'csv' | 'pdf' | null
+  const [importing,      setImporting]      = useState(false);
+  const [importResult,   setImportResult]   = useState(null);
+  const [error,          setError]          = useState('');
+  const [deletingListId, setDeletingListId] = useState(null);
+  const [searchFilter,   setSearchFilter]   = useState('');
 
+  const importFileRef = useRef(null);
+
+  // ── Load lists ─────────────────────────────────────────────────────────────
   const fetchLists = async () => {
+    if (!uid) return;
+    setLoadingLists(true);
     try {
-      const listsRef = collection(db, 'savedLists', currentUser.uid, 'lists');
-      const q = query(listsRef, orderBy('createdAt', 'desc'));
-      const snapshot = await getDocs(q);
-      
-      const listsData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        createdAt: doc.data().createdAt?.toDate() || new Date()
-      }));
-      
-      setLists(listsData);
-    } catch (error) {
-      console.error('Error fetching lists:', error);
+      const ls = await getLists(uid);
+      setLists(ls);
+    } catch (err) {
+      setError('Failed to load lists: ' + err.message);
     } finally {
-      setLoading(false);
+      setLoadingLists(false);
     }
   };
 
-  const handleDelete = async (listId) => {
-    if (window.confirm('Are you sure you want to delete this list?')) {
-      try {
-        await deleteDoc(doc(db, 'savedLists', currentUser.uid, 'lists', listId));
-        setLists(lists.filter(l => l.id !== listId));
-        if (selectedList?.id === listId) {
-          setSelectedList(null);
-        }
-      } catch (error) {
-        console.error('Error deleting list:', error);
-        alert('Failed to delete list');
-      }
-    }
-  };
+  useEffect(() => { fetchLists(); }, [uid]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const exportToExcel = async (list) => {
-    setExporting(list.id);
-    
+  // ── Open a list ────────────────────────────────────────────────────────────
+  const openList = async (list) => {
+    setSelectedList(list);
+    setLeads([]);
+    setSearchFilter('');
+    setImportResult(null);
+    setError('');
+    setLoadingLeads(true);
     try {
-      const workbook = new ExcelJS.Workbook();
-      const worksheet = workbook.addWorksheet('Leads');
-
-      // Define columns
-      worksheet.columns = [
-        { header: 'Business Name', key: 'name', width: 30 },
-        { header: 'Address', key: 'address', width: 40 },
-        { header: 'Phone', key: 'phone', width: 15 },
-        { header: 'Rating', key: 'rating', width: 10 },
-        { header: 'Total Ratings', key: 'totalRatings', width: 12 },
-        { header: 'Website', key: 'website', width: 30 },
-        { header: 'Status', key: 'status', width: 15 },
-        { header: 'Place ID', key: 'placeId', width: 30 }
-      ];
-
-      // Style header
-      worksheet.getRow(1).font = { bold: true, size: 11, color: { argb: 'FFFFFFFF' } };
-      worksheet.getRow(1).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FF4472C4' }
-      };
-      worksheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
-
-      // Add data
-      list.leads.forEach((lead, index) => {
-        const row = worksheet.addRow({
-          name: lead.name || 'N/A',
-          address: lead.formatted_address || 'N/A',
-          phone: lead.formatted_phone_number || 'N/A',
-          rating: lead.rating || 'N/A',
-          totalRatings: lead.user_ratings_total || 0,
-          website: lead.website || 'N/A',
-          status: lead.business_status || 'N/A',
-          placeId: lead.place_id || ''
-        });
-
-        // Alternate row colors
-        if (index % 2 === 0) {
-          row.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FFF2F2F2' }
-          };
-        }
-
-        // Add borders
-        row.eachCell((cell) => {
-          cell.border = {
-            top: { style: 'thin', color: { argb: 'FFD3D3D3' } },
-            left: { style: 'thin', color: { argb: 'FFD3D3D3' } },
-            bottom: { style: 'thin', color: { argb: 'FFD3D3D3' } },
-            right: { style: 'thin', color: { argb: 'FFD3D3D3' } }
-          };
-        });
-      });
-
-      // Generate file
-      const buffer = await workbook.xlsx.writeBuffer();
-      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${list.name.replace(/[^a-z0-9]/gi, '-')}-${new Date().toISOString().slice(0, 10)}.xlsx`;
-      link.click();
-      window.URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Error exporting to Excel:', error);
-      alert('Failed to export list');
+      const ls = await getLeads(uid, list.id);
+      setLeads(ls);
+    } catch (err) {
+      setError('Failed to load leads: ' + err.message);
     } finally {
-      setExporting(null);
+      setLoadingLeads(false);
     }
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 flex items-center justify-center">
-        <div className="text-center">
-          <Loader2 className="w-12 h-12 text-blue-600 animate-spin mx-auto mb-4" />
-          <p className="text-gray-600">Loading your lists...</p>
-        </div>
-      </div>
-    );
-  }
+  // ── Delete entire list ─────────────────────────────────────────────────────
+  const handleDeleteList = async (listId) => {
+    if (!window.confirm('Delete this list and all its leads? This cannot be undone.')) return;
+    setDeletingListId(listId);
+    try {
+      await deleteList(uid, listId);
+      setLists((prev) => prev.filter((l) => l.id !== listId));
+      if (selectedList?.id === listId) setSelectedList(null);
+    } catch (err) {
+      setError('Failed to delete list: ' + err.message);
+    } finally {
+      setDeletingListId(null);
+    }
+  };
 
+  // ── Delete single lead ─────────────────────────────────────────────────────
+  const handleDeleteLead = async (leadId) => {
+    if (!selectedList || !window.confirm('Remove this lead from the list?')) return;
+    try {
+      await deleteLead(uid, selectedList.id, leadId);
+      setLeads((prev) => prev.filter((l) => l.id !== leadId));
+      setLists((prev) =>
+        prev.map((l) =>
+          l.id === selectedList.id
+            ? { ...l, leadCount: Math.max(0, (l.leadCount ?? 1) - 1) }
+            : l
+        )
+      );
+    } catch (err) {
+      setError('Failed to delete lead: ' + err.message);
+    }
+  };
+
+  // ── Export CSV ─────────────────────────────────────────────────────────────
+  const handleExportCsv = () => {
+    if (!visibleLeads.length) return;
+    setExporting('csv');
+    try { exportCsv(visibleLeads, selectedList.name); }
+    finally { setExporting(null); }
+  };
+
+  // ── Export PDF ─────────────────────────────────────────────────────────────
+  const handleExportPdf = () => {
+    if (!visibleLeads.length) return;
+    setExporting('pdf');
+    try { exportPdf(visibleLeads, selectedList.name); }
+    finally { setExporting(null); }
+  };
+
+  // ── Import CSV ─────────────────────────────────────────────────────────────
+  const handleImportFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedList) return;
+    setImporting(true);
+    setError('');
+
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: async ({ data, errors }) => {
+        if (errors.length > 0) {
+          setError(`CSV parse error: ${errors[0].message}`);
+          setImporting(false);
+          return;
+        }
+        try {
+          const mapped = data
+            .map(csvRowToLead)
+            .filter((r) => r.name || r.address);
+          const count = await bulkSaveLeads(uid, selectedList.id, mapped);
+          setImportResult({ count, listName: selectedList.name });
+          const fresh = await getLeads(uid, selectedList.id);
+          setLeads(fresh);
+          const freshLists = await getLists(uid);
+          setLists(freshLists);
+        } catch (err) {
+          setError('Import failed: ' + err.message);
+        } finally {
+          setImporting(false);
+          if (importFileRef.current) importFileRef.current.value = '';
+        }
+      },
+      error: (err) => {
+        setError('Failed to read file: ' + err.message);
+        setImporting(false);
+      },
+    });
+  };
+
+  // ── Filtered leads ─────────────────────────────────────────────────────────
+  const visibleLeads = searchFilter.trim()
+    ? leads.filter((l) => {
+        const q = searchFilter.toLowerCase();
+        return (
+          l.name?.toLowerCase().includes(q)    ||
+          l.address?.toLowerCase().includes(q) ||
+          l.phone?.includes(q)                 ||
+          l.website?.toLowerCase().includes(q)
+        );
+      })
+    : leads;
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b border-gray-200">
-        <div className="container mx-auto px-4 py-6">
-          <div className="flex items-center justify-between">
+    <div className="min-h-screen bg-slate-50">
+
+      {/* ── Page header ────────────────────────────────────────────────── */}
+      <div className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4">
+        <div className="max-w-7xl mx-auto flex items-center gap-4">
+          <Link to="/app"
+            className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 transition-colors">
+            <ArrowLeft className="w-4 h-4" />
+            Search
+          </Link>
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600
+              flex items-center justify-center shadow-sm">
+              <BookmarkCheck className="w-4 h-4 text-white" />
+            </div>
             <div>
-              <h1 className="text-4xl font-bold text-gray-900 mb-2">
-                My Lists
-              </h1>
-              <p className="text-gray-600 text-lg">
-                {lists.length} saved {lists.length === 1 ? 'list' : 'lists'}
+              <h1 className="text-base font-bold text-slate-900">My Lists</h1>
+              <p className="text-xs text-slate-400">
+                {lists.length} list{lists.length !== 1 ? 's' : ''} saved
               </p>
             </div>
-            <button
-              onClick={() => navigate('/')}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-            >
-              Back to Search
-            </button>
           </div>
         </div>
-      </header>
+      </div>
 
-      {/* Main Content */}
-      <main className="container mx-auto px-4 py-8">
-        {lists.length === 0 ? (
-          <div className="bg-white rounded-xl shadow-lg p-12 text-center">
-            <BookmarkCheck className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-            <h2 className="text-2xl font-bold text-gray-800 mb-2">No saved lists yet</h2>
-            <p className="text-gray-600 mb-6">
-              Start searching for leads and save them to create your first list
-            </p>
-            <button
-              onClick={() => navigate('/')}
-              className="px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white rounded-lg transition-colors"
-            >
-              Start Searching
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-            {lists.map((list) => (
-              <div
-                key={list.id}
-                className="bg-white rounded-xl shadow-lg hover:shadow-xl transition-shadow p-6 cursor-pointer"
-                onClick={() => setSelectedList(list)}
-              >
-                {/* List Header */}
-                <div className="flex items-start justify-between mb-4">
-                  <div className="flex-1">
-                    <h3 className="text-xl font-bold text-gray-800 mb-2">
-                      {list.name}
-                    </h3>
-                    <div className="flex items-center gap-2 text-sm text-gray-500">
-                      <Calendar className="w-4 h-4" />
-                      {list.createdAt.toLocaleDateString()}
-                    </div>
-                  </div>
-                  <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-                    <BookmarkCheck className="w-6 h-6 text-white" />
-                  </div>
-                </div>
-
-                {/* List Details */}
-                <div className="space-y-2 mb-4">
-                  <div className="flex items-center gap-2 text-sm text-gray-600">
-                    <Search className="w-4 h-4" />
-                    <span>{list.searchQuery.keyword}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm text-gray-600">
-                    <MapPin className="w-4 h-4" />
-                    <span>{list.searchQuery.location}</span>
-                  </div>
-                </div>
-
-                {/* Stats */}
-                <div className="bg-gray-50 rounded-lg p-3 mb-4">
-                  <p className="text-center">
-                    <span className="text-2xl font-bold text-blue-600">{list.totalLeads}</span>
-                    <span className="text-gray-600 text-sm ml-2">leads</span>
-                  </p>
-                </div>
-
-                {/* Actions */}
-                <div className="flex gap-2">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      exportToExcel(list);
-                    }}
-                    disabled={exporting === list.id}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
-                  >
-                    {exporting === list.id ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Exporting...
-                      </>
-                    ) : (
-                      <>
-                        <FileSpreadsheet className="w-4 h-4" />
-                        Export
-                      </>
-                    )}
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDelete(list.id);
-                    }}
-                    className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </main>
-
-      {/* List Viewer Modal */}
-      {selectedList && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl max-w-6xl w-full max-h-[90vh] overflow-hidden shadow-2xl">
-            {/* Modal Header */}
-            <div className="flex items-center justify-between p-6 border-b border-gray-200">
-              <div>
-                <h2 className="text-2xl font-bold text-gray-800">{selectedList.name}</h2>
-                <p className="text-gray-600">{selectedList.totalLeads} leads</p>
-              </div>
-              <button
-                onClick={() => setSelectedList(null)}
-                className="text-gray-400 hover:text-gray-600 transition-colors"
-              >
-                <X className="w-6 h-6" />
-              </button>
-            </div>
-
-            {/* Modal Body */}
-            <div className="p-6 overflow-y-auto max-h-[calc(90vh-200px)]">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {selectedList.leads.map((lead, index) => (
-                  <div key={index} className="bg-gray-50 rounded-lg p-4 hover:bg-gray-100 transition-colors">
-                    <h4 className="font-bold text-gray-800 mb-2">{lead.name}</h4>
-                    <p className="text-sm text-gray-600 mb-2">{lead.formatted_address}</p>
-                    {lead.formatted_phone_number && (
-                      <p className="text-sm text-blue-600">{lead.formatted_phone_number}</p>
-                    )}
-                    {lead.rating && (
-                      <p className="text-sm text-gray-600 mt-2">
-                        ⭐ {lead.rating} ({lead.user_ratings_total} reviews)
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Modal Footer */}
-            <div className="flex gap-3 p-6 border-t border-gray-200">
-              <button
-                onClick={() => setSelectedList(null)}
-                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg transition-colors"
-              >
-                Close
-              </button>
-              <button
-                onClick={() => exportToExcel(selectedList)}
-                disabled={exporting === selectedList.id}
-                className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50"
-              >
-                {exporting === selectedList.id ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Exporting...
-                  </>
-                ) : (
-                  <>
-                    <FileSpreadsheet className="w-4 h-4" />
-                    Export to Excel
-                  </>
-                )}
-              </button>
-            </div>
+      {/* ── Error banner ───────────────────────────────────────────────── */}
+      {error && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 mt-4">
+          <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-none" />
+            <span className="flex-1">{error}</span>
+            <button onClick={() => setError('')}><X className="w-4 h-4" /></button>
           </div>
         </div>
       )}
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+        <div className="flex gap-6" style={{ minHeight: 'calc(100vh - 152px)' }}>
+
+          {/* ── Left: list panel ─────────────────────────────────────── */}
+          <div className="w-72 flex-none flex flex-col gap-3">
+            <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide px-1">
+              Saved Lists
+            </h2>
+
+            {loadingLists ? (
+              <div className="flex items-center gap-2 text-slate-400 text-sm justify-center py-10">
+                <Loader2 className="w-4 h-4 animate-spin" /> Loading…
+              </div>
+            ) : lists.length === 0 ? (
+              <div className="text-center py-14 text-slate-400">
+                <FolderOpen className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                <p className="text-sm font-medium">No lists yet</p>
+                <p className="text-xs mt-1">Save leads from search results</p>
+                <Link to="/app"
+                  className="inline-flex items-center gap-1 mt-3 text-xs font-semibold
+                    text-indigo-600 hover:underline">
+                  <Plus className="w-3.5 h-3.5" /> Start searching
+                </Link>
+              </div>
+            ) : (
+              <div className="overflow-y-auto flex-1 space-y-2 pr-1">
+                {lists.map((list) => (
+                  <div
+                    key={list.id}
+                    onClick={() => openList(list)}
+                    className={`group flex items-center gap-3 p-3 rounded-xl cursor-pointer
+                      transition-all border ${
+                        selectedList?.id === list.id
+                          ? 'bg-indigo-50 border-indigo-200 shadow-sm'
+                          : 'bg-white border-slate-200 hover:border-indigo-300 hover:bg-slate-50'
+                      }`}>
+                    <div className={`w-8 h-8 rounded-lg flex-none flex items-center justify-center ${
+                      selectedList?.id === list.id
+                        ? 'bg-indigo-100 text-indigo-600'
+                        : 'bg-slate-100 text-slate-500'
+                    }`}>
+                      <BookmarkCheck className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-semibold truncate ${
+                        selectedList?.id === list.id ? 'text-indigo-700' : 'text-slate-800'
+                      }`}>{list.name}</p>
+                      <p className="text-xs text-slate-400">
+                        {list.leadCount ?? 0} lead{list.leadCount !== 1 ? 's' : ''}
+                        {list.createdAt && (
+                          <span className="ml-1.5">
+                            {new Date(
+                              typeof list.createdAt?.toDate === 'function'
+                                ? list.createdAt.toDate()
+                                : list.createdAt
+                            ).toLocaleDateString()}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex-none flex items-center gap-1">
+                      <ChevronRight className={`w-3.5 h-3.5 transition-opacity ${
+                        selectedList?.id === list.id
+                          ? 'text-indigo-400 opacity-100'
+                          : 'text-slate-300 opacity-0 group-hover:opacity-100'
+                      }`} />
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteList(list.id); }}
+                        disabled={deletingListId === list.id}
+                        className="opacity-0 group-hover:opacity-100 p-1 rounded text-slate-300
+                          hover:text-red-500 transition-all disabled:opacity-50">
+                        {deletingListId === list.id
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Trash2 className="w-3.5 h-3.5" />
+                        }
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* ── Right: leads panel ───────────────────────────────────── */}
+          <div className="flex-1 min-w-0 flex flex-col gap-4">
+            {!selectedList ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-3">
+                <BookmarkCheck className="w-14 h-14 opacity-20" />
+                <p className="text-sm font-medium">Select a list to view its leads</p>
+              </div>
+            ) : (
+              <>
+                {/* Toolbar card */}
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-base font-bold text-slate-900">{selectedList.name}</h2>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        {loadingLeads
+                          ? 'Loading…'
+                          : `${visibleLeads.length}${searchFilter ? ' matching' : ''} of ${leads.length} lead${leads.length !== 1 ? 's' : ''}`
+                        }
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {/* Filter input */}
+                      <div className="relative">
+                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                        <input
+                          value={searchFilter}
+                          onChange={(e) => setSearchFilter(e.target.value)}
+                          placeholder="Filter leads…"
+                          className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg
+                            bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-1
+                            focus:ring-indigo-100 outline-none w-40"
+                        />
+                      </div>
+
+                      {/* Export CSV */}
+                      <button
+                        onClick={handleExportCsv}
+                        disabled={!leads.length || !!exporting}
+                        title="Export visible leads as CSV"
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold
+                          rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200
+                          hover:bg-emerald-100 disabled:opacity-40 transition-colors">
+                        {exporting === 'csv'
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Download className="w-3.5 h-3.5" />
+                        }
+                        CSV
+                      </button>
+
+                      {/* Export PDF */}
+                      <button
+                        onClick={handleExportPdf}
+                        disabled={!leads.length || !!exporting}
+                        title="Export visible leads as PDF"
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold
+                          rounded-lg bg-red-50 text-red-700 border border-red-200
+                          hover:bg-red-100 disabled:opacity-40 transition-colors">
+                        {exporting === 'pdf'
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <FileText className="w-3.5 h-3.5" />
+                        }
+                        PDF
+                      </button>
+
+                      {/* Import CSV */}
+                      <button
+                        onClick={() => importFileRef.current?.click()}
+                        disabled={importing}
+                        title="Import leads from a CSV file"
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold
+                          rounded-lg bg-violet-50 text-violet-700 border border-violet-200
+                          hover:bg-violet-100 disabled:opacity-40 transition-colors">
+                        {importing
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Upload className="w-3.5 h-3.5" />
+                        }
+                        Import CSV
+                      </button>
+                      <input
+                        ref={importFileRef}
+                        type="file"
+                        accept=".csv"
+                        className="hidden"
+                        onChange={handleImportFile}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Import success toast */}
+                  {importResult && (
+                    <div className="mt-3 flex items-center gap-2 text-xs font-medium text-emerald-700
+                      bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                      <Table2 className="w-3.5 h-3.5 flex-none" />
+                      Imported {importResult.count} lead{importResult.count !== 1 ? 's' : ''} successfully!
+                      <button onClick={() => setImportResult(null)} className="ml-auto text-emerald-400 hover:text-emerald-700">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Leads table */}
+                <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                  {loadingLeads ? (
+                    <div className="flex-1 flex items-center justify-center text-slate-400 gap-2 py-20">
+                      <Loader2 className="w-5 h-5 animate-spin" /> Loading leads…
+                    </div>
+                  ) : visibleLeads.length === 0 ? (
+                    <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-2 py-16">
+                      <Search className="w-10 h-10 opacity-20" />
+                      {searchFilter
+                        ? <p className="text-sm">No leads match "{searchFilter}"</p>
+                        : <>
+                            <p className="text-sm font-medium">This list is empty</p>
+                            <p className="text-xs">Import a CSV or save leads from search</p>
+                          </>
+                      }
+                    </div>
+                  ) : (
+                    <div className="overflow-auto flex-1">
+                      <table className="w-full text-left">
+                        <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 z-10">
+                          <tr>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Business</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Address</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Phone</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Website</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Rating</th>
+                            <th className="px-4 py-3 w-10" />
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {visibleLeads.map((lead) => (
+                            <LeadRow key={lead.id} lead={lead} onDelete={handleDeleteLead} />
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+        </div>
+      </div>
     </div>
   );
 };

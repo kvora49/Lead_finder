@@ -33,24 +33,27 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
     setLoading(true);
 
     try {
-      const userCreditsRef = doc(db, 'userCredits', user.id);
+      const userRef = doc(db, 'users', user.id);
       const adjustmentAmount = action === 'add' ? creditAmount : -creditAmount;
 
-      // Update user credits
-      await updateDoc(userCreditsRef, {
-        creditsUsed: increment(-adjustmentAmount), // Negative because creditsUsed tracks usage
-        lastModified: serverTimestamp(),
-        lastModifiedBy: adminUser?.email || 'admin'
+      // Update user credits balance directly on the users/{uid} document
+      await updateDoc(userRef, {
+        credits: increment(adjustmentAmount),
+        updatedAt: serverTimestamp(),
       });
 
-      // Log the admin action
-      await logAdminAction(
-        adminUser?.uid,
-        adminUser?.email,
-        `Credit Adjustment - ${action === 'add' ? 'Added' : 'Removed'} ${creditAmount} credits`,
-        user.id,
-        `${action === 'add' ? 'Granted' : 'Removed'} ${creditAmount} credits for ${user.email}. Reason: ${reason}`
-      );
+      // Log the admin action (non-blocking)
+      try {
+        await logAdminAction(
+          adminUser?.uid,
+          adminUser?.email,
+          `Credit Adjustment - ${action === 'add' ? 'Added' : 'Removed'} ${creditAmount} credits`,
+          user.id,
+          `${action === 'add' ? 'Granted' : 'Removed'} ${creditAmount} credits for ${user.email}. Reason: ${reason}`
+        );
+      } catch (logErr) {
+        console.warn('logAdminAction failed (non-critical):', logErr);
+      }
 
       onSuccess?.();
       onClose();
@@ -88,10 +91,10 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           {/* Current Balance */}
           <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
-            <p className="text-sm text-gray-400 mb-1">Current Credits Used</p>
-            <p className="text-2xl font-bold text-white">{user.creditsUsed.toLocaleString()}</p>
+            <p className="text-sm text-gray-400 mb-1">Current Credit Balance</p>
+            <p className="text-2xl font-bold text-white">{(user.credits ?? 0).toLocaleString()}</p>
             <p className="text-xs text-gray-500 mt-1">
-              Lower usage = More available credits
+              Credits available for searches
             </p>
           </div>
 
@@ -170,9 +173,10 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
           {amount && (
             <div className="bg-blue-500/10 border border-blue-500/50 rounded-lg p-3">
               <p className="text-blue-400 text-sm">
-                {action === 'add' ? '✓' : '⚠'} This will {action === 'add' ? 'decrease' : 'increase'} credits used by {amount}, 
-                effectively {action === 'add' ? 'giving' : 'removing'} {amount} credits {action === 'add' ? 'to' : 'from'} the user.
-              </p>
+              <p className="text-blue-400 text-sm">
+              {action === 'add' ? '✓' : '⚠'} This will {action === 'add' ? 'add' : 'remove'} {amount} credits
+              {action === 'add' ? ' to' : ' from'} {user.email}'s balance.
+            </p>
             </div>
           )}
 

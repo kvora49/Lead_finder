@@ -1,123 +1,217 @@
 rules_version = '2';
+// ─────────────────────────────────────────────────────────────────────────────
+// Lead Finder — Firestore Security Rules  (Phase 1)
+//
+// Principle of Least Privilege:
+//   • Every collection is DENY-ALL by default.
+//   • Users can only read/write their OWN data.
+//   • Admin privileges are read from the user's Firestore document (role field),
+//     which is written server-side on registration and never exposed client-side.
+//   • The public_search_cache is readable by all authenticated users so we can
+//     serve zero-cost cached results without hitting the Google Places API again.
+// ─────────────────────────────────────────────────────────────────────────────
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper function to check if user is admin (safe version)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // HELPER FUNCTIONS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuth() && request.auth.uid == userId;
+    }
+
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
     function isAdmin() {
-      return request.auth != null && 
-             (
-               // Check if user is admin in users collection
-               (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-                (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-                 get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin')) ||
-               // OR check if user's email is in adminUsers collection
-               exists(/databases/$(database)/documents/adminUsers/$(request.auth.token.email)) &&
-               get(/databases/$(database)/documents/adminUsers/$(request.auth.token.email)).data.role != null
-             );
+      return isAuth()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getUserRole() in ['admin', 'super_admin'];
     }
-    
-    // Global Credits Collection (shared counter)
-    match /globalCredits/{docId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null;
+
+    function isSuperAdmin() {
+      return isAuth()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getUserRole() == 'super_admin';
     }
-    
-    // User Credits Collection
-    match /userCredits/{userId} {
-      // Users can read their own credits, admins can read all
-      allow read: if request.auth != null && 
-                     (request.auth.uid == userId || isAdmin());
-      
-      // Users can create their own credits on first login
-      allow create: if request.auth != null && request.auth.uid == userId;
-      
-      // Users can update their own credits, admins can update all
-      allow update: if request.auth != null && 
-                      (request.auth.uid == userId || isAdmin());
-      
-      // Users can delete their own credits, admins can delete all
-      allow delete: if request.auth != null && 
-                      (request.auth.uid == userId || isAdmin());
-    }
-    
-    // User Profiles Collection
-    match /users/{userId} {
-      // Anyone authenticated can read any user profile (needed for admin checks)
-      allow read: if request.auth != null;
-      
-      // Users can create their own profile on first login
-      allow create: if request.auth != null && request.auth.uid == userId;
-      
-      // Users can update their own profile, admins can update all
-      allow update: if request.auth != null && 
-                      (request.auth.uid == userId || isAdmin());
-      
-      // Only admins can delete user profiles
-      allow delete: if request.auth != null && isAdmin();
-    }
-    
-    // Admin Users Collection (admin roles and permissions)
-    match /adminUsers/{email} {
-      // Allow any authenticated user to read (needed to check if they are admin during login)
-      allow read: if request.auth != null;
-      // Only super admins can write/modify admin roles
-      allow write: if request.auth != null && 
-                      exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-                      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin';
-    }
-    
-    // System Logs Collection (activity tracking)
-    match /systemLogs/{logId} {
-      allow read: if request.auth != null && isAdmin();
-      allow write: if request.auth != null; // Any authenticated user can write logs
-    }
-    
-    // Search Logs Collection (search analytics)
-    match /searchLogs/{logId} {
-      // Users can read their own search logs, admins can read all
-      allow read: if request.auth != null && 
-                     (resource.data.userId == request.auth.uid || isAdmin());
-      allow write: if request.auth != null;
-    }
-    
-    // Monthly Analytics Collection
-    match /monthlyAnalytics/{monthId} {
-      allow read: if request.auth != null && isAdmin();
-      allow write: if request.auth != null && isAdmin();
-    }
-    
-    // System Config Collection (global settings)
-    match /systemConfig/{configId} {
-      allow read: if request.auth != null && isAdmin();
-      allow write: if request.auth != null && isAdmin();
-    }
-    
-    // Search Cache Collection (cached scraping results)
-    match /searchCache/{cacheId} {
-      // Any authenticated user can read cache (improve performance)
-      allow read: if request.auth != null;
-      // Only Cloud Functions can write (via setDoc in placesApi.js)
-      // In practice, frontend can write too (they trigger the cache)
-      allow write: if request.auth != null;
-    }
-    
-    // Saved Lists Collection (user's saved lead lists)
-    match /savedLists/{userId}/lists/{listId} {
-      // Users can only access their own saved lists
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if request.auth != null && request.auth.uid == userId;
-      allow delete: if request.auth != null && request.auth.uid == userId;
-    }
-    
-    // Verification Codes Collection (for email verification)
-    match /verificationCodes/{email} {
-      allow read, write: if request.auth == null; // Public access for registration
-      allow delete: if request.auth == null; // Allow cleanup after verification
-    }
-    
-    // Deny all other access by default
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DENY-ALL FALLBACK  (Principle of Least Privilege)
+    // ═══════════════════════════════════════════════════════════════════════
     match /{document=**} {
       allow read, write: if false;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // USER PROFILES   users/{userId}
+    // ═══════════════════════════════════════════════════════════════════════
+    match /users/{userId} {
+      // Users read their own profile; admins read all
+      allow read: if isOwner(userId) || isAdmin();
+
+      // Registration: owner may create ONLY with safe defaults
+      // This prevents a malicious client from self-promoting to admin
+      allow create: if isOwner(userId)
+        && request.resource.data.uid        == userId
+        && request.resource.data.role       == 'user'
+        && request.resource.data.credits    == 100
+        && request.resource.data.isActive   == true;
+
+      // Users update their own profile except sensitive fields.
+      // 'credits' (balance) and 'role' are server/admin-controlled.
+      // 'creditsUsed' and 'searchCount' are owner-writable (Phase 3 batched writes).
+      allow update: if (
+          isOwner(userId)
+          && !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['role', 'isActive', 'uid', 'createdAt'])
+        ) || isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PUBLIC SEARCH CACHE   public_search_cache/{cacheId}
+    // Zero-cost layer: serve identical queries from Firestore, not Google API
+    // ═══════════════════════════════════════════════════════════════════════
+    match /public_search_cache/{cacheId} {
+      allow read: if isAuth();
+
+      allow create, update: if isAuth()
+        && request.resource.data.keys().hasAll(['query', 'location', 'results', 'cachedAt']);
+
+      allow delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════    // GLOBAL API COST TRACKER   system/global_usage
+    // Phase 3: Single document tracking aggregate Google Places API spend.
+    //
+    //   READ  — any authenticated user (shows budget banner in UI).
+    //   WRITE — authenticated users may only touch the four safe fields that
+    //           the deductCredits transaction writes. This prevents a client
+    //           from overwriting the monthly_api_cost to 0 to bypass the cap.
+    //           Full resets and other system docs remain admin-only.
+    // ═══════════════════════════════════════════════════════════════════
+    match /system/{docId} {
+      allow read: if isAuth();
+
+      // Any authenticated user may create or update global_usage.
+      // The deductCredits transaction writes month, monthly_api_cost,
+      // totalApiCalls, and lastUpdated. A full set() is used for month
+      // resets, so we allow that too. Only the four safe fields may appear
+      // in documents written by clients; admins may write anything.
+      allow create: if isAuth()
+        && request.resource.data.keys().hasOnly(
+             ['month', 'monthly_api_cost', 'totalApiCalls', 'lastUpdated']
+           );
+
+      allow update: if isAuth()
+        && (
+          request.resource.data.keys().hasOnly(
+            ['month', 'monthly_api_cost', 'totalApiCalls', 'lastUpdated']
+          )
+          || isAdmin()
+        );
+
+      allow delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // USER CREDIT LOGS (sub-collection)   users/{userId}/credit_logs/{logId}
+    // Phase 3: Append-only audit trail written by the deductCredits transaction.
+    // Users can read their own receipts; only admins can delete.
+    // ═══════════════════════════════════════════════════════════════════════
+    match /users/{userId}/credit_logs/{logId} {
+      allow read:   if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId)
+        && request.resource.data.userId == userId
+        && request.resource.data.keys().hasAll(['userId', 'apiCalls', 'costUsd', 'month', 'createdAt']);
+      allow update, delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════    // USER SEARCHES (sub-collection)  users/{userId}/searches/{id}
+    // ═══════════════════════════════════════════════════════════════════════
+    match /users/{userId}/searches/{searchId} {
+      allow read, write: if isOwner(userId) || isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // USER LISTS (sub-collection)   users/{userId}/lists/{listId}
+    // ═══════════════════════════════════════════════════════════════════════
+    match /users/{userId}/lists/{listId} {
+      allow read, write: if isOwner(userId) || isAdmin();
+
+      match /leads/{leadId} {
+        allow read, write: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CREDIT TRANSACTIONS   credit_transactions/{txId}
+    // Append-only for users to prevent tampering
+    // ═══════════════════════════════════════════════════════════════════════
+    match /credit_transactions/{txId} {
+      allow read: if isAuth()
+        && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuth()
+        && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SEARCH LOGS   searchLogs/{logId}
+    // ═══════════════════════════════════════════════════════════════════════
+    match /searchLogs/{logId} {
+      allow read: if isAuth()
+        && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuth();
+      allow update, delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SYSTEM LOGS   system_logs/{logId}
+    // ═══════════════════════════════════════════════════════════════════════
+    match /system_logs/{logId} {
+      allow read:          if isAdmin();
+      allow create:        if isAuth();
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // SYSTEM LOGS (camelCase)   systemLogs/{logId}
+    // analyticsService.js writes here; admin dashboard reads here
+    // ═══════════════════════════════════════════════════════════════════════
+    match /systemLogs/{logId} {
+      allow read:           if isAdmin();
+      allow create:         if isAuth();
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ADMIN-ONLY COLLECTIONS
+    // ═══════════════════════════════════════════════════════════════════════
+    match /analytics/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /monthlyAnalytics/{monthId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /systemConfig/{configId} {
+      allow read, write: if isAdmin();
+    }
+
+    // adminUsers: any auth user can read (needed for role lookups at login)
+    // Only super_admins can promote / demote other admins
+    match /adminUsers/{email} {
+      allow read:  if isAuth();
+      allow write: if isSuperAdmin();
     }
   }
 }

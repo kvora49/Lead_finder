@@ -1,141 +1,115 @@
 import { useState } from 'react';
-import { sendPasswordResetEmail } from 'firebase/auth';
-import { auth } from '../firebase';
 import { Link } from 'react-router-dom';
-import { Search, Mail, ArrowLeft, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { Mail, ArrowLeft, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
 
 const ForgotPassword = () => {
-  const [email, setEmail] = useState('');
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState(false);
+  const { resetPassword } = useAuth();
+  const [email,   setEmail]   = useState('');
+  const [error,   setError]   = useState('');
+  const [sent,    setSent]    = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const handleResetPassword = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
-    setSuccess(false);
     setLoading(true);
-
     try {
-      await sendPasswordResetEmail(auth, email);
-      setSuccess(true);
-      setEmail(''); // Clear the email field
-    } catch (error) {
-      let errorMessage = error.message.replace('Firebase: ', '').replace('Error ', '');
-      
-      if (error.code === 'auth/user-not-found') {
-        errorMessage = 'No account found with this email address.';
-      } else if (error.code === 'auth/invalid-email') {
-        errorMessage = 'Invalid email address format.';
-      } else if (error.code === 'auth/too-many-requests') {
-        errorMessage = 'Too many reset requests. Please try again later.';
-      }
-      
-      setError(errorMessage);
+      await resetPassword(email);
+      setSent(true);
+      setEmail('');
+    } catch (err) {
+      setError(err.message);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
-      {/* Background Pattern */}
-      <div className="absolute inset-0 bg-grid-pattern opacity-5"></div>
-      
-      <div className="relative w-full max-w-md">
-        {/* Logo & Title */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-purple-600 rounded-2xl mb-4 shadow-lg">
-            <Search className="w-8 h-8 text-white" />
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4 py-12">
+      <div className="w-full max-w-sm">
+
+        {/* Logo */}
+        <div className="flex items-center justify-center gap-3 mb-10">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center shadow-sm">
+            <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
           </div>
-          <h1 className="text-3xl font-bold text-gray-800 mb-2">Reset Password</h1>
-          <p className="text-gray-600">We'll send you a link to reset your password</p>
+          <span className="text-lg font-bold text-slate-900">Lead Finder</span>
         </div>
 
-        {/* Reset Password Card */}
-        <div className="glass-panel bg-white/80 backdrop-blur-xl rounded-2xl shadow-2xl p-8 border border-white/20">
-          {/* Success Message */}
-          {success && (
-            <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
-              <div className="flex items-start gap-3">
-                <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-sm text-green-800 font-medium mb-1">
-                    Password reset email sent!
-                  </p>
-                  <p className="text-sm text-green-700">
-                    Check your inbox for a link to reset your password. If it doesn't appear within a few minutes, check your spam folder.
-                  </p>
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-8">
+          <h2 className="text-2xl font-bold text-slate-900 mb-1">Reset password</h2>
+          <p className="text-sm text-slate-500 mb-6">
+            We&apos;ll send a reset link straight to your inbox.
+          </p>
+
+          {/* Success state */}
+          {sent && (
+            <div className="mb-5 flex items-start gap-3 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-none mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-emerald-800">Reset link sent!</p>
+                <p className="text-xs text-emerald-700 mt-0.5">
+                  Check your inbox and spam folder for the password reset email.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Error state */}
+          {error && (
+            <div className="mb-5 flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl p-4">
+              <AlertCircle className="w-4 h-4 text-red-500 flex-none mt-0.5" />
+              <p className="text-sm text-red-700">{error}</p>
+            </div>
+          )}
+
+          {!sent && (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                  Email address
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="email" value={email} onChange={e => setEmail(e.target.value)}
+                    placeholder="you@example.com" required disabled={loading}
+                    className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-lg bg-white
+                      focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
+                      disabled:opacity-60 transition"
+                  />
                 </div>
               </div>
-            </div>
+
+              <button type="submit" disabled={loading}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white
+                  font-semibold py-2.5 rounded-lg text-sm transition shadow-sm hover:shadow-md
+                  flex items-center justify-center gap-2">
+                {loading
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Sending&hellip;</>
+                  : 'Send reset link'}
+              </button>
+            </form>
           )}
 
-          {/* Error Message */}
-          {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
-              <div className="flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                <p className="text-sm text-red-800">{error}</p>
-              </div>
-            </div>
-          )}
-
-          {/* Reset Form */}
-          <form onSubmit={handleResetPassword} className="space-y-5">
-            {/* Email Field */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Email Address
-              </label>
-              <div className="relative">
-                <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-11 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-                  placeholder="you@example.com"
-                  required
-                  disabled={loading}
-                />
-              </div>
-              <p className="mt-2 text-xs text-gray-500">
-                Enter the email address associated with your account
-              </p>
-            </div>
-
-            {/* Reset Button */}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Sending...
-                </>
-              ) : (
-                'Send Reset Link'
-              )}
+          {sent && (
+            <button onClick={() => { setSent(false); setEmail(''); }}
+              className="w-full py-2.5 text-sm font-medium text-slate-600 hover:text-slate-900
+                border border-slate-200 rounded-lg hover:bg-slate-50 transition">
+              Try a different email
             </button>
-          </form>
+          )}
 
-          {/* Back to Login */}
-          <Link 
-            to="/login"
-            className="mt-6 w-full flex items-center justify-center gap-2 text-gray-600 hover:text-gray-800 font-medium transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Back to Login
+          <Link to="/login"
+            className="mt-5 flex items-center justify-center gap-2 text-sm text-slate-500
+              hover:text-slate-800 font-medium transition">
+            <ArrowLeft className="w-4 h-4" /> Back to sign in
           </Link>
         </div>
-
-        {/* Footer */}
-        <p className="text-center text-sm text-gray-500 mt-6">
-          © 2025 Lead Finder. All rights reserved.
-        </p>
       </div>
     </div>
   );

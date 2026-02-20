@@ -1,252 +1,56 @@
-import { useState, useEffect } from 'react';
-import { createUserWithEmailAndPassword, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, updateProfile } from 'firebase/auth';
-import { auth, db } from '../firebase';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+﻿import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Search, Mail, Lock, User, AlertCircle, Loader2, CheckCircle, Eye, EyeOff } from 'lucide-react';
-import { logAuthEvent } from '../services/analyticsService';
+import { Mail, Lock, User, Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+
+// Password strength scorer
+const getStrength = (pw) => {
+  if (!pw) return { level: 0, label: '', color: 'bg-slate-200' };
+  let s = 0;
+  if (pw.length >= 6)  s++;
+  if (pw.length >= 10) s++;
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) s++;
+  if (/\d/.test(pw)) s++;
+  if (/[^a-zA-Z\d]/.test(pw)) s++;
+  if (s <= 2) return { level: s, label: 'Weak',   color: 'bg-red-500' };
+  if (s <= 3) return { level: s, label: 'Fair',   color: 'bg-amber-500' };
+  if (s <= 4) return { level: s, label: 'Good',   color: 'bg-blue-500' };
+  return            { level: s, label: 'Strong', color: 'bg-emerald-500' };
+};
 
 const Register = () => {
-  const [formData, setFormData] = useState({
-    name: '',
-    email: '',
-    password: '',
-    confirmPassword: ''
-  });
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState(1); // 1: Registration, 2: Verification
-  const [verificationCode, setVerificationCode] = useState('');
-  const [tempUserData, setTempUserData] = useState(null);
+  const { register, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
 
-  // Check for redirect result on component mount
-  useEffect(() => {
-    const checkRedirectResult = async () => {
-      try {
-        const result = await getRedirectResult(auth);
-        if (result) {
-          navigate('/');
-        }
-      } catch (error) {
-        if (error.code !== 'auth/popup-closed-by-user') {
-          setError(error.message.replace('Firebase: ', ''));
-        }
-      }
-    };
-    checkRedirectResult();
-  }, [navigate]);
+  const [form, setForm]         = useState({ name: '', email: '', password: '', confirm: '' });
+  const [showPw, setShowPw]     = useState(false);
+  const [showCf, setShowCf]     = useState(false);
+  const [error,  setError]      = useState('');
+  const [loading, setLoading]   = useState(false);
 
-  const handleChange = (e) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value
-    });
-  };
+  const pw = getStrength(form.password);
+  const pwsMatch = form.confirm && form.password === form.confirm;
 
-  const validateForm = () => {
-    if (formData.password.length < 6) {
-      setError('Password must be at least 6 characters long');
-      return false;
-    }
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match');
-      return false;
-    }
-    return true;
+  const handleChange = (e) => setForm(f => ({ ...f, [e.target.name]: e.target.value }));
+
+  const validate = () => {
+    if (form.name.trim().length < 2)    return 'Please enter your full name.';
+    if (form.password.length < 6)       return 'Password must be at least 6 characters.';
+    if (form.password !== form.confirm) return 'Passwords do not match.';
+    return null;
   };
 
   const handleRegister = async (e) => {
     e.preventDefault();
-    setError('');
-
-    if (!validateForm()) return;
-
-    setLoading(true);
-
-    try {
-      // Check if backend is available (localhost development)
-      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-      const isBackendAvailable = window.location.hostname === 'localhost';
-
-      if (isBackendAvailable) {
-        // Use SMTP backend for email verification
-        try {
-          const response = await fetch(`${backendUrl}/api/send-verification`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              email: formData.email,
-              name: formData.name,
-            }),
-          });
-
-          const data = await response.json();
-
-          if (!response.ok) {
-            throw new Error(data.error || 'Failed to send verification email');
-          }
-
-          // Store form data temporarily
-          setTempUserData(formData);
-          
-          // Move to verification step
-          setStep(2);
-          return;
-        } catch (backendError) {
-          console.warn('Backend not available, falling back to direct registration:', backendError);
-        }
-      }
-
-      // Fallback: Direct Firebase registration (for production/Cloudflare)
-      const userCredential = await createUserWithEmailAndPassword(
-        auth,
-        formData.email,
-        formData.password
-      );
-      
-      // Update user profile with name
-      await updateProfile(userCredential.user, {
-        displayName: formData.name
-      });
-
-      // Create user document in Firestore
-      await setDoc(doc(db, 'users', userCredential.user.uid), {
-        uid: userCredential.user.uid,
-        email: formData.email,
-        displayName: formData.name,
-        role: 'user',
-        status: 'active',
-        createdAt: serverTimestamp(),
-        lastActive: serverTimestamp()
-      });
-
-      // Initialize user credits
-      await setDoc(doc(db, 'userCredits', userCredential.user.uid), {
-        userId: userCredential.user.uid,
-        userEmail: formData.email,
-        creditsUsed: 0,
-        totalApiCalls: 0,
-        createdAt: serverTimestamp(),
-        lastUsed: null
-      });
-
-      // Log registration event
-      await logAuthEvent(userCredential.user.uid, formData.email, 'User Registration', {
-        provider: 'email',
-        name: formData.name
-      });
-
-      navigate('/');
-    } catch (error) {
-      setError(error.message.replace('Firebase: ', ''));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleVerifyCode = async (e) => {
-    e.preventDefault();
+    const err = validate();
+    if (err) { setError(err); return; }
     setError('');
     setLoading(true);
-
     try {
-      // Verify code via backend
-      const response = await fetch('http://localhost:3001/api/verify-code', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: tempUserData.email,
-          code: verificationCode,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Invalid verification code');
-      }
-
-      // Code verified - now create Firebase account
-      const userCredential = await createUserWithEmailAndPassword(
-        auth,
-        tempUserData.email,
-        tempUserData.password
-      );
-      
-      // Update user profile with name
-      await updateProfile(userCredential.user, {
-        displayName: tempUserData.name
-      });
-
-      // Create user document in Firestore
-      await setDoc(doc(db, 'users', userCredential.user.uid), {
-        uid: userCredential.user.uid,
-        email: tempUserData.email,
-        displayName: tempUserData.name,
-        role: 'user',
-        status: 'active',
-        emailVerified: true,
-        createdAt: serverTimestamp(),
-        lastActive: serverTimestamp()
-      });
-
-      // Initialize user credits
-      await setDoc(doc(db, 'userCredits', userCredential.user.uid), {
-        userId: userCredential.user.uid,
-        userEmail: tempUserData.email,
-        creditsUsed: 0,
-        totalApiCalls: 0,
-        createdAt: serverTimestamp(),
-        lastUsed: null
-      });
-
-      // Log registration event
-      await logAuthEvent(userCredential.user.uid, tempUserData.email, 'User Registration', {
-        provider: 'email',
-        emailVerified: true,
-        name: tempUserData.name
-      });
-
-      navigate('/');
-    } catch (error) {
-      setError(error.message.replace('Firebase: ', ''));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleResendCode = async () => {
-    setError('');
-    setLoading(true);
-
-    try {
-      const response = await fetch('http://localhost:3001/api/send-verification', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: tempUserData.email,
-          name: tempUserData.name,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to send verification email');
-      }
-
-      alert('Verification code resent!');
-    } catch (error) {
-      setError(error.message);
+      await register(form.email, form.password, form.name.trim());
+      navigate('/app');
+    } catch (err) {
+      setError(err.message);
     } finally {
       setLoading(false);
     }
@@ -255,427 +59,234 @@ const Register = () => {
   const handleGoogleRegister = async () => {
     setError('');
     setLoading(true);
-    const provider = new GoogleAuthProvider();
-
     try {
-      // Try popup method first
-      const result = await signInWithPopup(auth, provider);
-      const user = result.user;
-
-      // Check if user document exists, create if not
-      const userDocRef = doc(db, 'users', user.uid);
-      const userCreditsRef = doc(db, 'userCredits', user.uid);
-      
-      try {
-        await setDoc(userDocRef, {
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName,
-          photoURL: user.photoURL,
-          role: 'user',
-          status: 'active',
-          provider: 'google',
-          createdAt: serverTimestamp(),
-          lastActive: serverTimestamp()
-        }, { merge: true });
-
-        // Initialize user credits if not exists
-        await setDoc(userCreditsRef, {
-          userId: user.uid,
-          userEmail: user.email,
-          creditsUsed: 0,
-          totalApiCalls: 0,
-          createdAt: serverTimestamp(),
-          lastUsed: null
-        }, { merge: true });
-
-        // Log authentication event
-        await logAuthEvent(user.uid, user.email, 'Google Sign Up', {
-          provider: 'google'
-        });
-      } catch (firestoreError) {
-        console.error('Error creating user document:', firestoreError);
-      }
-
-      navigate('/');
-    } catch (error) {
-      // If popup is blocked or closed, use redirect method
-      if (error.code === 'auth/popup-blocked' || error.code === 'auth/popup-closed-by-user' || error.code === 'auth/cancelled-popup-request') {
-        try {
-          // Use redirect method as fallback
-          await signInWithRedirect(auth, provider);
-          // Navigation will happen in useEffect after redirect completes
-        } catch (redirectError) {
-          setError(redirectError.message.replace('Firebase: ', ''));
-          setLoading(false);
-        }
-      } else {
-        setError(error.message.replace('Firebase: ', ''));
-        setLoading(false);
-      }
+      const user = await loginWithGoogle();
+      if (user) navigate('/app');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
-  // Password strength indicator
-  const getPasswordStrength = () => {
-    const password = formData.password;
-    if (!password) return { strength: 0, label: '', color: '' };
-    
-    let strength = 0;
-    if (password.length >= 6) strength++;
-    if (password.length >= 10) strength++;
-    if (/[a-z]/.test(password) && /[A-Z]/.test(password)) strength++;
-    if (/\d/.test(password)) strength++;
-    if (/[^a-zA-Z\d]/.test(password)) strength++;
+  const GoogleIcon = () => (
+    <svg className="w-4 h-4" viewBox="0 0 24 24">
+      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+    </svg>
+  );
 
-    if (strength <= 2) return { strength, label: 'Weak', color: 'bg-red-500' };
-    if (strength <= 3) return { strength, label: 'Fair', color: 'bg-yellow-500' };
-    if (strength <= 4) return { strength, label: 'Good', color: 'bg-blue-500' };
-    return { strength, label: 'Strong', color: 'bg-green-500' };
-  };
+  return (
+    <div className="min-h-screen bg-slate-50 flex">
 
-  const passwordStrength = getPasswordStrength();
+      {/* ── Left brand panel ──────────────────────────────── */}
+      <div className="hidden lg:flex lg:w-1/2 bg-gradient-to-br from-violet-600 via-indigo-600 to-blue-600
+        flex-col justify-center px-16 py-12 relative overflow-hidden">
+        <div className="absolute -top-20 -right-20 w-72 h-72 rounded-full bg-white/5" />
+        <div className="absolute -bottom-16 -left-16 w-56 h-56 rounded-full bg-white/5" />
 
-  // Verification Step UI
-  if (step === 2) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
-        <div className="absolute inset-0 bg-grid-pattern opacity-5"></div>
-        
-        <div className="relative w-full max-w-md">
-          <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-purple-600 rounded-2xl mb-4 shadow-lg">
-              <Mail className="w-8 h-8 text-white" />
-            </div>
-            <h1 className="text-3xl font-bold text-gray-800 mb-2">Verify Your Email</h1>
-            <p className="text-gray-600">Enter the 6-digit code sent to</p>
-            <p className="text-blue-600 font-semibold">{tempUserData?.email}</p>
+        <div className="relative">
+          <div className="w-12 h-12 rounded-2xl bg-white/20 backdrop-blur-sm flex items-center
+            justify-center mb-8 shadow-lg">
+            <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
           </div>
 
-          <div className="glass-panel bg-white/80 backdrop-blur-xl rounded-2xl shadow-2xl p-8 border border-white/20">
-            {error && (
-              <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                <p className="text-sm text-red-800">{error}</p>
-              </div>
-            )}
+          <h1 className="text-4xl font-bold text-white mb-4 leading-tight">
+            Start finding<br />leads for free.
+          </h1>
+          <p className="text-indigo-200 text-lg max-w-sm leading-relaxed mb-10">
+            Create your account and get <strong className="text-white">100 free credits</strong> instantly.
+            No credit card required.
+          </p>
 
-            <form onSubmit={handleVerifyCode} className="space-y-5">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Verification Code
-                </label>
-                <input
-                  type="text"
-                  value={verificationCode}
-                  onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  className="w-full px-4 py-3 text-center text-2xl font-bold tracking-widest border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-                  placeholder="000000"
-                  maxLength="6"
-                  required
-                  disabled={loading}
-                />
-                <p className="text-xs text-gray-500 mt-2 text-center">Code expires in 15 minutes</p>
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading || verificationCode.length !== 6}
-                className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {loading ? (
-                  <>
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                    Verifying...
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle className="w-5 h-5" />
-                    Verify Email
-                  </>
-                )}
-              </button>
-            </form>
-
-            <div className="mt-6 text-center">
-              <p className="text-sm text-gray-600 mb-3">Didn't receive the code?</p>
-              <button
-                onClick={handleResendCode}
-                disabled={loading}
-                className="text-blue-600 hover:text-blue-700 font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Resend Code
-              </button>
-            </div>
-
-            <div className="mt-6 text-center">
-              <button
-                onClick={() => setStep(1)}
-                disabled={loading}
-                className="text-gray-600 hover:text-gray-700 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                ← Back to Registration
-              </button>
-            </div>
-          </div>
+          <ul className="space-y-3 max-w-xs">
+            {[
+              '100 free credits on sign-up',
+              'Search any city or neighbourhood worldwide',
+              'Export leads to Excel & PDF',
+              'Organise leads into custom lists',
+            ].map(item => (
+              <li key={item} className="flex items-center gap-3 text-indigo-100 text-sm">
+                <div className="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center flex-none">
+                  <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                {item}
+              </li>
+            ))}
+          </ul>
         </div>
       </div>
-    );
-  }
 
-  // Registration Step UI
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
-      {/* Background Pattern */}
-      <div className="absolute inset-0 bg-grid-pattern opacity-5"></div>
-      
-      <div className="relative w-full max-w-md">
-        {/* Logo & Title */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-blue-600 to-purple-600 rounded-2xl mb-4 shadow-lg">
-            <Search className="w-8 h-8 text-white" />
+      {/* ── Right form panel ──────────────────────────────── */}
+      <div className="flex-1 flex flex-col justify-center px-6 sm:px-12 lg:px-16 py-12 overflow-y-auto">
+
+        {/* Mobile logo */}
+        <div className="lg:hidden flex items-center gap-2 mb-10">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600
+            flex items-center justify-center shadow-sm">
+            <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
           </div>
-          <h1 className="text-3xl font-bold text-gray-800 mb-2">Create Account</h1>
-          <p className="text-gray-600">Join Lead Finder and start growing your business</p>
+          <span className="text-base font-bold text-slate-900">Lead Finder</span>
         </div>
 
-        {/* Register Card */}
-        <div className="glass-panel bg-white/80 backdrop-blur-xl rounded-2xl shadow-2xl p-8 border border-white/20">
-          {/* Error Message */}
+        <div className="w-full max-w-sm mx-auto lg:mx-0">
+          <h2 className="text-2xl font-bold text-slate-900 mb-1">Create your account</h2>
+          <p className="text-sm text-slate-500 mb-8">Join thousands finding leads globally</p>
+
+          {/* Error */}
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
-              <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-              <p className="text-sm text-red-800">{error}</p>
+            <div className="mb-5 flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl p-4">
+              <AlertCircle className="w-4 h-4 text-red-500 flex-none mt-0.5" />
+              <p className="text-sm text-red-700">{error}</p>
             </div>
           )}
 
-          {/* Register Form */}
-          <form onSubmit={handleRegister} className="space-y-5">
-            {/* Name Field */}
+          {/* Form */}
+          <form onSubmit={handleRegister} className="space-y-4">
+
+            {/* Name */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Full Name
-              </label>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Full name</label>
               <div className="relative">
-                <User className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input
-                  type="text"
-                  name="name"
-                  value={formData.name}
-                  onChange={handleChange}
-                  className="w-full pl-11 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-                  placeholder="John Doe"
-                  required
-                  disabled={loading}
-                />
+                <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input name="name" type="text" value={form.name} onChange={handleChange}
+                  placeholder="Jane Smith" required disabled={loading}
+                  className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-lg bg-white
+                    focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
+                    disabled:opacity-60 transition" />
               </div>
             </div>
 
-            {/* Email Field */}
+            {/* Email */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Email Address
-              </label>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Email</label>
               <div className="relative">
-                <Mail className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input
-                  type="email"
-                  name="email"
-                  value={formData.email}
-                  onChange={handleChange}
-                  className="w-full pl-11 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all"
-                  placeholder="you@example.com"
-                  required
-                  disabled={loading}
-                />
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input name="email" type="email" value={form.email} onChange={handleChange}
+                  placeholder="you@example.com" required disabled={loading}
+                  className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-lg bg-white
+                    focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
+                    disabled:opacity-60 transition" />
               </div>
             </div>
 
-            {/* Password Field */}
+            {/* Password */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Password
-              </label>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input
-                  type={showPassword ? "text" : "password"}
-                  name="password"
-                  value={formData.password}
-                  onChange={handleChange}
-                  className="w-full pl-11 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
-                  placeholder="••••••••"
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input name="password" type={showPw ? 'text' : 'password'} value={form.password}
+                  onChange={handleChange} placeholder="Min 6 characters" required disabled={loading}
                   autoComplete="new-password"
-                  required
-                  disabled={loading}
-                />
-                {/* Show/Hide Password Toggle */}
-                {formData.password.length > 0 && !showPassword && (
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(true)}
-                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors z-20"
-                    tabIndex={-1}
-                  >
-                    <Eye className="w-5 h-5" />
-                  </button>
-                )}
-                {formData.password.length > 0 && showPassword && (
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(false)}
-                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors z-20"
-                    tabIndex={-1}
-                  >
-                    <EyeOff className="w-5 h-5" />
+                  className="w-full pl-10 pr-10 py-2.5 text-sm border border-slate-300 rounded-lg bg-white
+                    focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
+                    disabled:opacity-60 transition [&::-ms-reveal]:hidden" />
+                {form.password && (
+                  <button type="button" tabIndex={-1} onClick={() => setShowPw(v => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                    {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 )}
               </div>
-              {/* Password Strength Indicator */}
-              {formData.password && (
+              {/* Strength bar */}
+              {form.password && (
                 <div className="mt-2">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs text-gray-600">Password strength:</span>
-                    <span className={`text-xs font-semibold ${
-                      passwordStrength.label === 'Weak' ? 'text-red-600' :
-                      passwordStrength.label === 'Fair' ? 'text-yellow-600' :
-                      passwordStrength.label === 'Good' ? 'text-blue-600' :
-                      'text-green-600'
-                    }`}>
-                      {passwordStrength.label}
-                    </span>
+                  <div className="flex gap-1 mb-1">
+                    {[1,2,3,4,5].map(i => (
+                      <div key={i} className={`h-1 flex-1 rounded-full transition-all
+                        ${i <= pw.level ? pw.color : 'bg-slate-200'}`} />
+                    ))}
                   </div>
-                  <div className="w-full bg-gray-200 rounded-full h-1.5">
-                    <div
-                      className={`h-1.5 rounded-full transition-all duration-300 ${passwordStrength.color}`}
-                      style={{ width: `${(passwordStrength.strength / 5) * 100}%` }}
-                    ></div>
-                  </div>
+                  <p className={`text-xs font-medium ${
+                    pw.label === 'Weak'   ? 'text-red-600'     :
+                    pw.label === 'Fair'   ? 'text-amber-600'   :
+                    pw.label === 'Good'   ? 'text-blue-600'    : 'text-emerald-600'
+                  }`}>{pw.label}</p>
                 </div>
               )}
             </div>
 
-            {/* Confirm Password Field */}
+            {/* Confirm Password */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Confirm Password
-              </label>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Confirm password</label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input
-                  type={showConfirmPassword ? "text" : "password"}
-                  name="confirmPassword"
-                  value={formData.confirmPassword}
-                  onChange={handleChange}
-                  className="w-full pl-11 pr-12 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all [&::-ms-reveal]:hidden [&::-ms-clear]:hidden"
-                  placeholder="••••••••"
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input name="confirm" type={showCf ? 'text' : 'password'} value={form.confirm}
+                  onChange={handleChange} placeholder="••••••••" required disabled={loading}
                   autoComplete="new-password"
-                  required
-                  disabled={loading}
-                />
-                {/* Show/Hide Password or Check Mark */}
-                {formData.confirmPassword.length > 0 && formData.password === formData.confirmPassword && (
-                  <CheckCircle className="absolute right-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-green-500 z-20" />
-                )}
-                {formData.confirmPassword.length > 0 && formData.password !== formData.confirmPassword && !showConfirmPassword && (
-                  <button
-                    type="button"
-                    onClick={() => setShowConfirmPassword(true)}
-                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors z-20"
-                    tabIndex={-1}
-                  >
-                    <Eye className="w-5 h-5" />
-                  </button>
-                )}
-                {formData.confirmPassword.length > 0 && formData.password !== formData.confirmPassword && showConfirmPassword && (
-                  <button
-                    type="button"
-                    onClick={() => setShowConfirmPassword(false)}
-                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors z-20"
-                    tabIndex={-1}
-                  >
-                    <EyeOff className="w-5 h-5" />
-                  </button>
-                )}
+                  className="w-full pl-10 pr-10 py-2.5 text-sm border border-slate-300 rounded-lg bg-white
+                    focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
+                    disabled:opacity-60 transition [&::-ms-reveal]:hidden" />
+                {form.confirm && pwsMatch
+                  ? <CheckCircle className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-emerald-500" />
+                  : form.confirm && (
+                    <button type="button" tabIndex={-1} onClick={() => setShowCf(v => !v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                      {showCf ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  )
+                }
               </div>
             </div>
 
-            {/* Terms & Conditions */}
-            <div className="flex items-start">
-              <input
-                type="checkbox"
-                id="terms"
-                required
-                className="mt-1 w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                disabled={loading}
-              />
-              <label htmlFor="terms" className="ml-2 text-sm text-gray-600">
+            {/* Terms */}
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" required
+                className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+              <span className="text-xs text-slate-500">
                 I agree to the{' '}
-                <a href="#" className="text-blue-600 hover:text-blue-700 font-medium">
-                  Terms of Service
-                </a>{' '}
-                and{' '}
-                <a href="#" className="text-blue-600 hover:text-blue-700 font-medium">
-                  Privacy Policy
-                </a>
-              </label>
-            </div>
+                <a href="#" className="text-indigo-600 hover:text-indigo-700">Terms of Service</a>
+                {' '}and{' '}
+                <a href="#" className="text-indigo-600 hover:text-indigo-700">Privacy Policy</a>
+              </span>
+            </label>
 
-            {/* Register Button */}
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Creating account...
-                </>
-              ) : (
-                'Create Account'
-              )}
+            <button type="submit" disabled={loading}
+              className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white
+                font-semibold py-2.5 rounded-lg text-sm transition shadow-sm hover:shadow-md
+                flex items-center justify-center gap-2">
+              {loading
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Creating account&hellip;</>
+                : 'Create account'}
             </button>
           </form>
 
           {/* Divider */}
-          <div className="relative my-6">
+          <div className="relative my-5">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-300"></div>
+              <div className="w-full border-t border-slate-200" />
             </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-4 bg-white text-gray-500">Or sign up with</span>
+            <div className="relative flex justify-center">
+              <span className="px-3 bg-slate-50 text-xs text-slate-400">or sign up with</span>
             </div>
           </div>
 
-          {/* Google Register */}
-          <button
-            onClick={handleGoogleRegister}
-            disabled={loading}
-            className="w-full bg-white border-2 border-gray-300 text-gray-700 py-3 rounded-lg font-semibold hover:bg-gray-50 hover:border-gray-400 transition-all duration-200 flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <svg className="w-5 h-5" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-            </svg>
+          {/* Google */}
+          <button onClick={handleGoogleRegister} disabled={loading}
+            className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-slate-300
+              rounded-lg text-sm font-medium text-slate-700 bg-white hover:bg-slate-50
+              disabled:opacity-50 transition shadow-sm">
+            <GoogleIcon />
             Continue with Google
           </button>
 
-          {/* Login Link */}
-          <p className="text-center text-sm text-gray-600 mt-6">
+          <p className="text-center text-sm text-slate-500 mt-6">
             Already have an account?{' '}
-            <Link to="/login" className="text-blue-600 hover:text-blue-700 font-semibold">
+            <Link to="/login" className="text-indigo-600 hover:text-indigo-700 font-semibold">
               Sign in
             </Link>
           </p>
         </div>
-
-        {/* Footer */}
-        <p className="text-center text-sm text-gray-500 mt-6">
-          © 2025 Lead Finder. All rights reserved.
-        </p>
       </div>
     </div>
   );

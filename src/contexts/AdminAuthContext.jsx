@@ -1,61 +1,30 @@
-import { createContext, useContext, useState, useEffect } from 'react';
-import { auth } from '../firebase';
-import { doc, getDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+// AdminAuthContext — Phase 1 stub
+// Admin status is derived entirely from the user's Firestore `role` field,
+// which is set securely in AuthContext.  Phase 5 will expand this context
+// with full admin management, impersonation, and audit-log helpers.
+import { createContext, useContext } from 'react';
+import { useAuth } from './AuthContext';
 
-const AdminAuthContext = createContext();
+const AdminAuthContext = createContext(null);
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAdminAuth = () => {
-  const context = useContext(AdminAuthContext);
-  if (!context) {
-    throw new Error('useAdminAuth must be used within AdminAuthProvider');
-  }
-  return context;
+  const ctx = useContext(AdminAuthContext);
+  if (!ctx) throw new Error('useAdminAuth must be used within AdminAuthProvider');
+  return ctx;
 };
 
 export const AdminAuthProvider = ({ children }) => {
-  const [adminUser, setAdminUser] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [adminRole, setAdminRole] = useState(null);
-
-  useEffect(() => {
-    const unsubscribe = auth.onAuthStateChanged(async (user) => {
-      if (user) {
-        // Check if user is admin
-        try {
-          const adminDocRef = doc(db, 'adminUsers', user.email);
-          const adminDoc = await getDoc(adminDocRef);
-          
-          if (adminDoc.exists()) {
-            setAdminUser(user);
-            setAdminRole(adminDoc.data().role);
-          } else {
-            setAdminUser(null);
-            setAdminRole(null);
-          }
-        } catch (error) {
-          console.error('Error checking admin status:', error);
-          setAdminUser(null);
-          setAdminRole(null);
-        }
-      } else {
-        setAdminUser(null);
-        setAdminRole(null);
-      }
-      setLoading(false);
-    });
-
-    return unsubscribe;
-  }, []);
+  const { currentUser, userProfile, loading, isAdmin, isSuperAdmin } = useAuth();
 
   const value = {
-    adminUser,
-    adminRole,
+    adminUser:      isAdmin ? currentUser : null,
+    adminRole:      userProfile?.role ?? null,
     loading,
-    isAdmin: !!adminUser,
-    isSuperAdmin: adminRole === 'super_admin',
-    canManageUsers: adminRole === 'super_admin' || adminRole === 'admin',
-    canViewOnly: adminRole === 'viewer'
+    isAdmin,
+    isSuperAdmin,
+    canManageUsers: isAdmin,
+    canViewOnly:    userProfile?.role === 'viewer',
   };
 
   return (

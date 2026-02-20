@@ -25,7 +25,7 @@ import {
   BarChart3,
   Users
 } from 'lucide-react';
-import { collection, getDocs, doc, updateDoc, query, orderBy, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc, query, orderBy, limit, startAfter } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
@@ -60,111 +60,67 @@ const UserManagementNew = () => {
     limited: 0
   });
 
-  useEffect(() => {
-    if (!adminUser) {
-      console.warn('Admin user not authenticated');
-      setError('Not authenticated as admin');
+  // ── last Firestore doc cursor for "load more" pagination ──────────────────
+  const [lastDoc, setLastDoc] = useState(null);
+  const [hasMore, setHasMore] = useState(true);
+  const PAGE_SIZE = 50;
+
+  // Fetch users from the `users` collection (credits embedded in same doc)
+  const fetchUsers = async (afterDoc = null) => {
+    if (!adminUser) return;
+    try {
+      // No composite index needed: just orderBy createdAt, filter role client-side
+      const constraints = [
+        orderBy('createdAt', 'desc'),
+        limit(PAGE_SIZE),
+      ];
+      if (afterDoc) constraints.push(startAfter(afterDoc));
+
+      const snap = await getDocs(query(collection(db, 'users'), ...constraints));
+      const usersData = snap.docs
+        .filter(d => (d.data().role ?? 'user') !== 'admin' && (d.data().role ?? 'user') !== 'super_admin')
+        .map(d => {
+        const u = d.data();
+        return {
+          id: d.id,
+          email: u.email || 'N/A',
+          displayName: u.displayName || u.email?.split('@')[0] || 'N/A',
+          createdAt:   u.createdAt?.toDate ? u.createdAt.toDate() : new Date(),
+          lastActive:  u.lastActive?.toDate ? u.lastActive.toDate() : new Date(),
+          // credits balance and usage live directly on users/{uid}
+          credits:     u.credits     ?? 0,
+          creditsUsed: u.creditsUsed ?? 0,
+          searchCount: u.searchCount ?? 0,
+          // isActive boolean → map to accountStatus string expected by UI
+          status: u.accountStatus || (u.isActive === false ? 'suspended' : 'active'),
+          creditLimit: u.creditLimit ?? 'unlimited',
+          emailVerified: u.emailVerified || false,
+          role: u.role || 'user',
+          loginHistory: u.loginHistory || [],
+        };
+      });
+
+      if (afterDoc) {
+        setUsers(prev => { const merged = [...prev, ...usersData]; calculateStats(merged); return merged; });
+      } else {
+        setUsers(usersData);
+        calculateStats(usersData);
+      }
+
+      setHasMore(snap.docs.length === PAGE_SIZE);
+      if (snap.docs.length > 0) setLastDoc(snap.docs[snap.docs.length - 1]);
+      setError(null);
+    } catch (err) {
+      console.error('[UserManagementNew] fetch error:', err);
+      setError(err.message || 'Error loading users');
+    } finally {
       setLoading(false);
-      return;
     }
+  };
 
-    console.log('Starting user data load... Admin:', adminUser.uid);
-    const unsubscribers = [];
-    const creditsMapRef = { current: {} }; // Use ref to maintain state across listener calls
-    
-    // First, get all credit data
-    const creditsUnsubscribe = onSnapshot(
-      collection(db, 'userCredits'),
-      (snapshot) => {
-        console.log('Credits update received:', snapshot.docs.length, 'records');
-        creditsMapRef.current = {}; // Reset map
-        snapshot.forEach(doc => {
-          creditsMapRef.current[doc.id] = {
-            creditsUsed: doc.data().creditsUsed || 0,
-            totalApiCalls: doc.data().totalApiCalls || 0,
-            lastUsed: doc.data().lastUsed,
-            creditLimit: doc.data().creditLimit || 'unlimited'
-          };
-        });
-        console.log('CreditsMap updated:', Object.keys(creditsMapRef.current).length, 'users with credit data');
-      },
-      (error) => {
-        console.error('Credits listener error:', error);
-        // Don't fail - just continue with empty credits
-      }
-    );
-    unsubscribers.push(creditsUnsubscribe);
-    
-    // Users listener - will use creditsMap
-    const usersUnsubscribe = onSnapshot(
-      collection(db, 'users'),
-      (usersSnapshot) => {
-        try {
-          console.log('🔍 Users snapshot received:', usersSnapshot.docs.length, 'total docs');
-          console.log('📊 Collection path:', usersSnapshot.query.path || 'default users');
-          
-          const usersData = usersSnapshot.docs
-            .filter(userDoc => {
-              const userData = userDoc.data();
-              const role = userData.role || 'user';
-              console.log('User doc:', userDoc.id, '- role:', role, '- email:', userData.email);
-              return role === 'user'; // Only include regular users, not admins
-            })
-            .map(userDoc => {
-              try {
-                const userData = userDoc.data();
-                const creditData = creditsMapRef.current[userDoc.id] || { creditsUsed: 0, totalApiCalls: 0, creditLimit: 'unlimited' };
-                
-                return {
-                  id: userDoc.id,
-                  email: userData.email || 'N/A',
-                  displayName: userData.displayName || userData.email?.split('@')[0] || 'N/A',
-                  createdAt: userData.createdAt?.toDate ? userData.createdAt.toDate() : new Date(),
-                  lastActive: userData.lastActive?.toDate ? userData.lastActive.toDate() : new Date(),
-                  creditsUsed: creditData.creditsUsed || 0,
-                  totalApiCalls: creditData.totalApiCalls || 0,
-                  creditLimit: creditData.creditLimit || userData.creditLimit || 'unlimited',
-                  status: userData.accountStatus || 'active',
-                  emailVerified: userData.emailVerified || false,
-                  role: userData.role || 'user',
-                  loginHistory: userData.loginHistory || [],
-                  searchCount: userData.searchCount || 0
-                };
-              } catch (docError) {
-                console.error('Error processing user doc:', userDoc.id, docError);
-                return null;
-              }
-            })
-            .filter(u => u !== null); // Remove failed entries
-          
-          console.log('✅ Processed users:', usersData.length, 'regular users');
-          if (usersData.length === 0) {
-            console.warn('⚠️ No users found! Check Firestore for users collection.');
-          }
-
-          setUsers(usersData);
-          calculateStats(usersData);
-          setError(null);
-          setLoading(false);
-        } catch (error) {
-          console.error('Error processing users:', error);
-          setError(error.message || 'Error loading users');
-          setLoading(false);
-        }
-      },
-      (error) => {
-        console.error('Users listener error:', error);
-        console.error('Error code:', error.code);
-        setError(error.message || 'Error loading users from database');
-        setLoading(false);
-      }
-    );
-    unsubscribers.push(usersUnsubscribe);
-
-    return () => {
-      console.log('Cleaning up listeners...');
-      unsubscribers.forEach(unsub => unsub());
-    };
+  useEffect(() => {
+    if (adminUser) fetchUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminUser]);
 
   useEffect(() => {

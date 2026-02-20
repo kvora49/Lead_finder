@@ -1,22 +1,24 @@
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { Loader2 } from 'lucide-react';
+
+// Skeleton loader shown while Firebase Auth resolves the session
+const FullPageSkeleton = () => (
+  <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+    <div className="flex flex-col items-center gap-4">
+      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 animate-pulse" />
+      <div className="space-y-2">
+        <div className="h-2.5 w-32 bg-slate-200 rounded-full animate-pulse" />
+        <div className="h-2 w-24 bg-slate-100 rounded-full animate-pulse mx-auto" />
+      </div>
+    </div>
+  </div>
+);
 
 const ProtectedRoute = ({ children }) => {
   const { currentUser, loading } = useAuth();
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50">
-        <div className="text-center">
-          <Loader2 className="w-12 h-12 text-blue-600 animate-spin mx-auto mb-4" />
-          <p className="text-gray-600 font-medium">Loading...</p>
-        </div>
-      </div>
-    );
-  }
-
-  return currentUser ? children : <Navigate to="/login" />;
+  if (loading) return <FullPageSkeleton />;
+  return currentUser ? children : <Navigate to="/login" replace />;
 };
 
 export default ProtectedRoute;
