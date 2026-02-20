@@ -154,7 +154,7 @@ const Sidebar = ({ isOpen }) => (
   <div
     className={`fixed top-16 left-0 bottom-0 z-40 w-64 flex flex-col
       transition-transform duration-300 ease-in-out
-      ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}
+      ${isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
   >
     <SidebarContent />
   </div>

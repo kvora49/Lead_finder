@@ -182,7 +182,7 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
   return (
     <div
       onClick={selectionMode ? onToggle : undefined}
-      className={`bg-white rounded-2xl border shadow-sm transition-all duration-200 p-5 flex flex-col gap-3 group
+      className={`bg-white rounded-2xl border shadow-sm transition-all duration-200 p-5 flex flex-col gap-3 group break-words overflow-hidden
         ${ selectionMode ? 'cursor-pointer' : '' }
         ${ isSelected
             ? 'border-indigo-400 ring-2 ring-indigo-200 shadow-indigo-100'
@@ -236,7 +236,7 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
       )}
 
       {/* Action buttons */}
-      <div className="flex gap-2 mt-auto pt-1" onClick={(e) => e.stopPropagation()}>
+      <div className="flex flex-col sm:flex-row gap-2 mt-auto pt-1" onClick={(e) => e.stopPropagation()}>
         {phone && (
           <a href={`tel:${phone}`}
             className="flex-1 flex items-center justify-center gap-1 text-xs font-semibold
@@ -414,7 +414,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   return (
     <div className={hasResults
       ? 'space-y-6 px-4 sm:px-6 py-6'
-      : 'flex flex-col items-center justify-center min-h-[calc(100vh-5rem)] py-8 px-4'
+      : 'flex flex-col items-center justify-center min-h-[50vh] md:min-h-[calc(100vh-5rem)] py-8 px-4'
     }>
 
       {/* ── Hero headline (pre-search only) ─────────────────────────── */}
@@ -724,7 +724,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
           {/* Grid */}
           {visible.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
               {visible.map((lead) => {
                 const key        = getLeadKey(lead);
                 const isSelected = selected.has(key);

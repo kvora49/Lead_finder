@@ -11,7 +11,8 @@ import Sidebar from './Sidebar';
  * Main content shifts right (ml-64) when the sidebar is open.
  */
 const AppLayout = () => {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Default closed — sidebar auto-shows on desktop via md:translate-x-0 in Sidebar.jsx
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -53,12 +54,9 @@ const AppLayout = () => {
       )}
 
       {/* ── Main content ─────────────────────────────────────────────────── */}
-      <div
-        className={`min-h-screen flex flex-col pt-16 transition-all duration-300 ${
-          sidebarOpen ? 'md:ml-64' : 'md:ml-0'
-        }`}
-      >
-        <main className="flex-1">
+      {/* Always md:ml-64 — sidebar is always visible on desktop via CSS */}
+      <div className="min-h-screen flex flex-col pt-16 transition-all duration-300 ml-0 md:ml-64">
+        <main className="flex-1 px-4 md:px-8">
           <Outlet />
         </main>
       </div>
