@@ -24,6 +24,38 @@ import MyLists               from './components/MyLists.jsx';
 import PlatformUsagePage     from './pages/PlatformUsagePage.jsx';
 import './index.css';
 
+// ── Environment variable guard ───────────────────────────────────────────────
+// Shows a readable error instead of a blank screen when VITE_* vars are missing.
+// Set these in Cloudflare Pages → Settings → Environment Variables.
+const REQUIRED_ENV = [
+  'VITE_FIREBASE_API_KEY',
+  'VITE_FIREBASE_AUTH_DOMAIN',
+  'VITE_FIREBASE_PROJECT_ID',
+  'VITE_FIREBASE_APP_ID',
+  'VITE_GOOGLE_API_KEY',
+];
+const missingEnv = REQUIRED_ENV.filter((k) => !import.meta.env[k]);
+if (missingEnv.length > 0) {
+  document.getElementById('root').innerHTML = `
+    <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;
+      background:#f8fafc;font-family:system-ui,sans-serif;padding:24px;">
+      <div style="max-width:540px;background:#fff;border-radius:12px;border:1px solid #e2e8f0;
+        padding:32px;box-shadow:0 1px 3px rgba(0,0,0,.1);">
+        <h2 style="color:#dc2626;margin:0 0 12px;font-size:18px;">⚙️ Missing Environment Variables</h2>
+        <p style="color:#475569;font-size:14px;margin:0 0 16px;">
+          The following environment variables are not set. Add them in
+          <strong>Cloudflare Pages → Settings → Environment Variables</strong>:
+        </p>
+        <pre style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;
+          padding:12px;font-size:13px;color:#b91c1c;white-space:pre-wrap;">${missingEnv.join('\n')}</pre>
+        <p style="color:#64748b;font-size:12px;margin:16px 0 0;">
+          See the README for the full list of required variables.
+        </p>
+      </div>
+    </div>`;
+  throw new Error(`Missing env vars: ${missingEnv.join(', ')}`);
+}
+
 // ── Error Boundary ──────────────────────────────────────────────────────────
 class ErrorBoundary extends React.Component {
   constructor(props) {
