@@ -403,22 +403,51 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   };
   const selectedLeads = visible.filter((l) => selected.has(getLeadKey(l)));
 
+  // ── Multi-search derived ─────────────────────────────────────────────────────
+  const hasResults    = results.length > 0;
+  const keywordList   = keyword.split(',').map((k) => k.trim()).filter(Boolean);
+  const locationList  = location.split(',').map((l) => l.trim()).filter(Boolean);
+  const searchCount   = Math.max(keywordList.length, 1) * Math.max(locationList.length, 1);
+  const isMultiSearch = searchCount > 1;
+
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="space-y-6">
+    <div className={hasResults
+      ? 'space-y-6 px-4 sm:px-6 py-6'
+      : 'flex flex-col items-center justify-center min-h-[calc(100vh-5rem)] py-8 px-4'
+    }>
+
+      {/* ── Hero headline (pre-search only) ─────────────────────────── */}
+      {!hasResults && !searching && (
+        <div className="text-center mb-10 max-w-2xl w-full">
+          <h1 className="text-4xl sm:text-5xl font-extrabold text-slate-900 leading-tight mb-4">
+            Find Business
+            <span className="block bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent">
+              Leads Instantly
+            </span>
+          </h1>
+          <p className="text-lg text-slate-500">
+            Search across multiple keywords and cities in one click — powered by the Google Places API.
+          </p>
+        </div>
+      )}
 
       {/* ── Search Form ──────────────────────────────────────────────── */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-        <div className="flex items-center gap-2 mb-5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600
-            flex items-center justify-center shadow-sm">
-            <Search className="w-4 h-4 text-white" />
+      <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm w-full ${
+        hasResults ? 'p-6' : 'max-w-4xl p-8 shadow-xl shadow-slate-200/60'
+      }`}>
+        {hasResults && (
+          <div className="flex items-center gap-2 mb-5">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600
+              flex items-center justify-center shadow-sm">
+              <Search className="w-4 h-4 text-white" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-900">Business Search</h2>
+              <p className="text-xs text-slate-400">Dynamic grid search · Zero-cost cache</p>
+            </div>
           </div>
-          <div>
-            <h2 className="text-base font-bold text-slate-900">Business Search</h2>
-            <p className="text-xs text-slate-400">Dynamic grid search · Zero-cost cache</p>
-          </div>
-        </div>
+        )}
 
         <form onSubmit={handleSearch} className="space-y-4">
 
@@ -453,9 +482,9 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
               <input
                 value={keyword}
                 onChange={(e) => setKeyword(e.target.value)}
-                placeholder="e.g. kurti, coffee shop, manufacturer…"
+                placeholder="e.g. Kurti, Hardware shop, Pharmacy…"
                 required
-                className="w-full pl-9 pr-4 py-2.5 text-sm border border-slate-200 rounded-xl
+                className="w-full pl-10 pr-4 py-3.5 text-base border border-slate-200 rounded-xl
                   bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
                   focus:ring-indigo-100 outline-none transition-all placeholder-slate-400 text-slate-800"
               />
@@ -467,14 +496,28 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
               <input
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
-                placeholder={searchScope === 'city' ? 'City, region or country…' : 'City (e.g. Ahmedabad)…'}
+                placeholder={searchScope === 'city' ? 'e.g. Ahmedabad, Surat, Mumbai…' : 'City (e.g. Ahmedabad)…'}
                 required
-                className="w-full pl-9 pr-4 py-2.5 text-sm border border-slate-200 rounded-xl
+                className="w-full pl-10 pr-4 py-3.5 text-base border border-slate-200 rounded-xl
                   bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
                   focus:ring-indigo-100 outline-none transition-all placeholder-slate-400 text-slate-800"
               />
             </div>
           </div>
+
+          {/* Multi-search comma hint ─────────────────────────────────────── */}
+          <p className="text-sm text-slate-400 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+            <span>💡 Separate multiple with commas —</span>
+            <em className="not-italic font-medium text-slate-500">Kurti, Hardware</em>
+            <span>in</span>
+            <em className="not-italic font-medium text-slate-500">Ahmedabad, Surat</em>
+            {isMultiSearch && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full
+                bg-indigo-100 text-indigo-700 font-semibold text-xs">
+                {searchCount} searches queued
+              </span>
+            )}
+          </p>
 
           {/* Row 1b: Area / Building field — only for neighbourhood + specific scopes */}
           {searchScope !== 'city' && (
@@ -489,7 +532,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                     : 'Building / Market / Street (e.g. Lal Darwaja Market, Relief Road…)'
                 }
                 required
-                className="w-full pl-9 pr-36 py-2.5 text-sm border border-indigo-200 rounded-xl
+                className="w-full pl-10 pr-36 py-3.5 text-sm border border-indigo-200 rounded-xl
                   bg-indigo-50 focus:bg-white focus:border-indigo-400 focus:ring-2
                   focus:ring-indigo-100 outline-none transition-all placeholder-indigo-300 text-slate-800"
               />
@@ -505,7 +548,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
               <select
                 value={type}
                 onChange={(e) => setType(e.target.value)}
-                className="w-full appearance-none pl-3 pr-8 py-2.5 text-sm border border-slate-200
+                className="w-full appearance-none pl-3 pr-8 py-3.5 text-sm border border-slate-200
                   rounded-xl bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
                   focus:ring-indigo-100 outline-none transition-all text-slate-700 cursor-pointer"
               >
@@ -520,19 +563,19 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             {/* Submit / Cancel */}
             {searching ? (
               <button type="button" onClick={handleCancel}
-                className="flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-xl
+                className="flex items-center gap-2 px-5 py-3.5 text-sm font-semibold rounded-xl
                   bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition-colors">
                 <X className="w-4 h-4" /> Cancel
               </button>
             ) : (
               <button type="submit"
                 disabled={!keyword.trim() || !location.trim()}
-                className="flex items-center gap-2 px-6 py-2.5 text-sm font-semibold rounded-xl
+                className="flex items-center gap-2 px-6 py-3.5 text-sm font-semibold rounded-xl
                   bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm
                   hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed
-                  transition-all hover:-translate-y-px active:translate-y-0">
+                  transition-all hover:-translate-y-px active:translate-y-0 whitespace-nowrap">
                 <Search className="w-4 h-4" />
-                Search
+                {isMultiSearch ? `Search · ${searchCount} queries` : 'Search'}
               </button>
             )}
           </div>

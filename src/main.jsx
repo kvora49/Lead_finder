@@ -15,11 +15,13 @@ import SearchAnalyticsNew     from './components/admin/SearchAnalyticsNew.jsx';
 import SettingsNew            from './components/admin/SettingsNew.jsx';
 import DataSeeder             from './components/admin/DataSeeder.jsx';
 import AccessControlNew       from './components/admin/AccessControlNew.jsx';
+import AppLayout              from './components/layout/AppLayout.jsx';
 import App                    from './App.jsx';
 import Login                 from './components/Login.jsx';
 import Register              from './components/Register.jsx';
 import ForgotPassword        from './components/ForgotPassword.jsx';
 import MyLists               from './components/MyLists.jsx';
+import PlatformUsagePage     from './pages/PlatformUsagePage.jsx';
 import './index.css';
 
 // ── Error Boundary ──────────────────────────────────────────────────────────
@@ -75,22 +77,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             <Route path="/register"        element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
 
-            {/* ── Protected user area ────────────────────── */}
-            <Route
-              path="/app"
-              element={
-                <ProtectedRoute>
-                  <App />
-                </ProtectedRoute>
-              }
-            />            <Route
-              path="/app/lists"
-              element={
-                <ProtectedRoute>
-                  <MyLists />
-                </ProtectedRoute>
-              }
-            />
+            {/* ── Protected user area (nested inside AppLayout sidebar shell) ── */}
+            <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
+              <Route path="/app"              element={<App />} />
+              <Route path="/app/lists"        element={<MyLists />} />
+              <Route path="/platform-usage"   element={<PlatformUsagePage />} />
+            </Route>
             {/* ── Admin area ─────────────────────────────── */}
             <Route
               path="/admin"

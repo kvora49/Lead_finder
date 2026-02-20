@@ -353,7 +353,8 @@ const formatPlace = (p) => ({
  * @param {Function} [options.onProgress] Called with progress updates
  * @returns {Promise<{ results, apiCalls, cached, totalResults }>}
  */
-export const searchBusinesses = async (keyword, location, options = {}) => {
+// Internal single-pair search — used by both the fast path and the multi-search loop.
+const _searchSingle = async (keyword, location, options = {}) => {
   const {
     type        = '',
     searchScope = 'city',   // 'city' | 'neighbourhood' | 'specific'
@@ -416,6 +417,106 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
     apiCalls,
     cached:       false,
     totalResults: leads.length,
+  };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC API — supports comma-separated keywords AND locations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Main search entry point.
+ *
+ * Accepts comma-separated values for both keyword and location:
+ *   searchBusinesses('kurti, saree', 'Ahmedabad, Surat')
+ *   → 4 searches in parallel (2 keywords × 2 locations)
+ *
+ * Algorithm:
+ *   1. Split keyword + location by comma into arrays.
+ *   2. Build every (keyword, location) pair.
+ *   3. Run all pairs concurrently via Promise.all — each pair is cache-first.
+ *   4. Flatten + aggressively deduplicate by place_id.
+ *
+ * Single keyword + single location → full cache-first fast path (unchanged).
+ */
+export const searchBusinesses = async (keyword, location, options = {}) => {
+  const { onProgress = null } = options;
+
+  const keywords  = String(keyword  || '').split(',').map((k) => k.trim()).filter(Boolean);
+  const locations = String(location || '').split(',').map((l) => l.trim()).filter(Boolean);
+
+  if (!keywords.length || !locations.length) {
+    throw new Error('keyword and location are required');
+  }
+
+  // ── Fast path: single keyword + single location ───────────────────────────
+  if (keywords.length === 1 && locations.length === 1) {
+    return _searchSingle(keywords[0], locations[0], options);
+  }
+
+  // ── Multi: build all (keyword × location) pairs ──────────────────────────
+  const pairs = [];
+  for (const loc of locations) {
+    for (const kw of keywords) {
+      pairs.push({ kw, loc });
+    }
+  }
+  const total = pairs.length;
+
+  if (onProgress) {
+    onProgress({
+      phase: 'start',
+      message: `Queuing ${total} searches (${keywords.length} keyword${keywords.length > 1 ? 's' : ''} × ${locations.length} location${locations.length > 1 ? 's' : ''})…`,
+      current: 0, total, found: 0, apiCalls: 0,
+    });
+  }
+
+  // Each pair runs concurrently; each individually checks its own cache first.
+  let done = 0;
+  const allResponses = await Promise.all(
+    pairs.map(async ({ kw, loc }) => {
+      const res = await _searchSingle(kw, loc, { ...options, onProgress: null });
+      done++;
+      if (onProgress) {
+        onProgress({
+          phase: 'searching',
+          message: `Completed ${done}/${total} — "${kw}" in ${loc}`,
+          current: done, total, found: 0, apiCalls: 0,
+        });
+      }
+      return res;
+    })
+  );
+
+  // ── Flatten + deduplicate by place_id ────────────────────────────────────
+  const seen     = new Set();
+  const combined = [];
+  let totalApiCalls = 0;
+
+  for (const res of allResponses) {
+    totalApiCalls += (res.apiCalls || 0);
+    for (const lead of (res.results || [])) {
+      const key = lead.id || lead.placeId;
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        combined.push(lead);
+      }
+    }
+  }
+
+  if (onProgress) {
+    onProgress({
+      phase: 'done',
+      message: `Found ${combined.length} unique businesses across ${total} search${total > 1 ? 'es' : ''}`,
+      found: combined.length, apiCalls: totalApiCalls, cached: false,
+    });
+  }
+
+  return {
+    results:      combined,
+    apiCalls:     totalApiCalls,
+    cached:       false,
+    totalResults: combined.length,
   };
 };
 
