@@ -9,7 +9,6 @@ import {
   Activity,
   Sun,
   Moon,
-  Search,
 } from 'lucide-react';
 import { useAuth }   from '../../contexts/AuthContext';
 import { useCredit } from '../../contexts/CreditContext';
@@ -70,17 +69,6 @@ const SidebarContent = ({ onClose }) => {
   return (
     <div className="flex flex-col h-full bg-white dark:bg-[#171717] text-slate-900 dark:text-white overflow-hidden">
 
-      {/* â”€â”€ Desktop brand (hidden on mobile â€” header shows it there) â”€â”€ */}
-      <div className="hidden md:flex items-center gap-2.5 h-16 px-4 border-b border-slate-200 dark:border-white/10 flex-none">
-        <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600
-          flex items-center justify-center shadow-md flex-none">
-          <Search className="w-4 h-4 text-white" strokeWidth={2} />
-        </div>
-        <div className="leading-tight">
-          <p className="font-bold text-slate-900 dark:text-white text-base leading-none">Lead Finder</p>
-          <p className="text-[10px] text-slate-400 dark:text-gray-500 mt-0.5">Business Intelligence</p>
-        </div>
-      </div>
 
       {/* â”€â”€ Navigation â”€â”€ */}
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
@@ -190,11 +178,11 @@ const SidebarContent = ({ onClose }) => {
 // â”€â”€â”€ Exported Sidebar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const Sidebar = ({ isOpen, onClose }) => (
   <div
-    className={`fixed top-16 md:top-0 left-0 bottom-0 z-40 w-64 flex flex-col
+    className={`fixed top-16 left-0 bottom-0 z-40 w-64 flex flex-col
       border-r border-slate-200 dark:border-white/10
       shadow-xl dark:shadow-2xl dark:shadow-black/50
       transition-transform duration-300 ease-in-out
-      ${isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}
+      ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}
   >
     <SidebarContent onClose={onClose} />
   </div>

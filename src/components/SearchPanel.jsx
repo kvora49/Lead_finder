@@ -70,48 +70,126 @@ const leadRate  = (lead) => lead.rating ?? '';
 const leadRevs  = (lead) => lead.userRatingCount ?? '';
 
 const downloadSearchCsv = (leads, keyword, location) => {
-  const csv = Papa.unparse(
-    leads.map((l) => ({
-      name:    leadLabel(l),
-      address: leadAddr(l),
-      phone:   leadPhone(l),
-      website: leadWeb(l),
-      rating:  leadRate(l),
-      reviews: leadRevs(l),
-    })),
-    { header: true }
-  );
+  // BOM ensures Excel opens UTF-8 correctly
+  const BOM = '\uFEFF';
+  const rows = leads.map((l) => ({
+    'Business Name': leadLabel(l),
+    'Address':       leadAddr(l),
+    'Phone':         leadPhone(l),
+    'Website':       leadWeb(l),
+    'Rating':        leadRate(l),
+    'Total Reviews': leadRevs(l),
+  }));
+  const csv = BOM + Papa.unparse(rows, { header: true });
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = `${keyword}_${location}_leads.csv`.replace(/\s+/g, '_');
+  a.download = `LeadFinder_${keyword}_${location}_${new Date().toISOString().slice(0,10)}.csv`.replace(/\s+/g, '_');
   a.click();
   URL.revokeObjectURL(url);
 };
 
 const downloadSearchPdf = (leads, keyword, location) => {
-  const doc   = new jsPDF({ orientation: 'landscape' });
-  const title = `${keyword} — ${location}`;
-  doc.setFontSize(14);
-  doc.text(title, 14, 16);
-  doc.setFontSize(9);
-  doc.setTextColor(120);
-  doc.text(`${leads.length} results · Exported ${new Date().toLocaleDateString()}`, 14, 22);
+  const doc        = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const pageW      = doc.internal.pageSize.getWidth();
+  const pageH      = doc.internal.pageSize.getHeight();
+  const exportDate = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' });
+  const INDIGO     = [79, 70, 229];   // #4F46E5
+  const VIOLET     = [109, 40, 217];  // #6D28D9
+  const SLATE_900  = [15, 23, 42];
+  const SLATE_500  = [100, 116, 139];
+  const SLATE_50   = [248, 250, 252];
+  const WHITE      = [255, 255, 255];
+
+  // ── Header band ───────────────────────────────────────────────────────────
+  // gradient simulation: two overlapping rects
+  doc.setFillColor(...INDIGO);
+  doc.rect(0, 0, pageW * 0.6, 28, 'F');
+  doc.setFillColor(...VIOLET);
+  doc.rect(pageW * 0.6, 0, pageW * 0.4, 28, 'F');
+
+  // App name tag
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7);
+  doc.setTextColor(...WHITE);
+  doc.text('LEAD FINDER  ·  Business Intelligence', 12, 8);
+
+  // Main title
+  doc.setFontSize(15);
+  doc.setFont('helvetica', 'bold');
+  const titleText = `${keyword}  —  ${location}`;
+  doc.text(titleText.toUpperCase(), 12, 18);
+
+  // Stats top-right
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(...WHITE);
+  doc.text(`${leads.length} results`, pageW - 12, 12, { align: 'right' });
+  doc.text(exportDate, pageW - 12, 19, { align: 'right' });
+
+  // ── Thin accent line below header ─────────────────────────────────────────
+  doc.setDrawColor(...INDIGO);
+  doc.setLineWidth(0.8);
+  doc.line(0, 28, pageW, 28);
+
+  // ── Table ─────────────────────────────────────────────────────────────────
   autoTable(doc, {
-    startY: 27,
-    head:   [['Business Name', 'Address', 'Phone', 'Website', 'Rating', 'Reviews']],
-    body:    leads.map((l) => [leadLabel(l), leadAddr(l), leadPhone(l), leadWeb(l), leadRate(l), leadRevs(l)]),
-    styles:             { fontSize: 8, cellPadding: 3 },
-    headStyles:         { fillColor: [79, 70, 229], textColor: 255, fontStyle: 'bold' },
-    alternateRowStyles: { fillColor: [248, 250, 252] },
+    startY: 32,
+    head:   [['#', 'Business Name', 'Address', 'Phone', 'Website', 'Rating', 'Reviews']],
+    body:    leads.map((l, i) => [
+      i + 1,
+      leadLabel(l),
+      leadAddr(l),
+      leadPhone(l),
+      leadWeb(l),
+      leadRate(l) ? `★ ${leadRate(l)}` : '',
+      leadRevs(l) ? Number(leadRevs(l)).toLocaleString() : '',
+    ]),
+    styles: {
+      fontSize:    8,
+      cellPadding: { top: 3.5, right: 4, bottom: 3.5, left: 4 },
+      textColor:   SLATE_900,
+      lineColor:   [226, 232, 240],
+      lineWidth:   0.2,
+      font:        'helvetica',
+      overflow:    'linebreak',
+    },
+    headStyles: {
+      fillColor:  INDIGO,
+      textColor:  WHITE,
+      fontStyle:  'bold',
+      fontSize:   8,
+      halign:     'left',
+      cellPadding: { top: 4, right: 4, bottom: 4, left: 4 },
+    },
+    alternateRowStyles: { fillColor: SLATE_50 },
     columnStyles: {
-      0: { cellWidth: 50 }, 1: { cellWidth: 75 },
-      2: { cellWidth: 35 }, 3: { cellWidth: 55 },
-      4: { cellWidth: 17 }, 5: { cellWidth: 22 },
+      0: { cellWidth: 8,  halign: 'center', textColor: SLATE_500 },
+      1: { cellWidth: 52, fontStyle: 'bold' },
+      2: { cellWidth: 72 },
+      3: { cellWidth: 32 },
+      4: { cellWidth: 52, textColor: [79, 70, 229] },
+      5: { cellWidth: 18, halign: 'center', textColor: [16, 185, 129] },
+      6: { cellWidth: 20, halign: 'right',  textColor: SLATE_500 },
+    },
+    // Footer on every page
+    didDrawPage: (data) => {
+      const pg  = doc.internal.getCurrentPageInfo().pageNumber;
+      const tot = doc.internal.getNumberOfPages();
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7);
+      doc.setTextColor(...SLATE_500);
+      doc.text('Lead Finder  ·  leadfinder.app', 12, pageH - 6);
+      doc.text(`Page ${pg} of ${tot}`, pageW - 12, pageH - 6, { align: 'right' });
+      // bottom rule
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.3);
+      doc.line(12, pageH - 9, pageW - 12, pageH - 9);
     },
   });
-  doc.save(`${keyword}_${location}_leads.pdf`.replace(/\s+/g, '_'));
+
+  doc.save(`LeadFinder_${keyword}_${location}_${new Date().toISOString().slice(0,10)}.pdf`.replace(/\s+/g, '_'));
 };
 
 // ─── Sub-components ───────────────────────────────────────────────────────────

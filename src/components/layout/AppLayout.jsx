@@ -17,10 +17,10 @@ const AppLayout = () => {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] transition-colors duration-300">
 
-      {/* ── Mobile-only top navbar (hidden on md+) ──────────────────────── */}
+      {/* ── Top navbar — visible on ALL screens ──────────────────────────── */}
       <header className="fixed top-0 left-0 right-0 z-50 h-16 bg-white/90 dark:bg-[#171717]/90
         backdrop-blur-md border-b border-slate-200 dark:border-white/10
-        flex items-center px-4 shadow-sm md:hidden">
+        flex items-center px-4 shadow-sm">
         {/* Hamburger toggle */}
         <button
           onClick={() => setSidebarOpen(o => !o)}
@@ -46,16 +46,18 @@ const AppLayout = () => {
       {/* ── Sidebar ──────────────────────────────────────────────────────── */}
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
-      {/* ── Mobile backdrop overlay ──────────────────────────────────────── */}
+      {/* ── Backdrop overlay — all screen sizes ──────────────────────────── */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm md:hidden"
+          className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
-      {/* ── Main content — shifts right on desktop via md:ml-64 ──────────── */}
-      <div className="min-h-screen flex flex-col pt-16 md:pt-0 transition-all duration-300 ml-0 md:ml-64">
+      {/* ── Main content — always starts at ml-0, shifts when sidebar opens ── */}
+      <div className={`min-h-screen flex flex-col pt-16 transition-all duration-300 ${
+        sidebarOpen ? 'ml-64' : 'ml-0'
+      }`}>
         <main className="flex-1 px-4 md:px-8">
           <Outlet />
         </main>
