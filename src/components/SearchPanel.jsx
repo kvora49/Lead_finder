@@ -17,7 +17,7 @@ import { useState, useCallback, useRef } from 'react';
 import {
   Search, MapPin, Phone, Globe, Star, RefreshCw,
   Zap, Database, AlertCircle, ChevronDown, X, Bookmark,
-  FileText, Table2,
+  FileText, Table2, Copy,
 } from 'lucide-react';
 import Papa from 'papaparse';
 import jsPDF from 'jspdf';
@@ -170,7 +170,7 @@ const ProgressBar = ({ progress }) => {
   );
 };
 
-/** Single lead card — premium compact mobile-first design with accordion contact */
+/** Single lead card — premium compact mobile-first design with accordion contact + copy */
 const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle }) => {
   const [contactOpen, setContactOpen] = useState(false);
   const name    = lead.displayName?.text || 'Unknown Business';
@@ -180,23 +180,22 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
   const rating  = lead.rating;
   const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 
+  const copyText = (text) => {
+    navigator.clipboard.writeText(text).catch(() => {});
+  };
+
   return (
     <div
       onClick={selectionMode ? onToggle : undefined}
-      className={`bg-white rounded-2xl border transition-all duration-300 flex flex-col overflow-hidden
-        ${ selectionMode ? 'cursor-pointer' : '' }
-        ${ isSelected
-            ? 'border-indigo-400 ring-2 ring-indigo-200 shadow-indigo-100'
-            : 'border-slate-200 hover:-translate-y-1 hover:shadow-xl shadow-sm' }`}>
-
+      className={`bg-white dark:bg-[#171717] rounded-2xl border transition-all duration-300 flex flex-col overflow-hidden ring-1 ring-transparent ${selectionMode ? 'cursor-pointer' : ''} ${isSelected ? 'border-indigo-400 ring-2 ring-indigo-200 dark:ring-indigo-500/30 shadow-indigo-100' : 'border-slate-200 dark:border-white/10 hover:-translate-y-1 hover:shadow-lg dark:hover:shadow-indigo-500/5 hover:ring-slate-200 dark:hover:ring-white/20 shadow-sm'}`}>
       {/* Card body */}
       <div className="p-3 md:p-5 flex flex-col gap-2">
 
         {/* Header row */}
         <div className="flex items-start gap-2">
           {selectionMode && (
-            <div className={`mt-0.5 flex-none rounded border-2 flex items-center justify-center transition-colors
-              ${ isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300 bg-white' }`}
+            <div
+              className={`mt-0.5 flex-none rounded border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300 bg-white'}`}
               style={{ width: 16, height: 16, minWidth: 16 }}>
               {isSelected && (
                 <svg className="w-2 h-2 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
@@ -205,7 +204,7 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
               )}
             </div>
           )}
-          <h3 className="text-sm font-semibold text-slate-900 line-clamp-2 flex-1 break-words">{name}</h3>
+          <h3 className="text-sm font-semibold text-slate-900 dark:text-white line-clamp-2 flex-1 break-words">{name}</h3>
           {lead.businessStatus && lead.businessStatus !== 'OPERATIONAL' && (
             <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 flex-none whitespace-nowrap">
               {lead.businessStatus.replace('_', ' ')}
@@ -213,17 +212,24 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
           )}
         </div>
 
-        {/* Address */}
-        <p className="text-xs text-slate-500 flex items-start gap-1.5 leading-relaxed">
-          <MapPin className="w-3 h-3 mt-0.5 flex-none text-slate-400" />
-          <span className="line-clamp-2 break-words">{address}</span>
-        </p>
+        {/* Address + copy */}
+        <div className="flex items-start gap-1.5">
+          <MapPin className="w-3 h-3 mt-0.5 flex-none text-slate-400 dark:text-gray-600" />
+          <span className="text-xs text-slate-500 dark:text-gray-400 line-clamp-2 break-words flex-1">{address}</span>
+          <button
+            type="button"
+            title="Copy address"
+            onClick={(e) => { e.stopPropagation(); copyText(address); }}
+            className="flex-none text-slate-300 dark:text-gray-700 hover:text-indigo-500 dark:hover:text-indigo-400 transition-colors active:scale-[0.97] ml-0.5">
+            <Copy className="w-3 h-3" strokeWidth={1.5} />
+          </button>
+        </div>
 
         {/* Rating */}
         {rating && (
-          <p className="text-xs text-slate-500 flex items-center gap-1">
+          <p className="text-xs text-slate-500 dark:text-gray-500 flex items-center gap-1">
             <Star className="w-3 h-3 flex-none text-amber-400 fill-amber-400" />
-            <span className="font-medium text-slate-700">{rating}</span>
+            <span className="font-medium text-slate-700 dark:text-gray-300">{rating}</span>
             {lead.userRatingCount > 0 && (
               <span className="text-slate-400">({lead.userRatingCount.toLocaleString()})</span>
             )}
@@ -236,22 +242,29 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); setContactOpen(o => !o); }}
-              className="flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 transition-colors active:scale-[0.97]"
+              className="flex items-center gap-1 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300 transition-colors active:scale-[0.97]"
             >
               <ChevronDown className={`w-3 h-3 transition-transform duration-200 ${contactOpen ? 'rotate-180' : ''}`} />
               {contactOpen ? 'Hide' : 'Show'} contact
             </button>
             {contactOpen && (
-              <div className="mt-1.5 space-y-1 pl-2 border-l-2 border-indigo-100">
+              <div className="mt-1.5 space-y-1 pl-2 border-l-2 border-indigo-100 dark:border-indigo-500/30">
                 {phone && (
-                  <p className="text-xs text-slate-700 flex items-center gap-1.5 font-medium">
+                  <div className="flex items-center gap-1">
                     <Phone className="w-3 h-3 flex-none text-emerald-500" />
-                    {phone}
-                  </p>
+                    <span className="text-xs text-slate-700 dark:text-gray-300 font-medium">{phone}</span>
+                    <button
+                      type="button"
+                      title="Copy phone"
+                      onClick={(e) => { e.stopPropagation(); copyText(phone); }}
+                      className="ml-0.5 text-slate-300 dark:text-gray-700 hover:text-indigo-500 dark:hover:text-indigo-400 transition-colors active:scale-[0.97]">
+                      <Copy className="w-3 h-3" strokeWidth={1.5} />
+                    </button>
+                  </div>
                 )}
                 {website && (
-                  <p className="text-xs text-slate-500 flex items-center gap-1.5 overflow-hidden">
-                    <Globe className="w-3 h-3 flex-none text-indigo-400" />
+                  <p className="text-xs text-slate-500 dark:text-gray-500 flex items-center gap-1.5 overflow-hidden">
+                    <Globe className="w-3 h-3 flex-none text-indigo-400 dark:text-indigo-500" />
                     <span className="truncate">{website.replace(/^https?:\/\//, '')}</span>
                   </p>
                 )}
@@ -263,14 +276,14 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
 
       {/* Action buttons — icon-only on mobile, icon+label on sm+ */}
       <div
-        className="flex border-t border-slate-100 divide-x divide-slate-100 mt-auto"
+        className="flex border-t border-slate-100 dark:border-white/10 divide-x divide-slate-100 dark:divide-white/10 mt-auto"
         onClick={(e) => e.stopPropagation()}
       >
         {phone && (
           <a href={`tel:${phone}`}
             className="flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-semibold
-              text-emerald-700 hover:bg-emerald-50 transition-colors active:scale-[0.97]">
-            <Phone className="w-3.5 h-3.5" />
+              text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors active:scale-[0.97]">
+            <Phone className="w-3.5 h-3.5" strokeWidth={1.5} />
             <span className="hidden sm:inline">Call</span>
           </a>
         )}
@@ -278,15 +291,15 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
           <a href={website.startsWith('http') ? website : `https://${website}`}
             target="_blank" rel="noopener noreferrer"
             className="flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-semibold
-              text-indigo-700 hover:bg-indigo-50 transition-colors active:scale-[0.97]">
-            <Globe className="w-3.5 h-3.5" />
+              text-indigo-700 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 transition-colors active:scale-[0.97]">
+            <Globe className="w-3.5 h-3.5" strokeWidth={1.5} />
             <span className="hidden sm:inline">Web</span>
           </a>
         )}
         <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
           className="flex-1 flex items-center justify-center gap-1 py-2.5 text-xs font-semibold
-            text-slate-700 hover:bg-slate-50 transition-colors active:scale-[0.97]">
-          <MapPin className="w-3.5 h-3.5" />
+            text-slate-700 dark:text-gray-400 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors active:scale-[0.97]">
+          <MapPin className="w-3.5 h-3.5" strokeWidth={1.5} />
           <span className="hidden sm:inline">Map</span>
         </a>
       </div>
@@ -449,21 +462,21 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       {/* ── Hero headline (pre-search only) ─────────────────────────── */}
       {!hasResults && !searching && (
         <div className="text-center mb-6 max-w-2xl w-full">
-          <h1 className="text-2xl sm:text-4xl md:text-5xl font-extrabold text-slate-900 leading-tight mb-3">
+          <h1 className="text-2xl sm:text-4xl md:text-5xl font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight mb-3">
             Find Business
             <span className="block bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent">
               Leads Instantly
             </span>
           </h1>
-          <p className="text-sm sm:text-base md:text-lg text-slate-500">
+          <p className="text-sm sm:text-base md:text-lg text-slate-500 dark:text-gray-400">
             Search across multiple keywords and cities in one click — powered by the Google Places API.
           </p>
         </div>
       )}
 
       {/* ── Search Form ──────────────────────────────────────────────── */}
-      <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm w-full ${
-        hasResults ? 'p-3 md:p-6' : 'max-w-4xl p-4 md:p-8 shadow-xl shadow-slate-200/60'
+      <div className={`bg-white dark:bg-[#171717] rounded-2xl border border-slate-200 dark:border-white/10 shadow-sm w-full ${
+        hasResults ? 'p-3 md:p-6' : 'max-w-4xl p-4 md:p-8 shadow-xl shadow-slate-200/60 dark:shadow-black/50'
       }`}>
         {hasResults && (
           <div className="flex items-center gap-2 mb-5">
@@ -472,8 +485,8 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
               <Search className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-900">Business Search</h2>
-              <p className="text-xs text-slate-400">Dynamic grid search · Zero-cost cache</p>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">Business Search</h2>
+              <p className="text-xs text-slate-400 dark:text-gray-500">Dynamic grid search · Zero-cost cache</p>
             </div>
           </div>
         )}
@@ -482,23 +495,23 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
           {/* Row 0: Search scope selector */}
           <div>
-            <div className="flex gap-1.5 p-1 bg-slate-100 rounded-xl w-fit">
+            <div className="flex gap-1.5 p-1 bg-slate-100 dark:bg-white/10 rounded-xl w-fit">
               {SEARCH_SCOPES.map((s) => (
                 <button
                   key={s.value}
                   type="button"
                   title={s.hint}
                   onClick={() => { setSearchScope(s.value); setArea(''); }}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all active:scale-[0.97] ${
                     searchScope === s.value
-                      ? 'bg-white text-indigo-700 shadow-sm border border-indigo-100'
-                      : 'text-slate-500 hover:text-slate-800'
+                      ? 'bg-white dark:bg-[#171717] text-indigo-700 dark:text-indigo-400 shadow-sm border border-indigo-100 dark:border-indigo-500/30'
+                      : 'text-slate-500 dark:text-gray-400 hover:text-slate-800 dark:hover:text-white'
                   }`}>
                   {s.label}
                 </button>
               ))}
             </div>
-            <p className="text-xs text-slate-400 mt-1.5 ml-1">
+            <p className="text-xs text-slate-400 dark:text-gray-600 mt-1.5 ml-1">
               {SEARCH_SCOPES.find((s) => s.value === searchScope)?.hint}
             </p>
           </div>
@@ -513,23 +526,25 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 onChange={(e) => setKeyword(e.target.value)}
                 placeholder="e.g. Kurti, Hardware shop, Pharmacy…"
                 required
-                className="w-full pl-10 pr-4 py-2.5 md:py-3.5 text-sm md:text-base border border-slate-200 rounded-xl
-                  bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
-                  focus:ring-indigo-100 outline-none transition-all placeholder-slate-400 text-slate-800"
+                className="w-full pl-10 pr-4 py-2.5 md:py-3.5 text-sm md:text-base
+                  bg-transparent border-0 border-b-2 border-slate-200 dark:border-white/10 rounded-none
+                  focus:border-indigo-500 dark:focus:border-indigo-500
+                  outline-none transition-all placeholder-slate-400 dark:placeholder-gray-600 text-slate-800 dark:text-white"
               />
             </div>
 
             {/* City */}
             <div className="relative">
-              <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+              <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-gray-600 pointer-events-none" />
               <input
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
                 placeholder={searchScope === 'city' ? 'e.g. Ahmedabad, Surat, Mumbai…' : 'City (e.g. Ahmedabad)…'}
                 required
-                className="w-full pl-10 pr-4 py-2.5 md:py-3.5 text-sm md:text-base border border-slate-200 rounded-xl
-                  bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
-                  focus:ring-indigo-100 outline-none transition-all placeholder-slate-400 text-slate-800"
+                className="w-full pl-10 pr-4 py-2.5 md:py-3.5 text-sm md:text-base
+                  bg-transparent border-0 border-b-2 border-slate-200 dark:border-white/10 rounded-none
+                  focus:border-indigo-500 dark:focus:border-indigo-500
+                  outline-none transition-all placeholder-slate-400 dark:placeholder-gray-600 text-slate-800 dark:text-white"
               />
             </div>
           </div>
@@ -561,9 +576,10 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                     : 'Building / Market / Street (e.g. Lal Darwaja Market, Relief Road…)'
                 }
                 required
-                className="w-full pl-10 pr-36 py-2.5 md:py-3.5 text-sm border border-indigo-200 rounded-xl
-                  bg-indigo-50 focus:bg-white focus:border-indigo-400 focus:ring-2
-                  focus:ring-indigo-100 outline-none transition-all placeholder-indigo-300 text-slate-800"
+              className="w-full pl-10 pr-36 py-2.5 md:py-3.5 text-sm
+                  bg-transparent border-0 border-b-2 border-indigo-200 dark:border-indigo-500/30 rounded-none
+                  focus:border-indigo-500 dark:focus:border-indigo-500
+                  outline-none transition-all placeholder-indigo-300 dark:placeholder-indigo-700 text-slate-800 dark:text-white"
               />
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold
                 text-indigo-400 pointer-events-none bg-indigo-50 pl-2">
@@ -577,9 +593,10 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
               <select
                 value={type}
                 onChange={(e) => setType(e.target.value)}
-                className="w-full appearance-none pl-3 pr-8 py-3.5 text-sm border border-slate-200
-                  rounded-xl bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-2
-                  focus:ring-indigo-100 outline-none transition-all text-slate-700 cursor-pointer"
+                className="w-full appearance-none pl-3 pr-8 py-2.5 md:py-3.5 text-sm
+                  bg-transparent border-0 border-b-2 border-slate-200 dark:border-white/10 rounded-none
+                  focus:border-indigo-500 dark:focus:border-indigo-500
+                  outline-none transition-all text-slate-700 dark:text-gray-300 cursor-pointer"
               >
                 {BUSINESS_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>{t.label}</option>
@@ -636,24 +653,24 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         <div className="space-y-4">
 
           {/* Sticky mini-search bar — collapses the hero form while scrolling results */}
-          <div className="sticky top-16 z-20 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 bg-white/95 backdrop-blur-sm border-b border-slate-200 shadow-sm">
+          <div className="sticky top-16 z-20 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 bg-white/95 dark:bg-[#171717]/95 backdrop-blur-md border-b border-slate-200 dark:border-white/10 shadow-sm">
             <form onSubmit={handleSearch} className="flex items-center gap-2">
               <div className="relative flex-1 min-w-0">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 dark:text-gray-600 pointer-events-none" />
                 <input
                   value={keyword}
                   onChange={(e) => setKeyword(e.target.value)}
                   placeholder="Keywords…"
-                  className="w-full pl-8 pr-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:border-indigo-400 outline-none transition-all text-slate-800"
+                  className="w-full pl-8 pr-2 py-1.5 text-sm bg-transparent border-0 border-b border-slate-200 dark:border-white/10 focus:border-indigo-500 outline-none transition-all text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-gray-600"
                 />
               </div>
               <div className="relative flex-1 min-w-0">
-                <MapPin className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                <MapPin className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 dark:text-gray-600 pointer-events-none" />
                 <input
                   value={location}
                   onChange={(e) => setLocation(e.target.value)}
                   placeholder="Location…"
-                  className="w-full pl-8 pr-2 py-1.5 text-sm border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:border-indigo-400 outline-none transition-all text-slate-800"
+                  className="w-full pl-8 pr-2 py-1.5 text-sm bg-transparent border-0 border-b border-slate-200 dark:border-white/10 focus:border-indigo-500 outline-none transition-all text-slate-800 dark:text-white placeholder-slate-400 dark:placeholder-gray-600"
                 />
               </div>
               <button
@@ -662,7 +679,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 className="flex-none flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg
                   bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50
                   transition-all active:scale-[0.97]">
-                <Search className="w-3.5 h-3.5" />
+                <Search className="w-3.5 h-3.5" strokeWidth={1.5} />
                 <span className="hidden sm:inline">Search</span>
               </button>
             </form>

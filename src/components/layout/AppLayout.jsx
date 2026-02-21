@@ -15,47 +15,47 @@ const AppLayout = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] transition-colors duration-300">
 
-      {/* ── Fixed top header ─────────────────────────────────────────────── */}
-      <header className="fixed top-0 left-0 right-0 z-50 h-16 bg-white border-b border-slate-200
-        flex items-center px-4 shadow-md">
-        {/* 1 — Hamburger toggle */}
+      {/* ── Mobile-only top navbar (hidden on md+) ──────────────────────── */}
+      <header className="fixed top-0 left-0 right-0 z-50 h-16 bg-white/90 dark:bg-[#171717]/90
+        backdrop-blur-md border-b border-slate-200 dark:border-white/10
+        flex items-center px-4 shadow-sm md:hidden">
+        {/* Hamburger toggle */}
         <button
           onClick={() => setSidebarOpen(o => !o)}
-          className="p-2 rounded-xl hover:bg-slate-100 text-slate-500 transition-all flex-none active:scale-[0.97]"
+          className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-white/10 text-slate-500 dark:text-gray-400 transition-all flex-none active:scale-[0.97]"
           aria-label="Toggle sidebar"
         >
-          <Menu className="w-5 h-5" />
+          <Menu className="w-5 h-5" strokeWidth={1.5} />
         </button>
 
-        {/* 2 — Brand immediately to the right */}
+        {/* Brand */}
         <div className="flex items-center gap-2.5 ml-3">
           <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600
             flex items-center justify-center shadow-md flex-none">
-            <Search className="w-4 h-4 text-white" strokeWidth={2.5} />
+            <Search className="w-4 h-4 text-white" strokeWidth={2} />
           </div>
           <div className="leading-tight">
-            <p className="font-bold text-slate-900 text-base leading-none">Lead Finder</p>
-            <p className="text-[10px] text-slate-400 mt-0.5">Business Intelligence</p>
+            <p className="font-bold text-slate-900 dark:text-white text-base leading-none">Lead Finder</p>
+            <p className="text-[10px] text-slate-400 dark:text-gray-500 mt-0.5">Business Intelligence</p>
           </div>
         </div>
       </header>
 
-      {/* ── Sidebar (slides in/out below the header) ─────────────────────── */}
+      {/* ── Sidebar ──────────────────────────────────────────────────────── */}
       <Sidebar isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
-      {/* ── Backdrop overlay when sidebar is open on mobile ─────────────── */}
+      {/* ── Mobile backdrop overlay ──────────────────────────────────────── */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 top-16 z-30 bg-black/40 backdrop-blur-sm md:hidden"
+          className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm md:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
-      {/* ── Main content ─────────────────────────────────────────────────── */}
-      {/* Always md:ml-64 — sidebar is always visible on desktop via CSS */}
-      <div className="min-h-screen flex flex-col pt-16 transition-all duration-300 ml-0 md:ml-64">
+      {/* ── Main content — shifts right on desktop via md:ml-64 ──────────── */}
+      <div className="min-h-screen flex flex-col pt-16 md:pt-0 transition-all duration-300 ml-0 md:ml-64">
         <main className="flex-1 px-4 md:px-8">
           <Outlet />
         </main>
