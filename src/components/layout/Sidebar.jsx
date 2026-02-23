@@ -66,6 +66,14 @@ const SidebarContent = ({ onClose }) => {
 
   const initial = (currentUser?.displayName || currentUser?.email || 'U')[0].toUpperCase();
 
+  // Ghost Owner Mask — "owner" is never shown in the UI
+  const rawRole = userProfile?.role ?? 'user';
+  const displayRole =
+    rawRole === 'owner'       ? 'Super Admin' :
+    rawRole === 'super_admin' ? 'Super Admin' :
+    rawRole === 'admin'       ? 'Admin' :
+                                'User';
+
   return (
     <div className="flex flex-col h-full bg-white dark:bg-[#171717] text-slate-900 dark:text-white overflow-hidden">
 
@@ -142,7 +150,7 @@ const SidebarContent = ({ onClose }) => {
               {currentUser?.displayName || currentUser?.email?.split('@')[0]}
             </p>
             <p className="text-[10px] text-slate-400 dark:text-gray-500 truncate">{currentUser?.email}</p>
-            <p className="text-[10px] text-slate-400 dark:text-gray-600 capitalize">{userProfile?.role ?? 'user'}</p>
+            <p className="text-[10px] text-slate-400 dark:text-gray-600">{displayRole}</p>
           </div>
         </div>
 

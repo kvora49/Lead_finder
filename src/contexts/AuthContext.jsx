@@ -153,12 +153,14 @@ export const AuthProvider = ({ children }) => {
     setUserProfile(null);
   }, []);
 
+  const ADMIN_ROLES = ['owner', 'super_admin', 'admin'];
+
   const value = {
     currentUser,
     userProfile,
     loading,
-    isAdmin:      userProfile?.role === 'admin' || userProfile?.role === 'super_admin',
-    isSuperAdmin: userProfile?.role === 'super_admin',
+    isAdmin:      ADMIN_ROLES.includes(userProfile?.role),
+    isSuperAdmin: userProfile?.role === 'super_admin' || userProfile?.role === 'owner',
     register,
     login,
     loginWithGoogle,
