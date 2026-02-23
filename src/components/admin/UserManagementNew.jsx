@@ -41,7 +41,6 @@ import {
   doc,
   updateDoc,
   query,
-  orderBy,
   limit,
   startAfter,
   where,
@@ -49,6 +48,7 @@ import {
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
+import ConfirmDangerModal from '../ConfirmDangerModal';
 
 /* ─── helpers ───────────────────────────────────────────────────────────── */
 const PAGE_SIZE = 50;
@@ -222,6 +222,7 @@ const UserManagementNew = () => {
     adminUser,
     role: viewerRole,
     canManageUsers,
+    canPromoteToAdmin,
     isOwner: viewerIsOwner,
   } = useAdminAuth();
 
@@ -246,6 +247,13 @@ const UserManagementNew = () => {
   const usersPerPage = 20;
   const [userStats, setUserStats] = useState({ total: 0, active: 0, suspended: 0, unlimited: 0 });
 
+  /* ── Danger modal (Safe-Delete / Safe-Suspend) ────────────────────── */
+  const [dangerModal, setDangerModal] = useState({
+    open: false, title: '', message: '', confirmLabel: 'Confirm', onConfirm: null, loading: false,
+  });
+  const openDangerModal = (title, message, onConfirm, confirmLabel = 'Confirm') =>
+    setDangerModal({ open: true, title, message, confirmLabel, onConfirm, loading: false });
+
   /* ── Toast ────────────────────────────────────────────────────────────── */
   const showToast = (msg, type = 'success') => {
     setToast({ msg, type });
@@ -256,7 +264,9 @@ const UserManagementNew = () => {
   const fetchUsers = async (afterDoc = null) => {
     if (!adminUser) return;
     try {
-      const constraints = [orderBy('createdAt', 'desc'), limit(PAGE_SIZE)];
+      // NOTE: No orderBy — avoids excluding documents that lack a 'createdAt'
+      // field (e.g. early registrations or OAuth users). We sort client-side.
+      const constraints = [limit(PAGE_SIZE)];
       if (afterDoc) constraints.push(startAfter(afterDoc));
       const snap = await getDocs(query(collection(db, 'users'), ...constraints));
 
@@ -266,8 +276,8 @@ const UserManagementNew = () => {
           id:          d.id,
           email:       u.email        || 'N/A',
           displayName: u.displayName  || u.email?.split('@')[0] || 'N/A',
-          createdAt:   u.createdAt?.toDate?.()  ?? new Date(),
-          lastActive:  u.lastActive?.toDate?.() ?? new Date(),
+          createdAt:   u.createdAt?.toDate?.()  ?? new Date(0),
+          lastActive:  u.lastActive?.toDate?.() ?? new Date(0),
           credits:     u.credits      ?? 0,
           creditsUsed: u.creditsUsed  ?? 0,
           searchCount: u.searchCount  ?? 0,
@@ -276,6 +286,9 @@ const UserManagementNew = () => {
           role:        u.role          ?? 'user',
         };
       });
+
+      // Sort client-side: newest first (handles missing createdAt safely)
+      data.sort((a, b) => b.createdAt - a.createdAt);
 
       if (afterDoc) {
         setUsers(prev => { const m = [...prev, ...data]; calcStats(m); return m; });
@@ -396,9 +409,12 @@ const UserManagementNew = () => {
 
   /* ── Ghost Owner row protection ──────────────────────────────────────── */
   const canEdit = (rowUser) => {
-    if (viewerRole === 'admin')                        return false; // admins are read-only
-    if (rowUser.role === 'owner' && !viewerIsOwner)    return false; // Ghost protection
-    return true;
+    if (rowUser.role === 'owner' && !viewerIsOwner) return false; // Ghost protection
+    if (viewerRole === 'admin') {
+      // admin can only touch plain 'user' rows, and only to promote to 'admin'
+      return rowUser.role === 'user';
+    }
+    return true; // super_admin / owner: full edit
   };
 
   /* ── Loading / error states ───────────────────────────────────────────── */
@@ -602,7 +618,7 @@ const UserManagementNew = () => {
               <div className="flex items-center gap-3 px-4 py-2.5 bg-indigo-500/10 border border-indigo-500/20 rounded-xl">
                 <span className="text-xs text-indigo-400 font-medium">{bulkSelected.length} selected</span>
                 <button onClick={async () => { for (const id of bulkSelected) await updateStatus(id, 'active'); setBulkSelected([]); }} className="px-3 py-1 bg-emerald-600/20 text-emerald-400 border border-emerald-600/30 rounded-lg text-xs font-medium">Activate</button>
-                <button onClick={async () => { for (const id of bulkSelected) await updateStatus(id, 'suspended'); setBulkSelected([]); }} className="px-3 py-1 bg-red-600/20 text-red-400 border border-red-600/30 rounded-lg text-xs font-medium">Suspend</button>
+                <button onClick={() => setDangerModal({ open: true, title: 'Suspend Selected Users?', message: `Suspend ${bulkSelected.length} selected user(s)? They will lose access immediately.`, confirmLabel: 'Suspend', onConfirm: async () => { for (const id of bulkSelected) await updateStatus(id, 'suspended'); setBulkSelected([]); }, loading: false })} className="px-3 py-1 bg-red-600/20 text-red-400 border border-red-600/30 rounded-lg text-xs font-medium">Suspend</button>
                 <button onClick={() => setBulkSelected([])} className="px-3 py-1 bg-slate-700 text-slate-400 rounded-lg text-xs">Clear</button>
               </div>
             )}
@@ -676,15 +692,16 @@ const UserManagementNew = () => {
 
                         {/* Role — Ghost masking + editable dropdown */}
                         <td className="px-4 py-4">
-                          {editable && canManageUsers && !isProtected ? (
+                          {editable && canPromoteToAdmin && !isProtected ? (
                             <select
-                              value={user.role === 'owner' ? 'owner' : user.role}
+                              value={user.role === 'owner' ? 'super_admin' : user.role}
                               onChange={e => updateRole(user.id, e.target.value)}
                               className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                             >
                               <option value="user">User</option>
                               <option value="admin">Admin</option>
-                              {viewerIsOwner && <option value="super_admin">Super Admin</option>}
+                              {/* Admins can only promote to admin, not super_admin */}
+                              {canManageUsers && <option value="super_admin">Super Admin</option>}
                             </select>
                           ) : (
                             <span className={ghostRoleBadge(user.role)}>
@@ -738,8 +755,21 @@ const UserManagementNew = () => {
                                   <button onClick={() => updateStatus(user.id, 'active')} className="w-full px-4 py-2 text-left text-xs text-emerald-400 hover:bg-slate-700/50 flex items-center gap-2">
                                     <CheckCircle className="w-3.5 h-3.5" />Activate
                                   </button>
-                                  <button onClick={() => updateStatus(user.id, 'suspended')} className="w-full px-4 py-2 text-left text-xs text-red-400 hover:bg-slate-700/50 flex items-center gap-2">
+                                  <button onClick={() => openDangerModal(
+                                    'Suspend User?',
+                                    `Suspending ${user.email} revokes all access immediately.`,
+                                    () => updateStatus(user.id, 'suspended'),
+                                    'Suspend'
+                                  )} className="w-full px-4 py-2 text-left text-xs text-red-400 hover:bg-slate-700/50 flex items-center gap-2">
                                     <Ban className="w-3.5 h-3.5" />Suspend
+                                  </button>
+                                  <button onClick={() => openDangerModal(
+                                    'Soft Delete User?',
+                                    `Soft-deleting ${user.email} preserves their data but permanently revokes access.`,
+                                    () => updateStatus(user.id, 'deleted'),
+                                    'Delete'
+                                  )} className="w-full px-4 py-2 text-left text-xs text-red-500 hover:bg-slate-700/50 flex items-center gap-2">
+                                    <XCircle className="w-3.5 h-3.5" />Soft Delete
                                   </button>
                                 </div>
                               </div>
@@ -795,6 +825,21 @@ const UserManagementNew = () => {
       {showCredits && selectedUser && (
         <CreditModal user={selectedUser} onClose={() => { setShowCredits(false); setSelectedUser(null); }} onUpdate={updateCreditLimit} />
       )}
+
+      {/* Danger confirmation modal — safe suspend / soft delete */}
+      <ConfirmDangerModal
+        isOpen={dangerModal.open}
+        onClose={() => setDangerModal(m => ({ ...m, open: false }))}
+        onConfirm={async () => {
+          setDangerModal(m => ({ ...m, loading: true }));
+          await dangerModal.onConfirm?.();
+          setDangerModal(m => ({ ...m, open: false, loading: false }));
+        }}
+        title={dangerModal.title}
+        message={dangerModal.message}
+        confirmLabel={dangerModal.confirmLabel || 'Confirm'}
+        loading={dangerModal.loading}
+      />
     </div>
   );
 };

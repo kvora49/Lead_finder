@@ -16,12 +16,17 @@ import {
   X,
   ChevronDown,
   User,
-  CreditCard
+  CreditCard,
+  Monitor
 } from 'lucide-react';
 
 const AdminLayoutNew = () => {
-  const { adminUser, adminRole } = useAdminAuth();
+  const { adminUser, adminRole, isSuperAdmin } = useAdminAuth();
   const navigate = useNavigate();
+
+  // Ghost mask — never expose the word "owner" in the UI
+  const displayRole = (adminRole === 'owner' ? 'super_admin' : adminRole)
+    ?.replace(/_/g, ' ') || 'Admin';
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -157,7 +162,7 @@ const AdminLayoutNew = () => {
                       {adminUser?.displayName || 'Admin'}
                     </p>
                     <p className="text-xs text-gray-400 capitalize">
-                      {adminRole?.replace('_', ' ') || 'Admin'}
+                      {displayRole}
                     </p>
                   </div>
                   <ChevronDown className="w-4 h-4 text-gray-400" />
@@ -168,7 +173,7 @@ const AdminLayoutNew = () => {
                   <div className="absolute right-0 mt-2 w-64 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50">
                     <div className="p-4 border-b border-slate-700">
                       <p className="text-sm font-medium text-white">{adminUser?.email}</p>
-                      <p className="text-xs text-gray-400 mt-1 capitalize">Role: {adminRole?.replace('_', ' ')}</p>
+                      <p className="text-xs text-gray-400 mt-1 capitalize">Role: {displayRole}</p>
                     </div>
                     <div className="p-2">
                       <button
@@ -204,7 +209,7 @@ const AdminLayoutNew = () => {
         }`}>
           <nav className="p-4 space-y-2">
             {menuItems.map((item, idx) => {
-              if (item.adminOnly && adminRole !== 'super_admin') return null;
+              if (item.adminOnly && !isSuperAdmin) return null;
               
               const Icon = item.icon;
               const isActive = item.exact ? isActivePath(item.path, true) : isActivePath(item.path);
@@ -235,6 +240,24 @@ const AdminLayoutNew = () => {
             })}
           </nav>
 
+          {/* Lead Finder App Link */}
+          <div className="px-1 mb-2">
+            <NavLink
+              to="/"
+              className="flex items-center gap-3 px-4 py-3 rounded-lg transition-all
+                text-emerald-400 hover:text-white bg-emerald-500/10 hover:bg-emerald-500/20
+                border border-emerald-500/20 hover:border-emerald-500/40"
+            >
+              <Monitor className="w-5 h-5 flex-shrink-0" />
+              {sidebarOpen && (
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold">Lead Finder App</p>
+                  <p className="text-xs text-emerald-500/70 truncate">Back to workspace</p>
+                </div>
+              )}
+            </NavLink>
+          </div>
+
           {/* Sidebar Footer */}
           {sidebarOpen && (
             <div className="absolute bottom-4 left-4 right-4 p-4 bg-slate-800/50 border border-slate-700/50 rounded-lg">
@@ -254,7 +277,7 @@ const AdminLayoutNew = () => {
             <aside className="absolute left-0 top-0 bottom-0 w-64 bg-slate-900 border-r border-slate-700 overflow-y-auto">
               <nav className="p-4 space-y-2">
                 {menuItems.map((item, idx) => {
-                  if (item.adminOnly && adminRole !== 'super_admin') return null;
+                  if (item.adminOnly && !isSuperAdmin) return null;
                   
                   const Icon = item.icon;
                   const isActive = item.exact ? isActivePath(item.path, true) : isActivePath(item.path);
@@ -278,6 +301,21 @@ const AdminLayoutNew = () => {
                     </NavLink>
                   );
                 })}
+
+                {/* Lead Finder App — back to main workspace */}
+                <NavLink
+                  to="/"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="flex items-center gap-3 px-4 py-3 rounded-lg transition-all
+                    text-emerald-400 hover:text-white bg-emerald-500/10 hover:bg-emerald-500/20
+                    border border-emerald-500/20"
+                >
+                  <Monitor className="w-5 h-5" />
+                  <div>
+                    <p className="text-sm font-semibold">Lead Finder App</p>
+                    <p className="text-xs text-emerald-500/70">Back to workspace</p>
+                  </div>
+                </NavLink>
               </nav>
             </aside>
           </div>

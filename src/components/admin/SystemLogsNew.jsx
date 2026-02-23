@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   FileText, 
   AlertTriangle, 
@@ -16,7 +16,7 @@ import {
   ChevronLeft,
   ChevronRight
 } from 'lucide-react';
-import { collection, getDocs, query, orderBy, limit, where, Timestamp } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, limit, startAfter, where, Timestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 
 const SystemLogsNew = () => {
@@ -28,9 +28,15 @@ const SystemLogsNew = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [dateRange, setDateRange] = useState('7days');
   
-  // Pagination
-  const [currentPage, setCurrentPage] = useState(1);
-  const [logsPerPage] = useState(50);
+  // ── Cursor-based server pagination ────────────────────────────────────────
+  // Saves ~90% Firestore read costs vs. the old limit(500) approach:
+  //   Before: every page load reads up to 500 documents
+  //   After:  each page load reads exactly 50 documents via startAfter cursor
+  const PAGE_SIZE    = 50;
+  const cursorRef    = useRef([null]); // cursorRef.current[i] = startAfter doc for page i
+  const [pageIndex,   setPageIndex]   = useState(0);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [hasNextPage, setHasNextPage] = useState(false);
 
   const [stats, setStats] = useState({
     total: 0,
@@ -41,59 +47,71 @@ const SystemLogsNew = () => {
   });
 
   useEffect(() => {
-    loadSystemLogs();
-  }, [dateRange]);
+    // Reset cursor history whenever the date range changes, then fetch page 0
+    cursorRef.current = [null];
+    setPageIndex(0);
+    loadSystemLogs(null, 0);
+  }, [dateRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     filterLogs();
   }, [logs, filterType, filterSeverity, searchTerm]);
 
-  const loadSystemLogs = async () => {
-    setLoading(true);
+  /**
+   * loadSystemLogs(cursor, pIdx)
+   *
+   * cursor — Firestore DocumentSnapshot to use as startAfter (null = first page)
+   * pIdx   — 0-based index of the page being loaded (for cursor bookkeeping)
+   *
+   * Cost model: reads exactly PAGE_SIZE (50) docs per call instead of 500.
+   */
+  const loadSystemLogs = async (cursor = null, pIdx = 0) => {
+    if (pIdx === 0 && cursor === null) setLoading(true);
+    else setPageLoading(true);
+
     try {
-      // Calculate date range
       const now = new Date();
       let startDate = new Date();
-      
-      switch(dateRange) {
-        case '24hours':
-          startDate.setHours(now.getHours() - 24);
-          break;
-        case '7days':
-          startDate.setDate(now.getDate() - 7);
-          break;
-        case '30days':
-          startDate.setDate(now.getDate() - 30);
-          break;
-        default:
-          startDate.setDate(now.getDate() - 7);
+      switch (dateRange) {
+        case '24hours': startDate.setHours(now.getHours() - 24); break;
+        case '7days':   startDate.setDate(now.getDate() - 7);    break;
+        case '30days':  startDate.setDate(now.getDate() - 30);   break;
+        default:        startDate.setDate(now.getDate() - 7);
       }
 
-      // Fetch system logs
       const adminLogsRef = collection(db, 'systemLogs');
-      const q = query(
-        adminLogsRef,
+      const constraints = [
         where('timestamp', '>=', Timestamp.fromDate(startDate)),
         orderBy('timestamp', 'desc'),
-        limit(500)
-      );
-      
-      const snapshot = await getDocs(q);
-      const logsData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-        timestamp: doc.data().timestamp?.toDate() || new Date(),
-        type: determineLogType(doc.data().action),
-        severity: determineSeverity(doc.data().action)
+        limit(PAGE_SIZE),
+      ];
+      if (cursor) constraints.push(startAfter(cursor));
+
+      const snapshot = await getDocs(query(adminLogsRef, ...constraints));
+      const logsData = snapshot.docs.map(d => ({
+        id: d.id,
+        ...d.data(),
+        timestamp: d.data().timestamp?.toDate() || new Date(),
+        type:      determineLogType(d.data().action),
+        severity:  determineSeverity(d.data().action),
       }));
 
       setLogs(logsData);
       calculateStats(logsData);
-      
-      setLoading(false);
+
+      // Cursor bookkeeping — store the last doc so Next Page can use startAfter it
+      if (snapshot.docs.length === PAGE_SIZE) {
+        const lastDoc = snapshot.docs[snapshot.docs.length - 1];
+        if (!cursorRef.current[pIdx + 1]) cursorRef.current[pIdx + 1] = lastDoc;
+        setHasNextPage(true);
+      } else {
+        setHasNextPage(false);
+      }
     } catch (error) {
       console.error('Error loading system logs:', error);
+    } finally {
       setLoading(false);
+      setPageLoading(false);
     }
   };
 
@@ -147,7 +165,6 @@ const SystemLogsNew = () => {
     }
 
     setFilteredLogs(filtered);
-    setCurrentPage(1);
   };
 
   const exportLogs = () => {
@@ -174,11 +191,20 @@ const SystemLogsNew = () => {
     a.click();
   };
 
-  // Pagination
-  const indexOfLastLog = currentPage * logsPerPage;
-  const indexOfFirstLog = indexOfLastLog - logsPerPage;
-  const currentLogs = filteredLogs.slice(indexOfFirstLog, indexOfLastLog);
-  const totalPages = Math.ceil(filteredLogs.length / logsPerPage);
+  // With cursor pagination each page IS already the right slice (≤ PAGE_SIZE docs)
+  const currentLogs = filteredLogs;
+
+  const goNextPage = () => {
+    const nextIdx = pageIndex + 1;
+    setPageIndex(nextIdx);
+    loadSystemLogs(cursorRef.current[nextIdx], nextIdx);
+  };
+
+  const goPrevPage = () => {
+    const prevIdx = pageIndex - 1;
+    setPageIndex(prevIdx);
+    loadSystemLogs(cursorRef.current[prevIdx], prevIdx);
+  };
 
   const StatCard = ({ icon: Icon, label, value, color }) => (
     <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-4 hover:bg-slate-800/70 transition-all">
@@ -338,7 +364,17 @@ const SystemLogsNew = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">
-              {currentLogs.map((log) => (
+              {pageLoading
+                ? Array.from({ length: 8 }).map((_, i) => (
+                    <tr key={i} className="animate-pulse">
+                      {[75, 55, 65, 35, 40, 80].map((w, j) => (
+                        <td key={j} className="px-4 py-4">
+                          <div className="h-4 bg-slate-700/60 rounded" style={{ width: `${w}%` }} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                : currentLogs.map((log) => (
                 <tr key={log.id} className="hover:bg-slate-800/30 transition-colors">
                   <td className="px-4 py-4 whitespace-nowrap">
                     <div className="flex items-center gap-2 text-sm text-gray-300">
@@ -369,33 +405,31 @@ const SystemLogsNew = () => {
           </table>
         </div>
 
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between px-6 py-4 border-t border-slate-700">
-            <div className="text-sm text-gray-400">
-              Showing {indexOfFirstLog + 1} to {Math.min(indexOfLastLog, filteredLogs.length)} of {filteredLogs.length} logs
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                disabled={currentPage === 1}
-                className="p-2 hover:bg-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-gray-400 hover:text-white"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <span className="text-sm text-gray-300">
-                Page {currentPage} of {totalPages}
-              </span>
-              <button
-                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                disabled={currentPage === totalPages}
-                className="p-2 hover:bg-slate-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-gray-400 hover:text-white"
-              >
-                <ChevronRight className="w-5 h-5" />
-              </button>
-            </div>
+        {/* Cursor-based Pagination — reads exactly 50 docs per page */}
+        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-700">
+          <p className="text-sm text-gray-400">
+            Page&nbsp;{pageIndex + 1}&nbsp;·&nbsp;
+            {currentLogs.length}&nbsp;log{currentLogs.length !== 1 ? 's' : ''}
+            {currentLogs.length === PAGE_SIZE ? ' (50 / page)' : ''}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={goPrevPage}
+              disabled={pageIndex === 0 || pageLoading}
+              className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-sm text-gray-300 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <ChevronLeft className="w-4 h-4" /> Previous
+            </button>
+            <span className="text-sm text-gray-500 px-1">Page {pageIndex + 1}</span>
+            <button
+              onClick={goNextPage}
+              disabled={!hasNextPage || pageLoading}
+              className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-sm text-gray-300 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Next <ChevronRight className="w-4 h-4" />
+            </button>
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

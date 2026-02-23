@@ -33,6 +33,7 @@ import {
   deleteLead,
   bulkSaveLeads,
 } from '../services/listService';
+import ConfirmDangerModal from './ConfirmDangerModal';
 
 // ─── CSV row → normalised lead ────────────────────────────────────────────────
 const csvRowToLead = (row) => ({
@@ -238,6 +239,11 @@ const MyLists = () => {
   const [deletingListId, setDeletingListId] = useState(null);
   const [searchFilter,   setSearchFilter]   = useState('');
 
+  // ── Danger modal state (Safe Delete) ────────────────────────────────────
+  const [dangerModal, setDangerModal] = useState({
+    open: false, title: '', message: '', confirmLabel: 'Delete', onConfirm: null, loading: false,
+  });
+
   const importFileRef = useRef(null);
 
   // ── Load lists ─────────────────────────────────────────────────────────────
@@ -276,7 +282,6 @@ const MyLists = () => {
 
   // ── Delete entire list ─────────────────────────────────────────────────────
   const handleDeleteList = async (listId) => {
-    if (!window.confirm('Delete this list and all its leads? This cannot be undone.')) return;
     setDeletingListId(listId);
     try {
       await deleteList(uid, listId);
@@ -289,9 +294,21 @@ const MyLists = () => {
     }
   };
 
+  const requestDeleteList = (listId) => {
+    const list = lists.find(l => l.id === listId);
+    setDangerModal({
+      open: true,
+      title: 'Delete List?',
+      message: `“${list?.name || 'This list'}” and all ${list?.leadCount ?? 'its'} lead(s) will be permanently deleted. This cannot be undone.`,
+      confirmLabel: 'Delete List',
+      onConfirm: () => handleDeleteList(listId),
+      loading: false,
+    });
+  };
+
   // ── Delete single lead ─────────────────────────────────────────────────────
   const handleDeleteLead = async (leadId) => {
-    if (!selectedList || !window.confirm('Remove this lead from the list?')) return;
+    if (!selectedList) return;
     try {
       await deleteLead(uid, selectedList.id, leadId);
       setLeads((prev) => prev.filter((l) => l.id !== leadId));
@@ -305,6 +322,18 @@ const MyLists = () => {
     } catch (err) {
       setError('Failed to delete lead: ' + err.message);
     }
+  };
+
+  const requestDeleteLead = (leadId) => {
+    const lead = leads.find(l => l.id === leadId);
+    setDangerModal({
+      open: true,
+      title: 'Remove Lead?',
+      message: `“${lead?.name || 'This lead'}” will be permanently removed from the list.`,
+      confirmLabel: 'Remove Lead',
+      onConfirm: () => handleDeleteLead(leadId),
+      loading: false,
+    });
   };
 
   // ── Export CSV ─────────────────────────────────────────────────────────────
@@ -378,9 +407,8 @@ const MyLists = () => {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
+    <>
     <div className="min-h-screen bg-slate-50">
-
-      {/* ── Page header ────────────────────────────────────────────────── */}
       <div className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4">
         <div className="max-w-7xl mx-auto flex items-center gap-4">
           <Link to="/app"
@@ -481,7 +509,7 @@ const MyLists = () => {
                           : 'text-slate-300 opacity-0 group-hover:opacity-100'
                       }`} />
                       <button
-                        onClick={(e) => { e.stopPropagation(); handleDeleteList(list.id); }}
+                        onClick={(e) => { e.stopPropagation(); requestDeleteList(list.id); }}
                         disabled={deletingListId === list.id}
                         className="opacity-0 group-hover:opacity-100 p-1 rounded text-slate-300
                           hover:text-red-500 transition-all disabled:opacity-50">
@@ -632,7 +660,7 @@ const MyLists = () => {
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {visibleLeads.map((lead) => (
-                            <LeadRow key={lead.id} lead={lead} onDelete={handleDeleteLead} />
+                            <LeadRow key={lead.id} lead={lead} onDelete={requestDeleteLead} />
                           ))}
                         </tbody>
                       </table>
@@ -642,10 +670,25 @@ const MyLists = () => {
               </>
             )}
           </div>
+        </div>{/* /flex gap-6 */}
+      </div>{/* /max-w-7xl */}
+    </div>{/* /min-h-screen */}
 
-        </div>
-      </div>
-    </div>
+    {/* Safe Delete confirmation modal */}
+    <ConfirmDangerModal
+      isOpen={dangerModal.open}
+      onClose={() => setDangerModal(m => ({ ...m, open: false }))}
+      onConfirm={async () => {
+        setDangerModal(m => ({ ...m, loading: true }));
+        await dangerModal.onConfirm?.();
+        setDangerModal(m => ({ ...m, open: false, loading: false }));
+      }}
+      title={dangerModal.title}
+      message={dangerModal.message}
+      confirmLabel={dangerModal.confirmLabel || 'Delete'}
+      loading={dangerModal.loading}
+    />
+  </>
   );
 };
 

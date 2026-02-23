@@ -30,7 +30,8 @@ export const AdminAuthProvider = ({ children }) => {
   const isOwner        = role === 'owner';
   const isSuperAdmin   = role === 'super_admin' || isOwner;   // owner ⊃ super_admin
   const canAccessAdmin = role === 'owner' || role === 'super_admin' || role === 'admin';
-  const canManageUsers = isOwner || role === 'super_admin';    // admin can VIEW, not manage
+  const canManageUsers = isOwner || role === 'super_admin';    // full management
+  const canPromoteToAdmin = canManageUsers || role === 'admin'; // admin can promote users
   const canEditOwner   = isOwner;                             // Ghost Owner protection
 
   const value = {
@@ -50,6 +51,7 @@ export const AdminAuthProvider = ({ children }) => {
     isAdmin:       canAccessAdmin,
     canAccessAdmin,
     canManageUsers,
+    canPromoteToAdmin,
     canEditOwner,
 
     loading,

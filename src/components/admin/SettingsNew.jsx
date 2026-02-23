@@ -19,7 +19,9 @@ import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
 
 const SettingsNew = () => {
-  const { adminUser, adminRole } = useAdminAuth();
+  const { adminUser, adminRole, isSuperAdmin } = useAdminAuth();
+  // owner ⊃ super_admin — both tiers can edit settings
+  const canEdit = isSuperAdmin;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('general');
@@ -82,8 +84,8 @@ const SettingsNew = () => {
   };
 
   const handleSave = async () => {
-    if (adminRole !== 'super_admin') {
-      alert('Only super admins can modify system settings');
+    if (!canEdit) {
+      alert('Only Super Admins can modify system settings');
       return;
     }
 
@@ -178,7 +180,7 @@ const SettingsNew = () => {
           </button>
           <button
             onClick={handleSave}
-            disabled={saving || adminRole !== 'super_admin'}
+            disabled={saving || !canEdit}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Save className="w-4 h-4" />
@@ -188,13 +190,13 @@ const SettingsNew = () => {
       </div>
 
       {/* Permission Warning */}
-      {adminRole !== 'super_admin' && (
+      {!canEdit && (
         <div className="bg-yellow-500/20 border border-yellow-500/30 rounded-xl p-4">
           <div className="flex items-start gap-3">
             <AlertCircle className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
             <div>
               <h4 className="font-semibold text-yellow-400 mb-1">View Only Mode</h4>
-              <p className="text-sm text-gray-300">Only super admins can modify system settings.</p>
+              <p className="text-sm text-gray-300">Only Super Admins can modify system settings.</p>
             </div>
           </div>
         </div>
@@ -227,7 +229,7 @@ const SettingsNew = () => {
                   checked={settings.maintenanceMode}
                   onChange={(e) => setSettings({ ...settings, maintenanceMode: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -243,7 +245,7 @@ const SettingsNew = () => {
                   value={settings.maintenanceMessage}
                   onChange={(e) => setSettings({ ...settings, maintenanceMessage: e.target.value })}
                   className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
               </SettingRow>
             )}
@@ -257,7 +259,7 @@ const SettingsNew = () => {
                 value={settings.freeTierThreshold}
                 onChange={(e) => setSettings({ ...settings, freeTierThreshold: parseInt(e.target.value) || 0 })}
                 className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={adminRole !== 'super_admin'}
+                disabled={!canEdit}
               />
             </SettingRow>
           </>
@@ -277,7 +279,7 @@ const SettingsNew = () => {
                 value={settings.globalCreditLimit}
                 onChange={(e) => setSettings({ ...settings, globalCreditLimit: parseInt(e.target.value) || 0 })}
                 className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={adminRole !== 'super_admin'}
+                disabled={!canEdit}
               />
             </SettingRow>
 
@@ -289,7 +291,7 @@ const SettingsNew = () => {
                 value={settings.defaultUserCreditLimit}
                 onChange={(e) => setSettings({ ...settings, defaultUserCreditLimit: e.target.value === 'unlimited' ? 'unlimited' : parseInt(e.target.value) })}
                 className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={adminRole !== 'super_admin'}
+                disabled={!canEdit}
               >
                 <option value="unlimited">Unlimited</option>
                 <option value="1000">1,000 credits</option>
@@ -309,7 +311,7 @@ const SettingsNew = () => {
                   checked={settings.monthlyResetEnabled}
                   onChange={(e) => setSettings({ ...settings, monthlyResetEnabled: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -327,7 +329,7 @@ const SettingsNew = () => {
                   value={settings.monthlyResetDate}
                   onChange={(e) => setSettings({ ...settings, monthlyResetDate: parseInt(e.target.value) || 1 })}
                   className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
               </SettingRow>
             )}
@@ -349,7 +351,7 @@ const SettingsNew = () => {
                   checked={settings.emailNotificationsEnabled}
                   onChange={(e) => setSettings({ ...settings, emailNotificationsEnabled: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -365,7 +367,7 @@ const SettingsNew = () => {
                 onChange={(e) => setSettings({ ...settings, adminNotificationEmail: e.target.value })}
                 placeholder="admin@example.com"
                 className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={adminRole !== 'super_admin'}
+                disabled={!canEdit}
               />
             </SettingRow>
 
@@ -379,7 +381,7 @@ const SettingsNew = () => {
                   checked={settings.sendWelcomeEmail}
                   onChange={(e) => setSettings({ ...settings, sendWelcomeEmail: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -395,7 +397,7 @@ const SettingsNew = () => {
                   checked={settings.sendCreditAlerts}
                   onChange={(e) => setSettings({ ...settings, sendCreditAlerts: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -421,7 +423,7 @@ const SettingsNew = () => {
                   value={settings.creditAlertThreshold}
                   onChange={(e) => setSettings({ ...settings, creditAlertThreshold: parseInt(e.target.value) })}
                   className="flex-1"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <span className="text-white font-medium w-12">{settings.creditAlertThreshold}%</span>
               </div>
@@ -437,7 +439,7 @@ const SettingsNew = () => {
                   checked={settings.userLimitAlertEnabled}
                   onChange={(e) => setSettings({ ...settings, userLimitAlertEnabled: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -453,7 +455,7 @@ const SettingsNew = () => {
                   checked={settings.systemHealthAlertsEnabled}
                   onChange={(e) => setSettings({ ...settings, systemHealthAlertsEnabled: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -476,7 +478,7 @@ const SettingsNew = () => {
                   checked={settings.requireEmailVerification}
                   onChange={(e) => setSettings({ ...settings, requireEmailVerification: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -492,7 +494,7 @@ const SettingsNew = () => {
                   checked={settings.autoApproveUsers}
                   onChange={(e) => setSettings({ ...settings, autoApproveUsers: e.target.checked })}
                   className="sr-only peer"
-                  disabled={adminRole !== 'super_admin'}
+                  disabled={!canEdit}
                 />
                 <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
@@ -541,7 +543,7 @@ const SettingsNew = () => {
         </button>
         <button
           onClick={handleSave}
-          disabled={saving || adminRole !== 'super_admin'}
+          disabled={saving || !canEdit}
           className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {saving ? 'Saving...' : 'Save All Settings'}
