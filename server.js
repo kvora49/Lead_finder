@@ -35,7 +35,7 @@ try {
   console.warn('To enable Firestore storage, set FIREBASE_SERVICE_ACCOUNT env var in Railway');
 }
 
-const db = admin.firestore ? admin.firestore() : null;
+const db = admin.apps.length > 0 ? admin.firestore() : null;
 
 // Fallback in-memory store if Firestore is not available
 const verificationCodes = new Map();
