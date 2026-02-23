@@ -16,15 +16,23 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize Firebase Admin SDK
+// Priority: FIREBASE_SERVICE_ACCOUNT env var → serviceAccountKey.json file → in-memory fallback
 try {
-  const serviceAccount = JSON.parse(readFileSync('./serviceAccountKey.json', 'utf8'));
+  let serviceAccount;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log('✅ Firebase Admin credentials loaded from FIREBASE_SERVICE_ACCOUNT env var');
+  } else {
+    serviceAccount = JSON.parse(readFileSync('./serviceAccountKey.json', 'utf8'));
+    console.log('✅ Firebase Admin credentials loaded from serviceAccountKey.json file');
+  }
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
   console.log('✅ Firebase Admin initialized');
 } catch (error) {
   console.warn('⚠️ Firebase Admin not initialized - verification codes will use in-memory fallback');
-  console.warn('To enable persistent storage, add serviceAccountKey.json file');
+  console.warn('To enable Firestore storage, set FIREBASE_SERVICE_ACCOUNT env var in Railway');
 }
 
 const db = admin.firestore ? admin.firestore() : null;

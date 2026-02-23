@@ -6,6 +6,7 @@
   "description": "Universal Business Lead Finder - Find wholesalers, retailers, and services using Google Places API",
   "scripts": {
     "dev": "vite",
+    "start": "node server.js",
     "server": "node server.js",
     "dev:all": "concurrently \"npm run dev\" \"npm run server\"",
     "build": "vite build",
