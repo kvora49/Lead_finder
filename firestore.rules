@@ -32,7 +32,7 @@ service cloud.firestore {
     function isAdmin() {
       return isAuth()
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
-        && getUserRole() in ['admin', 'super_admin'];
+        && getUserRole() in ['admin', 'super_admin', 'owner'];
     }
 
     function isSuperAdmin() {
@@ -86,6 +86,20 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll(['query', 'location', 'results', 'cachedAt']);
 
       allow delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // OTP CODES   otp_codes/{email}
+    // Temporary short-lived documents written by AdminGatekeeper during the
+    // email verification flow. Auto-deleted after successful verify.
+    //   WRITE  — any authenticated user may write their own OTP doc
+    //            (doc ID = their email address).
+    //   READ   — only the owner of that email address.
+    //   DELETE — only the owner (cleanup after verify).
+    // ═══════════════════════════════════════════════════════════════════════
+    match /otp_codes/{email} {
+      allow read, delete: if isAuth() && request.auth.token.email == email;
+      allow write:        if isAuth() && request.auth.token.email == email;
     }
 
     // ═══════════════════════════════════════════════════════════════════    // GLOBAL API COST TRACKER   system/global_usage
