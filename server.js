@@ -41,13 +41,14 @@ const db = admin.apps.length > 0 ? admin.firestore() : null;
 const verificationCodes = new Map();
 
 // Create transporter using SMTP
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465');
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: process.env.SMTP_PORT || 587,
-  secure: false, // true for 465, false for other ports
+  port: SMTP_PORT,
+  secure: SMTP_PORT === 465, // true for 465 (SSL), false for 587 (TLS)
   auth: {
-    user: process.env.SMTP_USER, // Your email
-    pass: process.env.SMTP_PASS, // Your app password (for Gmail, use App Password)
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
   },
 });
 
