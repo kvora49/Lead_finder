@@ -1,4 +1,4 @@
-import { collection, addDoc, doc, updateDoc, increment, serverTimestamp, Timestamp, setDoc, getDoc } from 'firebase/firestore';
+import { collection, addDoc, doc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
 
 /**
@@ -107,29 +107,16 @@ export const logSearch = async (userId, userEmail, searchData) => {
 };
 
 // Update user credit usage
+// NOTE: writes directly to users/{userId} — the single source of truth.
+// The legacy `userCredits` collection is deprecated.
 export const updateCreditUsage = async (userId, creditsUsed) => {
   try {
-    const creditRef = doc(db, 'userCredits', userId);
-    
-    // Check if document exists, create if not
-    const docSnap = await getDoc(creditRef);
-    if (!docSnap.exists()) {
-      await setDoc(creditRef, {
-        userId,
-        creditsUsed: 0,
-        totalApiCalls: 0,
-        createdAt: serverTimestamp(),
-        lastUsed: null
-      });
-    }
-    
-    // Now update with increment
-    await updateDoc(creditRef, {
+    const userRef = doc(db, 'users', userId);
+    await updateDoc(userRef, {
       creditsUsed: increment(creditsUsed),
-      totalApiCalls: increment(1),
-      lastUsed: serverTimestamp()
+      searchCount: increment(1),
+      lastActive:  serverTimestamp(),
     });
-
     return true;
   } catch (error) {
     console.error('Error updating credit usage:', error);

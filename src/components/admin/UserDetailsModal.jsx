@@ -70,9 +70,11 @@ const UserDetailsModal = ({ user, onClose }) => {
   const handleResetCredits = async () => {
     if (window.confirm('Are you sure you want to reset this user\'s credits to 0?')) {
       try {
-        const creditsRef = doc(db, 'userCredits', user.id);
-        await updateDoc(creditsRef, {
-          totalApiCalls: 0
+        // Write to users/{id} — single source of truth (legacy userCredits collection deprecated)
+        const userRef = doc(db, 'users', user.id);
+        await updateDoc(userRef, {
+          creditsUsed: 0,
+          searchCount: 0,
         });
         alert('Credits reset successfully!');
         onClose();
