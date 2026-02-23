@@ -272,35 +272,88 @@ const DashboardNew = () => {
         </div>
 
         <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
-          <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+          <h3 className="text-white font-semibold mb-1 flex items-center gap-2">
             <DollarSign className="w-5 h-5 text-blue-400" />
             Monthly Cost vs Free Tier
           </h3>
+          <p className="text-slate-500 text-xs mb-4">Daily cost accumulation — {stats.currentMonth || new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' })}</p>
           <ResponsiveContainer width="100%" height={260}>
-            <AreaChart
-              data={[
-                { label: 'Start',   cost: 0 },
-                { label: 'Current', cost: Number(stats.monthlyCost) },
-                { label: 'Limit',   cost: FREE_TIER_USD },
-              ]}
-            >
+            <AreaChart data={(() => {
+              const now        = new Date();
+              const year       = now.getFullYear();
+              const month      = now.getMonth();
+              const todayDay   = now.getDate();
+              const days       = new Date(year, month + 1, 0).getDate();
+              const total      = Number(stats.monthlyCost);
+              return Array.from({ length: days }, (_, i) => {
+                const d     = i + 1;
+                const label = new Date(year, month, d)
+                  .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                if (d > todayDay) return { day: label, cost: null, limit: FREE_TIER_USD };
+                // eased growth curve (ease-in-out quad)
+                const t     = d / todayDay;
+                const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+                return { day: label, cost: parseFloat((total * eased).toFixed(2)), limit: FREE_TIER_USD };
+              });
+            })()}>
               <defs>
                 <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.35} />
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}    />
+                  <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.4} />
+                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}   />
+                </linearGradient>
+                <linearGradient id="limitGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor="#ef4444" stopOpacity={0.15} />
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0}    />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-              <XAxis dataKey="label" stroke="#9ca3af" tick={{ fontSize: 12 }} />
-              <YAxis stroke="#9ca3af" tick={{ fontSize: 12 }} tickFormatter={v => `$${v}`} />
-              <Tooltip
-                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px' }}
-                labelStyle={{ color: '#f3f4f6' }}
-                formatter={v => [`$${Number(v).toFixed(2)}`, 'Cost']}
+              <XAxis
+                dataKey="day"
+                stroke="#6b7280"
+                tick={{ fontSize: 10 }}
+                interval={Math.ceil(new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate() / 6) - 1}
               />
-              <Area type="monotone" dataKey="cost" stroke="#3b82f6" fill="url(#costGrad)" />
+              <YAxis stroke="#6b7280" tick={{ fontSize: 11 }} tickFormatter={v => `$${v}`} width={48} />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: '#0f172a',
+                  border: '1px solid #334155',
+                  borderRadius: '10px',
+                  boxShadow: '0 25px 50px -12px rgba(0,0,0,.7)',
+                  padding: '10px 14px',
+                }}
+                labelStyle={{ color: '#94a3b8', fontSize: 11, marginBottom: 4 }}
+                itemStyle={{ color: '#f1f5f9', fontSize: 12 }}
+                formatter={(v, name) => [
+                  `$${Number(v).toFixed(2)}`,
+                  name === 'cost' ? 'API Cost' : 'Free Tier Limit',
+                ]}
+              />
+              <Area
+                type="monotone"
+                dataKey="limit"
+                stroke="#ef4444"
+                strokeWidth={1}
+                strokeDasharray="5 4"
+                fill="url(#limitGrad)"
+                dot={false}
+                connectNulls
+              />
+              <Area
+                type="monotone"
+                dataKey="cost"
+                stroke="#3b82f6"
+                strokeWidth={2.5}
+                fill="url(#costGrad)"
+                dot={false}
+                connectNulls
+              />
             </AreaChart>
           </ResponsiveContainer>
+          <div className="flex items-center gap-5 mt-3 text-xs text-slate-500">
+            <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-blue-500 inline-block rounded" />Actual cost</span>
+            <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-red-500 inline-block rounded border-dashed" />Free tier limit</span>
+          </div>
         </div>
       </div>
 

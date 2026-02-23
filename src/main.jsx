@@ -6,6 +6,7 @@ import { AdminAuthProvider } from './contexts/AdminAuthContext.jsx';
 import { CreditProvider }    from './contexts/CreditContext.jsx';
 import ProtectedRoute         from './components/ProtectedRoute.jsx';
 import AdminRoute             from './components/admin/AdminRoute.jsx';
+import AdminGatekeeper        from './components/admin/AdminGatekeeper.jsx';
 import AdminLayoutNew         from './components/admin/AdminLayoutNew.jsx';
 import DashboardNew           from './components/admin/DashboardNew.jsx';
 import UserManagementNew      from './components/admin/UserManagementNew.jsx';
@@ -115,7 +116,13 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               <Route path="/app/lists"        element={<MyLists />} />
               <Route path="/platform-usage"   element={<PlatformUsagePage />} />
             </Route>
-            {/* ── Admin area ─────────────────────────────── */}
+            {/* ── Admin Gatekeeper (/admin exact) ──────────────── */}
+            {/* Public route: handles role-based routing internally. */}
+            {/* Redirects admins → /admin/dashboard (index below).   */}
+            <Route path="/admin" element={<AdminGatekeeper />} />
+
+            {/* ── Admin Dashboard area ─────────────────────────── */}
+            {/* /admin/users, /admin/credits, etc. go here.          */}
             <Route
               path="/admin"
               element={
@@ -124,14 +131,14 @@ ReactDOM.createRoot(document.getElementById('root')).render(
                 </AdminRoute>
               }
             >
-              <Route index                 element={<DashboardNew />} />
-              <Route path="users"          element={<UserManagementNew />} />
-              <Route path="logs"           element={<SystemLogsNew />} />
-              <Route path="credits"        element={<CreditAnalyticsNew />} />
-              <Route path="analytics"      element={<SearchAnalyticsNew />} />
-              <Route path="settings"       element={<SettingsNew />} />
-              <Route path="seeder"         element={<DataSeeder />} />
-              <Route path="access"         element={<AccessControlNew />} />
+              <Route path="dashboard"  element={<DashboardNew />} />
+              <Route path="users"      element={<UserManagementNew />} />
+              <Route path="logs"       element={<SystemLogsNew />} />
+              <Route path="credits"    element={<CreditAnalyticsNew />} />
+              <Route path="analytics"  element={<SearchAnalyticsNew />} />
+              <Route path="settings"   element={<SettingsNew />} />
+              <Route path="seeder"     element={<DataSeeder />} />
+              <Route path="access"     element={<AccessControlNew />} />
             </Route>
 
             {/* ── Catch-all → /app ───────────────────────── */}

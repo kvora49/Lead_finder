@@ -1,7 +1,6 @@
 import { Navigate } from 'react-router-dom';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 
-// Skeleton shown while role data loads from Firestore
 const AdminSkeleton = () => (
   <div className="min-h-screen bg-slate-900 flex items-center justify-center">
     <div className="flex flex-col items-center gap-4">
@@ -14,11 +13,17 @@ const AdminSkeleton = () => (
   </div>
 );
 
+/**
+ * AdminRoute — 4-tier RBAC guard.
+ * Allows:  owner | super_admin | admin
+ * Blocks:  user  →  redirected to /admin (Gatekeeper)
+ */
 const AdminRoute = ({ children }) => {
-  const { adminUser, loading } = useAdminAuth();
+  const { canAccessAdmin, loading } = useAdminAuth();
 
   if (loading) return <AdminSkeleton />;
-  if (!adminUser) return <Navigate to="/login" replace />;
+  // Non-admin users land on the Gatekeeper to request access / verify identity
+  if (!canAccessAdmin) return <Navigate to="/admin" replace />;
   return children;
 };
 

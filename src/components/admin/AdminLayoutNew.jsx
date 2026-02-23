@@ -42,7 +42,7 @@ const AdminLayoutNew = () => {
     { 
       icon: LayoutDashboard, 
       label: 'Dashboard', 
-      path: '/admin', 
+      path: '/admin/dashboard', 
       exact: true,
       description: 'System overview & stats'
     },
