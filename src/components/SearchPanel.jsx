@@ -47,7 +47,7 @@ const SEARCH_SCOPES = [
   {
     value: 'city',
     label: 'Entire City',
-    hint:  'Wide 5×5 grid covering the whole city',
+    hint:  'Wide 3×3 grid covering the whole city',
   },
   {
     value: 'neighbourhood',
@@ -490,6 +490,56 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     setProgress(null);
   };
 
+  // Re-runs the current search bypassing the Firestore cache and writes a
+  // fresh entry.  Only active when results are showing as "Cached".
+  const handleRefresh = useCallback(async () => {
+    if (!keyword.trim() || !location.trim() || searching) return;
+
+    abortRef.current = false;
+    setSearching(true);
+    setError(null);
+    setResults([]);
+    setLastMeta(null);
+    setProgress({ phase: 'start', message: 'Starting fresh search…', current: 0, total: 1 });
+
+    try {
+      const res = await searchBusinesses(keyword.trim(), location.trim(), {
+        type,
+        searchScope,
+        area: searchScope !== 'city' ? area.trim() : '',
+        forceRefresh: true,          // ← skip cache read, run live sweep
+        onProgress: (p) => {
+          if (!abortRef.current) setProgress(p);
+        },
+      });
+
+      if (abortRef.current) return;
+
+      if (res.apiCalls > 0) {
+        try {
+          await deductCredits(res.apiCalls, {
+            keyword: keyword.trim(),
+            location: location.trim(),
+            scope: searchScope,
+          });
+        } catch (creditErr) {
+          console.error('[credits] deduction failed after refresh:', creditErr.message);
+          setError(`Search succeeded but credit deduction failed: ${creditErr.message}`);
+        }
+      }
+
+      setResults(res.results || []);
+      setLastMeta(res);
+    } catch (err) {
+      if (!abortRef.current) {
+        setError(err.message || 'Refresh failed. Check your API key and try again.');
+        setProgress(null);
+      }
+    } finally {
+      if (!abortRef.current) setSearching(false);
+    }
+  }, [keyword, location, type, searchScope, area, searching, deductCredits]);
+
   const handleClear = () => {
     setResults([]);
     setError(null);
@@ -771,10 +821,22 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 {visible.length} <span className="font-normal text-slate-500">result{visible.length !== 1 ? 's' : ''}</span>
               </span>
               {lastMeta?.cached && (
-                <span className="flex items-center gap-1 text-xs font-medium px-2 py-0.5
-                  rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
-                  <Database className="w-3 h-3" /> Cached
-                </span>
+                <>
+                  <span className="flex items-center gap-1 text-xs font-medium px-2 py-0.5
+                    rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
+                    <Database className="w-3 h-3" /> Cached
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleRefresh}
+                    title="Discard cached results and run a fresh live search"
+                    className="flex items-center gap-1 text-xs font-medium px-2 py-0.5
+                      rounded-full bg-slate-100 text-slate-600 border border-slate-200
+                      hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200
+                      transition-colors active:scale-[0.96]">
+                    <RefreshCw className="w-3 h-3" /> Refresh
+                  </button>
+                </>
               )}
               {!lastMeta?.cached && lastMeta?.apiCalls > 0 && (
                 <span className="text-xs text-slate-400">

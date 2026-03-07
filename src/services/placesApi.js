@@ -1,19 +1,27 @@
-/**
- * Lead Finder — Places API Service  (Phase 2)
+﻿/**
+ * Lead Finder — Places API Service  (Phase 3)
  *
- * Strategy: Dynamic Grid Search
+ * Strategy: Dynamic Viewport Grid Sweep
  *   1. Geocode the user's location string → bounding box (viewport).
  *      Uses Geocoding REST API — CORS-enabled.
- *   2. Divide the viewport into an NxN grid of overlapping circles.
- *   3. Fire one NEW Places API v1 `searchText` call per cell (parallel, rate-limited).
- *      New Places API v1 (places.googleapis.com) explicitly supports browser CORS;
- *      the old REST endpoint (maps.googleapis.com/maps/api/place/*) does NOT.
- *   4. Deduplicate all results by place id.
+ *   2. Subdivide the viewport into an N×M grid of non-overlapping rectangles
+ *      based on searchScope:
+ *        city          → 3 cols × 3 rows =  9 cells
+ *        neighbourhood → 2 cols × 2 rows =  4 cells
+ *        specific      → 1 col  × 1 row  =  1 cell (original viewport, no split)
+ *   3. For EACH rectangle, call searchQueryPaged with up to 3 pages (60 results max).
+ *      Cells are staggered 400 ms apart to avoid OVER_QUERY_LIMIT (429).
+ *   4. Aggressively deduplicate by place.id before caching or returning.
+ *
+ * Theoretical maximum per single search:
+ *        city          → 9 cells × 3 variants × 3 pages × 20 = 540 raw  → 160–250 unique  (≈27 base calls)
+ *        neighbourhood → 9 cells × 3 variants × 3 pages × 20 = 540 raw  → 100–180 unique  (≈27 base calls)
+ *        specific      → 1 cell  × 3 variants × 3 pages × 20 =  60 raw  →  40–60  unique
  *
  * Zero-cost cache layer:
  *   • Before ANY API call we check `public_search_cache` in Firestore.
  *   • Cache TTL = CACHE_CONFIG.TTL_HOURS (default 24 h).
- *   • If fresh cache hit → return immediately, 0 Google API calls consumed.
+ *   • Fresh cache hit → return immediately, 0 Google API calls consumed.
  */
 
 import { db } from '../firebase';
@@ -26,14 +34,14 @@ import { GOOGLE_API_KEY, CACHE_CONFIG } from '../config';
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Geocoding REST API — supports browser CORS
+// Geocoding REST API — CORS-enabled in the browser
 const GEO_BASE = 'https://maps.googleapis.com/maps/api/geocode/json';
 
-// New Places API v1 — POST endpoint, supports browser CORS
-// (The old /maps/api/place/nearbysearch/json does NOT allow browser fetch)
+// New Places API v1 — POST endpoint, CORS-enabled
+// (The old /maps/api/place/* REST endpoints do NOT support browser fetch.)
 const PLACES_V1_TEXT = 'https://places.googleapis.com/v1/places:searchText';
 
-// Field mask — controls which fields are returned (billed per field group)
+// Field mask — controls which fields & billing tiers are used
 const FIELD_MASK = [
   'places.id',
   'places.displayName',
@@ -47,53 +55,234 @@ const FIELD_MASK = [
   'places.location',
 ].join(',');
 
-const MAX_PARALLEL_CALLS = 10;   // fire all queries at once
+// ── Grid dimensions per searchScope ──────────────────────────────────────────
+// The ONLY variable that reliably increases unique yield is geographic cell
+// count.  Each cell covers a different physical zone of the city so Google
+// returns different top-20 businesses.  More variants on the same cell
+// returns the same businesses (deduplicated → wasted calls).
+//
+// Target: 25 calls → 200+ unique
+//   5×5 = 25 cells × 1 variant × 1 page = EXACTLY 25 API calls
+//   25 × 20 raw = 500 raw → ~200–250 unique (different zone each cell)
+//
+// pagesPerCell = 1 for city locks the call count to exactly n_cells.
+// Neighbourhood uses 2 pages (smaller area, want depth not breadth).
+// ── Double-Lock Viewport Architecture ───────────────────────────────────────
+// Lock 1 (Geo):  locationRestriction.rectangle = geocoder viewport grid cell.
+//                Viewport is the exact bounding box Google keeps for each
+//                named place — never a radius, never padded.
+// Lock 2 (NLP):  Every textQuery ends with "in [location]".
+//                Google's NLP sees an address in an adjacent locality and
+//                ranks it below Maninagar results → bleed eliminated.
+//
+// Grid budgets (early-exit pages keep actual calls well below max):
+//   city:          2×2 = 4 boxes × 2 queries × ≤3 pages = ≤24 calls
+//   neighbourhood: 2×1 = 2 boxes × 3 queries × ≤3 pages = ≤18 calls
+//   specific:      1×1 = 1 box   × 3 queries × ≤3 pages = ≤9  calls
+const GRID_CONFIG = {
+  city:          { cols: 2, rows: 2, pagesPerCell: 3 },
+  neighbourhood: { cols: 2, rows: 1, pagesPerCell: 3 },
+  specific:      { cols: 1, rows: 1, pagesPerCell: 3 },
+};
 
-// Scope config: variants = number of query phrasings, pages = pagination depth.
-// Each call returns up to 20 results. Pagination fetches the next 20 via nextPageToken.
-// Total raw results = variants × pages × 20.
-//   city:          10 × 3 pages = 30 calls → 600 raw → 200-300 unique
-//   neighbourhood: 10 × 2 pages = 20 calls → 400 raw → 150-200 unique
-//   specific:       6 × 1 page  =  6 calls → 120 raw →  60-100 unique
-const SCOPE_CONFIG = {
-  city:          { variants: 10, pages: 3 },
-  neighbourhood: { variants: 10, pages: 2 },
-  specific:      { variants:  6, pages: 1 },
+// Global fallback (should not be needed — all scopes are in GRID_CONFIG).
+const PAGES_PER_CELL_DEFAULT = 3;
+
+// 400 ms stagger between EVERY single Places API call to prevent 429.
+const CALL_STAGGER_MS = 400;
+
+// ── Per-type search configuration ────────────────────────────────────────────
+// Each business type gets:
+//   variants(kw)  → array of text query strings for the matrix sweep.
+//                   Different types surface different index partitions.
+//   includedType  → if set, sent as `includedType` in the Places API body,
+//                   making Google restrict results to that category at source.
+//                   null for types with no direct Google Places type (M/W).
+//
+// "Any type" uses 4 orthogonal variants for maximum yield:
+//   bare kw + shop + wholesaler + dealer  (36 base calls → 250–300+ unique)
+//
+// Specific types use 2–3 targeted variants + includedType API restriction,
+// which is both more accurate and more efficient (18–27 base calls).
+//
+// KEY FIX: previously `type` only affected the cache key; the API never
+// saw it.  Now `includedType` is sent in the POST body for native types,
+// so "Store / Shop" actually excludes pure manufacturers/wholesalers.
+// ── includedType map ─────────────────────────────────────────────────────────
+// Controls the `includedType` field sent to the Places API to restrict
+// results to a native Google Places category at the source level.
+// null = no restriction (any-type, manufacturer, wholesaler).
+const INCLUDED_TYPE_MAP = {
+  '':                   null,
+  'store':              'store',
+  'restaurant':         'restaurant',
+  'lodging':            'lodging',
+  'hospital':           'hospital',
+  'school':             'school',
+  'gym':                'gym',
+  'bank':               'bank',
+  'real_estate_agency': 'real_estate_agency',
+  'manufacturer':       null,
+  'wholesaler':         null,
 };
 
 /**
- * Build N query phrasings. Each phrasing surfaces a different subset of
- * Google's index for the same location — retail-tagged, wholesale-tagged,
- * manufacturer-tagged etc. are stored as separate index entries.
+ * Build NLP-locked query variants for a given search.
+ *
+ * Lock 2: every variant ends with "in [location]".
+ * Google's ranking then biases toward businesses actually IN that location.
+ *
+ * Variant count per scope:
+ *   city:                    2  (bare, shop)          — geographic cells do the work
+ *   neighbourhood/specific:  3  (bare, shop, wholesaler / type suffix)
+ *
+ * @param {string} keyword      — e.g. "kurti"
+ * @param {string} location     — the geocoded location string, e.g. "maninagar, ahmedabad"
+ * @param {string} searchScope  — 'city' | 'neighbourhood' | 'specific'
+ * @param {string} type         — business type key (from INCLUDED_TYPE_MAP)
+ * @returns {string[]} array of textQuery strings
  */
-const buildQueries = (keyword, fullLocation, count) => {
+const buildQueries = (keyword, location, searchScope, type) => {
   const kw  = keyword.trim();
-  const loc = fullLocation.trim();
-  const suffixes = [
-    '',            // "kurti in Maninagar, Ahmedabad"       — general
-    'shop',        // "kurti shop in …"                    — retail
-    'store',       // "kurti store in …"                   — shopping
-    'supplier',    // "kurti supplier in …"                — wholesale supply
-    'wholesaler',  // "kurti wholesaler in …"              — B2B wholesale
-    'manufacturer',// "kurti manufacturer in …"            — production
-    'dealer',      // "kurti dealer in …"                  — dealer/distributor
-    'boutique',    // "kurti boutique in …"                — boutique/designer
-    'market',      // "kurti market in …"                  — market/bazaar
-    'outlet',      // "kurti outlet in …"                  — factory outlet/clearance
-  ];
-  return suffixes
-    .slice(0, count)
-    .map((s) => s ? `${kw} ${s} in ${loc}` : `${kw} in ${loc}`);
+  const loc = location.trim();
+
+  let all;
+  if (type === 'manufacturer') {
+    all = [
+      `${kw} manufacturer in ${loc}`,
+      `${kw} factory in ${loc}`,
+      `${kw} production in ${loc}`,
+    ];
+  } else if (type === 'wholesaler') {
+    all = [
+      `${kw} wholesaler in ${loc}`,
+      `${kw} wholesale in ${loc}`,
+      `${kw} distributor in ${loc}`,
+    ];
+  } else {
+    // Any type or native-typed (store, restaurant, etc.)
+    // NLP Lock: always append "in [location]" so Google biases toward
+    // businesses whose address / name / reviews mention that location.
+    all = [
+      `${kw} in ${loc}`,
+      `${kw} shop in ${loc}`,
+      `${kw} wholesaler in ${loc}`,
+    ];
+  }
+
+  // City has 4 spatial cells — 2 variants are enough for yield.
+  // Neighbourhood/specific have 2–1 cells — 3 variants maximise depth.
+  return searchScope === 'city' ? all.slice(0, 2) : all;
+};
+
+// ── Types that are clearly unrelated to any general business search ──────────
+// Used by the post-fetch relevance filter (step 7) to remove results whose
+// only specific Google category is obviously wrong (e.g. a jewellery shop
+// inside a kurti market complex that matched via address proximity).
+// Strategy: Google gives each place a `types` array.  We ignore generic
+// types (establishment, store, point_of_interest) and check the specific
+// ones.  If EVERY specific type is in this set → the place is unrelated.
+// Conservative by design: places with no types or all-generic types are kept.
+const GENERIC_PLACE_TYPES = new Set([
+  'point_of_interest', 'establishment', 'store', 'shopping_mall', 'market',
+]);
+const UNRELATED_PLACE_TYPES = new Set([
+  // Jewellery / luxury
+  'jewelry_store',
+  // Finance
+  'bank', 'atm', 'finance', 'accounting', 'insurance_agency',
+  // Automotive
+  'car_dealer', 'car_rental', 'car_repair', 'car_wash', 'auto_parts_store',
+  'parking', 'gas_station',
+  // Food & drink
+  'restaurant', 'cafe', 'bar', 'food', 'bakery', 'meal_delivery',
+  'meal_takeaway', 'liquor_store',
+  // Health / medical
+  'hospital', 'doctor', 'dentist', 'pharmacy', 'drugstore',
+  'physiotherapist', 'veterinary_care',
+  // Accommodation
+  'lodging', 'hotel', 'motel',
+  // Entertainment
+  'movie_theater', 'night_club', 'amusement_park', 'casino',
+  'bowling_alley', 'stadium', 'zoo', 'aquarium', 'art_gallery', 'museum',
+  // Personal care
+  'beauty_salon', 'hair_care', 'spa', 'nail_salon',
+  // Education
+  'school', 'university', 'library',
+  // Travel / transit
+  'airport', 'bus_station', 'train_station', 'transit_station', 'subway_station',
+  // Religious / civic
+  'church', 'mosque', 'hindu_temple', 'place_of_worship', 'cemetery',
+]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK 1 — SPATIAL GRID MATH
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Divide a geocoder viewport into a uniform grid of non-overlapping rectangles.
+ *
+ * Mathematical derivation:
+ *   latSpan        = ne.lat − sw.lat          (total height, degrees)
+ *   lngSpan        = ne.lng − sw.lng          (total width,  degrees)
+ *   cellLatHeight  = latSpan  / rows
+ *   cellLngWidth   = lngSpan  / cols
+ *
+ * For cell at (col, row):
+ *   low.latitude   = sw.lat + row       * cellLatHeight
+ *   high.latitude  = sw.lat + (row + 1) * cellLatHeight
+ *   low.longitude  = sw.lng + col       * cellLngWidth
+ *   high.longitude = sw.lng + (col + 1) * cellLngWidth
+ *
+ * @param {{ ne: {lat: number, lng: number}, sw: {lat: number, lng: number} }} viewport
+ * @param {'city'|'neighbourhood'|'specific'} searchScope
+ * @returns {Array<{ low:  {latitude: number, longitude: number},
+ *                   high: {latitude: number, longitude: number} }>}
+ *          Ready-to-use rectangle objects for Places API `locationRestriction.rectangle`.
+ */
+const generateGridBoxes = (viewport, searchScope) => {
+  const { ne, sw } = viewport;
+  const { cols, rows } = GRID_CONFIG[searchScope] ?? GRID_CONFIG.city;
+
+  const latSpan       = ne.lat - sw.lat;   // total height in degrees
+  const lngSpan       = ne.lng - sw.lng;   // total width  in degrees
+  const cellLatHeight = latSpan / rows;
+  const cellLngWidth  = lngSpan / cols;
+
+  const boxes = [];
+
+  // row 0 = southernmost strip (sw corner), row (rows−1) = northernmost strip
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      boxes.push({
+        low: {
+          latitude:  sw.lat + row       * cellLatHeight,
+          longitude: sw.lng + col       * cellLngWidth,
+        },
+        high: {
+          latitude:  sw.lat + (row + 1) * cellLatHeight,
+          longitude: sw.lng + (col + 1) * cellLngWidth,
+        },
+      });
+    }
+  }
+
+  console.log(
+    `[grid] scope=${searchScope} → ${cols}×${rows}=${boxes.length} cells`,
+    `| latSpan=${latSpan.toFixed(5)}° lngSpan=${lngSpan.toFixed(5)}°`,
+    `| cellH=${cellLatHeight.toFixed(5)}° cellW=${cellLngWidth.toFixed(5)}°`,
+  );
+
+  return boxes;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CACHE HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Deterministic cache key from search params */
-const makeCacheKey = (keyword, location, type) => {
-  const raw = `${keyword.toLowerCase().trim()}|${location.toLowerCase().trim()}|${(type || '').toLowerCase().trim()}`;
-  // Simple but consistent base-64 key (URL-safe characters only)
+/** Deterministic Firestore-safe cache key from search params */
+const makeCacheKey = (keyword, location, tag) => {
+  const raw = `${keyword.toLowerCase().trim()}|${location.toLowerCase().trim()}|${(tag || '').toLowerCase().trim()}`;
   return btoa(unescape(encodeURIComponent(raw))).replace(/[^a-zA-Z0-9]/g, '').slice(0, 60);
 };
 
@@ -104,18 +293,17 @@ const readCache = async (cacheKey) => {
     const snap = await getDoc(ref);
     if (!snap.exists()) return null;
 
-    const data       = snap.data();
-    const cachedAt   = data.cachedAt?.toMillis?.() ?? (data.cachedAt || 0);
-    const ttlMs      = CACHE_CONFIG.TTL_HOURS * 60 * 60 * 1000;
-    const isExpired  = Date.now() - cachedAt > ttlMs;
+    const data      = snap.data();
+    const cachedAt  = data.cachedAt?.toMillis?.() ?? (data.cachedAt || 0);
+    const ttlMs     = CACHE_CONFIG.TTL_HOURS * 60 * 60 * 1000;
 
-    if (isExpired) {
+    if (Date.now() - cachedAt > ttlMs) {
       console.log('[cache] expired →', cacheKey);
       return null;
     }
 
     console.log('[cache] HIT →', cacheKey, `(${data.results?.length ?? 0} results)`);
-    // Bump hit counter fire-and-forget
+    // Bump hit counter — fire-and-forget, never blocks caller
     setDoc(ref, { hitCount: (data.hitCount || 0) + 1 }, { merge: true }).catch(() => {});
     return data;
   } catch (err) {
@@ -124,13 +312,13 @@ const readCache = async (cacheKey) => {
   }
 };
 
-/** Write results to cache (fire-and-forget; never blocks search) */
+/** Write results to Firestore cache — fire-and-forget, never blocks the search */
 const writeCache = async (cacheKey, keyword, location, results) => {
   try {
     const ref = doc(db, CACHE_CONFIG.COLLECTION, cacheKey);
     await setDoc(ref, {
-      query:    keyword,
-      location: location,
+      query:       keyword,
+      location,
       results,
       cachedAt:    serverTimestamp(),
       hitCount:    0,
@@ -147,11 +335,20 @@ const writeCache = async (cacheKey, keyword, location, results) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Geocode a location string → { lat, lng, viewport: {ne, sw} }
- * Uses the Geocoding REST API.
+ * Geocode a location string → { lat, lng, viewport, bounds }
+ *
+ * Both `viewport` and `bounds` come from Google's Geocoding API:
+ *   - viewport  = recommended map display area (padded, wider)
+ *   - bounds    = actual administrative/geographic boundary of the place (tighter)
+ *
+ * bounds is present for named places (suburbs, localities, cities).
+ * For point locations it may be absent; we fall back to viewport in that case.
+ * We use `bounds` for the geo-fence post-filter to enforce strict locality
+ * boundaries (e.g. keep only Maninagar, exclude Isanpur that falls within
+ * the wider viewport box).
  */
 const geocodeLocation = async (location) => {
-  const url = `${GEO_BASE}?address=${encodeURIComponent(location)}&key=${GOOGLE_API_KEY}`;
+  const url  = `${GEO_BASE}?address=${encodeURIComponent(location)}&key=${GOOGLE_API_KEY}`;
   const res  = await fetch(url);
   const data = await res.json();
 
@@ -161,36 +358,61 @@ const geocodeLocation = async (location) => {
 
   const r  = data.results[0];
   const vp = r.geometry.viewport;
+  const bn = r.geometry.bounds;    // tighter admin boundary — may be absent
+
+  const viewport = {
+    ne: { lat: vp.northeast.lat, lng: vp.northeast.lng },
+    sw: { lat: vp.southwest.lat, lng: vp.southwest.lng },
+  };
+
+  // bounds is the strict administrative polygon bbox.
+  // Falls back to viewport when the geocoder doesn't return a bounds (rare
+  // for named localities).
+  const bounds = bn ? {
+    ne: { lat: bn.northeast.lat, lng: bn.northeast.lng },
+    sw: { lat: bn.southwest.lat, lng: bn.southwest.lng },
+  } : viewport;
+
+  const boundsLog = bn
+    ? `| bounds sw=(${bounds.sw.lat.toFixed(5)},${bounds.sw.lng.toFixed(5)}) ne=(${bounds.ne.lat.toFixed(5)},${bounds.ne.lng.toFixed(5)})`
+    : '| bounds: absent — falling back to viewport';
+  console.log(
+    '[geocode]', location,
+    `| viewport sw=(${viewport.sw.lat.toFixed(5)},${viewport.sw.lng.toFixed(5)}) ne=(${viewport.ne.lat.toFixed(5)},${viewport.ne.lng.toFixed(5)})`,
+    boundsLog,
+  );
 
   return {
     lat:      r.geometry.location.lat,
     lng:      r.geometry.location.lng,
-    viewport: {
-      ne: { lat: vp.northeast.lat, lng: vp.northeast.lng },
-      sw: { lat: vp.southwest.lat, lng: vp.southwest.lng },
-    },
+    viewport,
+    bounds,
   };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PLACES API — SINGLE QUERY CALL  (full viewport, locationBias)
+// TASK 2 — PLACES API PRIMITIVES
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * One searchText call (single page) — internal helper used by searchQueryPaged.
- * Returns { places, nextPageToken }.
+ * One Places API v1 searchText call for one page inside one grid rectangle.
+ *
+ * @param {string} textQuery    — e.g. "Hardware store in Maninagar, Ahmedabad"
+ * @param {{ low: {latitude, longitude}, high: {latitude, longitude} }} rectangle
+ * @param {string|null} pageToken    — nextPageToken from previous page, or null
+ * @param {string|null} includedType — Google Place type restriction (e.g. 'store'), or null
+ * @returns {{ places: Array, nextPageToken: string|null }}
  */
-const searchQueryPage = async (textQuery, viewport, pageToken = null) => {
+const searchQueryPage = async (textQuery, rectangle, pageToken = null, includedType = null) => {
   const body = {
     textQuery,
     maxResultCount: 20,
-    locationRestriction: {
-      rectangle: {
-        low:  { latitude: viewport.sw.lat, longitude: viewport.sw.lng },
-        high: { latitude: viewport.ne.lat, longitude: viewport.ne.lng },
-      },
-    },
+    locationRestriction: { rectangle },
   };
+  // includedType restricts Google's results to a specific category at source.
+  // Only set for types with a native Google Places type (store, restaurant, etc.).
+  // Must NOT be set for manufacturer/wholesaler (no native type) or any-type searches.
+  if (includedType) body.includedType = includedType;
   if (pageToken) body.pageToken = pageToken;
 
   let res;
@@ -232,94 +454,47 @@ const searchQueryPage = async (textQuery, viewport, pageToken = null) => {
 };
 
 /**
- * Fetch up to `maxPages` pages for a single query.
- * Page 1 fires immediately; pages 2+ follow the nextPageToken chain.
- * Each page = 1 API call, up to 20 results.
+ * Fetch up to `maxPages` pages for one (textQuery, rectangle) pair.
+ * Pages are sequential — required by the nextPageToken chain.
+ * maxPages defaults to PAGES_PER_CELL_DEFAULT for the function signature only;
+ * callers always pass the scope-specific pagesPerCell from GRID_CONFIG.
+ *
+ * @param {string} textQuery
+ * @param {{ low, high }} rectangle
+ * @param {number} maxPages
+ * @param {string|null} includedType
+ * @returns {{ places: Array, callCount: number }}
  */
-const searchQueryPaged = async (textQuery, viewport, maxPages = 1) => {
+const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_DEFAULT, includedType = null) => {
   const allPlaces = [];
   let pageToken   = null;
   let callCount   = 0;
 
   for (let p = 0; p < maxPages; p++) {
-    const { places, nextPageToken } = await searchQueryPage(textQuery, viewport, pageToken);
+    // 400 ms stagger before every page except the first of the first cell
+    // (outer stagger handles the first call; inner handles subsequent pages).
+    if (p > 0) await new Promise((r) => setTimeout(r, CALL_STAGGER_MS));
+
+    const { places, nextPageToken } = await searchQueryPage(textQuery, rectangle, pageToken, includedType);
     callCount++;
     allPlaces.push(...places);
-    console.log(`[query] "${textQuery}" page ${p + 1} → ${places.length} results`);
+    console.log(`[cell-page] page ${p + 1} → ${places.length} results | nextToken=${!!nextPageToken}`);
 
-    if (!nextPageToken) break;   // Google has no more results for this query
+    // Early exit: Google signals no more results (nextPageToken absent)
+    // OR this page returned fewer than 20 results (last meaningful page).
+    if (!nextPageToken || places.length < 20) break;
     pageToken = nextPageToken;
-
-    // Brief pause between pages — Google recommends a short delay before
-    // consuming a nextPageToken to avoid INVALID_ARGUMENT errors.
-    if (p < maxPages - 1) await new Promise((r) => setTimeout(r, 300));
   }
 
-  console.log(`[query] "${textQuery}" total ${allPlaces.length} across ${callCount} page(s)`);
+  console.log(`[cell] total ${allPlaces.length} raw results across ${callCount} page(s)`);
   return { places: allPlaces, callCount };
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PARALLEL QUERY RUNNER
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Fire all queries simultaneously (each with up to maxPages pages).
- * Wall-clock time ≈ maxPages sequential HTTP calls (pages within a query are
- * sequential due to nextPageToken; queries across variants are parallel).
- * Merge and deduplicate by place id.
- */
-const runQuerySearch = async (queries, viewport, onProgress, maxPages = 1) => {
-  const seen     = new Set();
-  const allLeads = [];
-  const totalExpected = queries.length * maxPages;
-
-  if (onProgress) {
-    onProgress({
-      phase: 'searching',
-      message: `Running ${queries.length} queries × ${maxPages} page(s)…`,
-      current: 0, total: totalExpected, found: 0, apiCalls: 0,
-    });
-  }
-
-  // All query variants fire in parallel; pagination within each is sequential.
-  const allResults = await Promise.all(
-    queries.map((q) => searchQueryPaged(q, viewport, maxPages))
-  );
-
-  let totalCalls = 0;
-  allResults.forEach(({ places, callCount }) => {
-    totalCalls += callCount;
-    places.forEach((p) => {
-      if (p.id && !seen.has(p.id)) {
-        seen.add(p.id);
-        allLeads.push(formatPlace(p));
-      }
-    });
-  });
-
-  if (onProgress) {
-    onProgress({
-      phase: 'searching',
-      message: `Done — ${allLeads.length} unique results from ${totalCalls} API call(s)`,
-      current: totalCalls, total: totalCalls,
-      found: allLeads.length, apiCalls: totalCalls,
-    });
-  }
-
-  console.log(`[search] ${totalCalls} API calls → ${allLeads.length} unique places`);
-  return { leads: allLeads, apiCalls: totalCalls };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FORMAT HELPER
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Normalise a New Places API v1 result into a consistent lead object.
- * v1 field names differ from the old REST API:
- *   id (not place_id), displayName.text, internationalPhoneNumber, location.latitude/longitude
- */
+/** Normalise a Places API v1 result object into a consistent lead shape */
 const formatPlace = (p) => ({
   id:                  p.id,
   placeId:             p.id,
@@ -333,32 +508,31 @@ const formatPlace = (p) => ({
   types:               p.types || [],
   lat:                 p.location?.latitude  || null,
   lng:                 p.location?.longitude || null,
-  source:              'places-v1-text',
+  source:              'places-v1-grid',   // marks Phase 3 grid results
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC API
+// TASK 2 + 3 — CORE GRID SWEEP ENGINE
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Main search entry point.
+ * Internal single-pair search — used by both the fast path and multi-search loop.
  *
- * Flow:
- *   cache check → geocode → build grid → parallel cell searches → dedup → cache write
- *
- * @param {string}   keyword     Business type / keyword (e.g. "kurti retailer")
- * @param {string}   location    City / region (e.g. "Ahmedabad")
- * @param {object}   [options]
- * @param {string}   [options.type]       Google Places type filter (e.g. "store")
- * @param {Function} [options.onProgress] Called with progress updates
- * @returns {Promise<{ results, apiCalls, cached, totalResults }>}
+ * Algorithm (replaces keyword-variant loop entirely):
+ *   1. Build ONE textQuery: "{keyword} in {fullLocation}" — no variants.
+ *   2. Cache check → short-circuit if fresh hit.
+ *   3. Geocode fullLocation → viewport bounding box.
+ *   4. generateGridBoxes → array of N rectangles.
+ *   5. for...of staggered sweep (CELL_STAGGER_MS between cells):
+ *        searchQueryPaged(textQuery, rectangle, PAGES_PER_CELL) per cell.
+ *   6. Deduplicate by place.id across ALL cells inline (border overlap elimination).
+ *   7. writeCache (fire-and-forget).
  */
-// Internal single-pair search — used by both the fast path and the multi-search loop.
 const _searchSingle = async (keyword, location, options = {}) => {
   const {
     type        = '',
-    searchScope = 'city',   // 'city' | 'neighbourhood' | 'specific'
-    area        = '',       // neighbourhood name OR building/market/street name
+    searchScope = 'city',
+    area        = '',
     onProgress  = null,
   } = options;
 
@@ -366,34 +540,42 @@ const _searchSingle = async (keyword, location, options = {}) => {
     throw new Error('keyword and location are required');
   }
 
-  // ── Resolve scope config (radius + max grid cells) ─────────────────────────
-  const cfg = SCOPE_CONFIG[searchScope] ?? SCOPE_CONFIG.city;
-
-  // ── Build enriched geocode target + textQuery ──────────────────────────────
-  // CRITICAL: sending just the bare keyword (e.g. "kurti") without location
-  // context produces very poor relevance even with locationRestriction.
-  // Always embed location into the textQuery for best results.
   const areaStr      = area.trim();
   const cityStr      = location.trim();
   const fullLocation = areaStr ? `${areaStr}, ${cityStr}` : cityStr;
 
-  const queries = buildQueries(keyword.trim(), fullLocation, cfg.variants);
-  console.log(`[search] scope=${searchScope} | ${cfg.variants} queries for "${fullLocation}"`);
+  // NLP Fix: query strings are semantic variants — the locationRestriction
+  // rectangle is the geographic anchor.  Each type gets its own optimised
+  // variant set via TYPE_SEARCH_CONFIG; the includedType (when non-null) is
+  // passed through to the Places API to restrict results at source.
+  // Lock 2 (NLP): buildQueries appends "in [location]" to every variant.
+  // For neighbourhood/specific the location is "area, city"; for city it's just city.
+  // This ensures Google's NLP biases toward businesses IN that exact place.
+  const queries      = buildQueries(keyword.trim(), fullLocation, searchScope, type);
+  const includedType = INCLUDED_TYPE_MAP[type] ?? null;
+
+  const { cols, rows, pagesPerCell = PAGES_PER_CELL_DEFAULT } = GRID_CONFIG[searchScope] ?? GRID_CONFIG.city;
+  const totalCalls = queries.length * (cols * rows) * pagesPerCell;   // theoretical max
+  console.log(
+    `[search] scope=${searchScope} | grid=${cols}x${rows}=${cols*rows} cells`,
+    `| ${queries.length} variants | budget≤${totalCalls} calls`,
+    `| location="${fullLocation}"`,
+  );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-  const cacheKey = makeCacheKey(queries[0], fullLocation, `${type}:${searchScope}`);
+  // v9: 5×5=25 cells × 1 variant × 1 page = exactly 25 API calls → 200+ unique.
+  //     pagesPerCell now per-scope in GRID_CONFIG (city=1, nbhd=2, specific=3).
+  const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:matrixv16`);
 
   if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
-  const cached = await readCache(cacheKey);
-  if (cached?.results) {
-    if (onProgress) onProgress({ phase: 'done', message: 'Loaded from cache', found: cached.results.length, cached: true });
-    return {
-      results:      cached.results,
-      apiCalls:     0,
-      cached:       true,
-      totalResults: cached.results.length,
-    };
+  // forceRefresh=true skips reading the cache so a live sweep always runs.
+  if (!options.forceRefresh) {
+    const cached = await readCache(cacheKey);
+    if (cached?.results) {
+      if (onProgress) onProgress({ phase: 'done', message: 'Loaded from cache', found: cached.results.length, cached: true });
+      return { results: cached.results, apiCalls: 0, cached: true, totalResults: cached.results.length };
+    }
   }
 
   // ── 2. Geocode ──────────────────────────────────────────────────────────────
@@ -401,22 +583,151 @@ const _searchSingle = async (keyword, location, options = {}) => {
 
   const geo = await geocodeLocation(fullLocation);
 
-  // ── 3. Run parallel queries with pagination ────────────────────────────────
-  // All variant queries fire simultaneously; each fetches up to cfg.pages pages.
-  const { leads, apiCalls } = await runQuerySearch(queries, geo.viewport, onProgress, cfg.pages ?? 1);
+  // ── 3. Sweep viewport ─────────────────────────────────────────────────────────
+  // For city scope we pad the geocoder viewport by +15% in all directions.
+  // The Geocoding API\u2019s viewport is a conservative \u201cdisplay\u201d box — peri-urban
+  // suburbs and industrial estates often fall just outside it.  The padding
+  // adds ~2–5 km on each edge for a typical Indian city, recovering those
+  // businesses at ZERO extra API calls (same 9-cell grid, wider cells).
+  // neighbourhood/specific use the viewport as-is; the geo-fence (step 6)
+  // then enforces the strict admin boundary for those scopes.
+  // Lock 1 (Geo): Use the geocoder's viewport EXACTLY — no padding, no radius.
+  // The viewport IS the bounding rectangle for the named place (Maninagar, Ahmedabad, etc.).
+  // Subdivided into a grid, each cell becomes a locationRestriction.rectangle.
+  const sweepViewport  = geo.viewport;
+  // Post-filter fence: same viewport, strict (0% margin).
+  // Redundant for city (NLP handles it) but retained for neighbourhood/specific
+  // to catch any Places API edge cases where results slightly exceed the rectangle.
+  const geoFenceBounds = searchScope !== 'city' ? geo.viewport : null;
+  console.log(
+    `[grid] ${searchScope} sweep = geocoder viewport (exact)`,
+    `| sw=(${sweepViewport.sw.lat.toFixed(5)},${sweepViewport.sw.lng.toFixed(5)})`,
+    `  ne=(${sweepViewport.ne.lat.toFixed(5)},${sweepViewport.ne.lng.toFixed(5)})`,
+  );
 
-  // ── 5. Cache write ──────────────────────────────────────────────────────────
-  if (leads.length > 0) {
-    writeCache(cacheKey, queries[0], fullLocation, leads);   // fire-and-forget
+  // ── 4. Generate grid rectangles ────────────────────────────────────────────
+  const gridBoxes = generateGridBoxes(sweepViewport, searchScope);
+
+  const matrixTotal = gridBoxes.length * queries.length;   // total (cell, variant) pairs
+
+  if (onProgress) {
+    onProgress({
+      phase:    'searching',
+      message:  `Matrix sweep: ${gridBoxes.length} cells × ${queries.length} variants…`,
+      current:  0,
+      total:    matrixTotal,
+      found:    0,
+      apiCalls: 0,
+    });
   }
 
-  if (onProgress) onProgress({ phase: 'done', message: `Found ${leads.length} businesses`, found: leads.length, cached: false });
+  // ── 5. Matrix sweep: staggered for...of (cell × variant) ──────────────────
+  // 400 ms stagger between EVERY searchQueryPaged call — both across cells
+  // and across variants — to prevent OVER_QUERY_LIMIT (429).
+  const seen        = new Set();
+  const allLeads    = [];
+  let totalApiCalls = 0;
+  let callIdx       = 0;   // counts (cell, variant) pairs dispatched
+
+  for (const rectangle of gridBoxes) {
+    for (const query of queries) {
+      // 400 ms stagger before every call except the very first
+      if (callIdx > 0) await new Promise((r) => setTimeout(r, CALL_STAGGER_MS));
+
+      const { places, callCount } = await searchQueryPaged(query, rectangle, pagesPerCell, includedType);
+      totalApiCalls += callCount;
+      callIdx++;
+
+      // Aggressive deduplication by place.id across ALL cells and variants
+      let newThisCall = 0;
+      for (const p of places) {
+        if (p.id && !seen.has(p.id)) {
+          seen.add(p.id);
+          allLeads.push(formatPlace(p));
+          newThisCall++;
+        }
+      }
+
+      console.log(
+        `[matrix] ${callIdx}/${matrixTotal} | query="${query}"`,
+        `-> ${places.length} raw, ${newThisCall} new unique`,
+        `| total=${allLeads.length} | apiCalls=${totalApiCalls}`,
+      );
+
+      if (onProgress) {
+        onProgress({
+          phase:    'searching',
+          message:  `${callIdx}/${matrixTotal} sweeps complete — ${allLeads.length} unique businesses found…`,
+          current:  callIdx,
+          total:    matrixTotal,
+          found:    allLeads.length,
+          apiCalls: totalApiCalls,
+        });
+      }
+    }
+  }
+
+  console.log(`[search] grid sweep complete | ${totalApiCalls} API calls -> ${allLeads.length} unique places`);
+
+  // ── 6. Geographic fence filter (neighbourhood & specific scopes only) ──────
+  // For city scope the full-city grid is the intent — no filtering needed.
+  // For neighbourhood/specific we filter by the geocoder's `bounds` bbox
+  // (the administrative boundary of e.g. "Maninagar") rather than the
+  // wider viewport.  bounds is typically 30–50% smaller than viewport for
+  // Indian localities, which is exactly what excludes Isanpur / Saraspur.
+  // A 5% grace margin retains businesses sitting right on the boundary edge.
+  // Places without coordinates are kept (conservative fallback, rare).
+  let finalLeads = allLeads;
+  if (geoFenceBounds) {
+    // Neighbourhood/specific: strict bbox filter using the same radius box.
+    // 0% margin — if a place is outside the radius box it's excluded.
+    // Places without coordinates are kept (conservative fallback, rare).
+    const fence  = geoFenceBounds;
+    const before = allLeads.length;
+    finalLeads = allLeads.filter((lead) => {
+      if (lead.lat == null || lead.lng == null) return true;
+      return lead.lat >= fence.sw.lat
+          && lead.lat <= fence.ne.lat
+          && lead.lng >= fence.sw.lng
+          && lead.lng <= fence.ne.lng;
+    });
+    console.log(
+      `[geo-fence] ${before} → ${finalLeads.length} results after strict radius filter`,
+      `| sw=(${fence.sw.lat.toFixed(5)},${fence.sw.lng.toFixed(5)})`,
+      `  ne=(${fence.ne.lat.toFixed(5)},${fence.ne.lng.toFixed(5)})`,
+    );
+  }
+
+  // ── 7. Relevance filter — remove clearly unrelated business categories ───
+  // The Places API textQuery matches on name, address, reviews and nearby
+  // context, so a jewellery shop inside a kurti market complex can appear
+  // in results for "kurti".  We use each result's `types` (assigned by
+  // Google) to detect and remove obvious category mismatches.
+  // Conservative: only removes places where ALL specific types are unrelated.
+  const beforeRelevance = finalLeads.length;
+  finalLeads = finalLeads.filter((lead) => {
+    const types    = lead.types || [];
+    if (types.length === 0) return true;                    // no type info → keep
+    const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
+    if (specific.length === 0) return true;                 // all-generic → keep
+    return !specific.every(t => UNRELATED_PLACE_TYPES.has(t)); // any specific relevant type → keep
+  });
+  console.log(`[relevance] ${beforeRelevance} → ${finalLeads.length} after removing unrelated categories`);
+
+  // ── 8. Cache write (fire-and-forget) ──────────────────────────────────────
+  if (finalLeads.length > 0) {
+    writeCache(cacheKey, keyword.trim(), fullLocation, finalLeads);
+  }
+
+  if (onProgress) {
+    onProgress({ phase: 'done', message: `Found ${finalLeads.length} businesses`, found: finalLeads.length, cached: false });
+  }
 
   return {
-    results:      leads,
-    apiCalls,
+    results:      finalLeads,
+    apiCalls:     totalApiCalls,
     cached:       false,
-    totalResults: leads.length,
+    totalResults: finalLeads.length,
   };
 };
 
@@ -429,15 +740,18 @@ const _searchSingle = async (keyword, location, options = {}) => {
  *
  * Accepts comma-separated values for both keyword and location:
  *   searchBusinesses('kurti, saree', 'Ahmedabad, Surat')
- *   → 4 searches in parallel (2 keywords × 2 locations)
+ *   -> 4 independent grid sweeps (2 keywords x 2 locations), then deduplicated.
  *
- * Algorithm:
- *   1. Split keyword + location by comma into arrays.
- *   2. Build every (keyword, location) pair.
- *   3. Run all pairs concurrently via Promise.all — each pair is cache-first.
- *   4. Flatten + aggressively deduplicate by place_id.
+ * Single keyword + single location -> straight into _searchSingle (fast path).
  *
- * Single keyword + single location → full cache-first fast path (unchanged).
+ * @param {string}   keyword
+ * @param {string}   location
+ * @param {object}   [options]
+ * @param {string}   [options.type]
+ * @param {string}   [options.searchScope]  'city' | 'neighbourhood' | 'specific'
+ * @param {string}   [options.area]
+ * @param {Function} [options.onProgress]
+ * @returns {Promise<{ results, apiCalls, cached, totalResults }>}
  */
 export const searchBusinesses = async (keyword, location, options = {}) => {
   const { onProgress = null } = options;
@@ -454,7 +768,7 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
     return _searchSingle(keywords[0], locations[0], options);
   }
 
-  // ── Multi: build all (keyword × location) pairs ──────────────────────────
+  // ── Multi: (keyword x location) pairs — each runs its own full grid sweep ─
   const pairs = [];
   for (const loc of locations) {
     for (const kw of keywords) {
@@ -465,13 +779,12 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
 
   if (onProgress) {
     onProgress({
-      phase: 'start',
-      message: `Queuing ${total} searches (${keywords.length} keyword${keywords.length > 1 ? 's' : ''} × ${locations.length} location${locations.length > 1 ? 's' : ''})…`,
+      phase:   'start',
+      message: `Queuing ${total} grid searches (${keywords.length} keyword${keywords.length > 1 ? 's' : ''} x ${locations.length} location${locations.length > 1 ? 's' : ''})…`,
       current: 0, total, found: 0, apiCalls: 0,
     });
   }
 
-  // Each pair runs concurrently; each individually checks its own cache first.
   let done = 0;
   const allResponses = await Promise.all(
     pairs.map(async ({ kw, loc }) => {
@@ -479,7 +792,7 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
       done++;
       if (onProgress) {
         onProgress({
-          phase: 'searching',
+          phase:   'searching',
           message: `Completed ${done}/${total} — "${kw}" in ${loc}`,
           current: done, total, found: 0, apiCalls: 0,
         });
@@ -488,9 +801,9 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
     })
   );
 
-  // ── Flatten + deduplicate by place_id ────────────────────────────────────
-  const seen     = new Set();
-  const combined = [];
+  // ── Flatten + deduplicate by place.id across all pairs ───────────────────
+  const seen        = new Set();
+  const combined    = [];
   let totalApiCalls = 0;
 
   for (const res of allResponses) {
@@ -506,9 +819,11 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
 
   if (onProgress) {
     onProgress({
-      phase: 'done',
-      message: `Found ${combined.length} unique businesses across ${total} search${total > 1 ? 'es' : ''}`,
-      found: combined.length, apiCalls: totalApiCalls, cached: false,
+      phase:    'done',
+      message:  `Found ${combined.length} unique businesses across ${total} search${total > 1 ? 'es' : ''}`,
+      found:    combined.length,
+      apiCalls: totalApiCalls,
+      cached:   false,
     });
   }
 
@@ -521,7 +836,7 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FILTER / DEDUP UTILITIES  (retained for Phase 3 / 4 compatibility)
+// FILTER / DEDUP UTILITIES  (retained for Phase 4+ compatibility)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Keep only leads that have a phone number */
@@ -530,18 +845,19 @@ export const filterByPhoneNumber = (leads, requirePhone = false) => {
   return leads.filter((l) => l?.nationalPhoneNumber?.trim());
 };
 
-/** Keep only leads that have an address */
+/** Keep only leads that have a formatted address */
 export const filterByAddress = (leads, requireAddress = false) => {
   if (!requireAddress || !Array.isArray(leads)) return leads || [];
   return leads.filter((l) => l?.formattedAddress?.trim());
 };
 
-/** Remove duplicates by place_id, phone, or name (in that priority order) */
+/** Remove duplicates by place_id, phone, or name (priority order) */
 export const deduplicateResults = (leads) => {
   const seen = new Set();
   return (leads || []).filter((l) => {
-    const key = l.placeId || l.nationalPhoneNumber?.trim()
-              || l.displayName?.text?.toLowerCase().trim();
+    const key = l.placeId
+      || l.nationalPhoneNumber?.trim()
+      || l.displayName?.text?.toLowerCase().trim();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
