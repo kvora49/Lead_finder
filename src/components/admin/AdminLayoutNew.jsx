@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 
 const AdminLayoutNew = () => {
-  const { adminUser, adminRole, isSuperAdmin } = useAdminAuth();
+  const { adminUser, adminRole, isSuperAdmin, canEditSettings } = useAdminAuth();
   const navigate = useNavigate();
 
   // Ghost mask — never expose the word "owner" in the UI
@@ -89,6 +89,9 @@ const AdminLayoutNew = () => {
       adminOnly: true
     }
   ];
+
+  // Gate Settings by canEditSettings (super_admin + owner only; admin cannot access)
+  const visibleMenuItems = menuItems.filter(item => !item.adminOnly || canEditSettings);
 
   const isActivePath = (path, exact = false) => {
     if (exact) {
@@ -208,9 +211,7 @@ const AdminLayoutNew = () => {
           sidebarOpen ? 'w-64' : 'w-20'
         }`}>
           <nav className="p-4 space-y-2">
-            {menuItems.map((item, idx) => {
-              if (item.adminOnly && !isSuperAdmin) return null;
-              
+            {visibleMenuItems.map((item, idx) => {
               const Icon = item.icon;
               const isActive = item.exact ? isActivePath(item.path, true) : isActivePath(item.path);
               
@@ -276,8 +277,8 @@ const AdminLayoutNew = () => {
             <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setMobileMenuOpen(false)}></div>
             <aside className="absolute left-0 top-0 bottom-0 w-64 bg-slate-900 border-r border-slate-700 overflow-y-auto">
               <nav className="p-4 space-y-2">
-                {menuItems.map((item, idx) => {
-                  if (item.adminOnly && !isSuperAdmin) return null;
+                {visibleMenuItems.map((item, idx) => {
+                  if (item.adminOnly && !canEditSettings) return null;
                   
                   const Icon = item.icon;
                   const isActive = item.exact ? isActivePath(item.path, true) : isActivePath(item.path);

@@ -13,18 +13,25 @@ import {
   Zap,
   Lock
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
 
 const SettingsNew = () => {
-  const { adminUser, adminRole, isSuperAdmin } = useAdminAuth();
-  // owner ⊃ super_admin — both tiers can edit settings
-  const canEdit = isSuperAdmin;
+  const navigate = useNavigate();
+  const { adminUser, adminRole, isSuperAdmin, canEditSettings } = useAdminAuth();
+  // canEditSettings = isSuperAdmin (owner + super_admin). Admin role cannot access.
+  const canEdit = canEditSettings;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState('general');
+
+  // Hard redirect: admin role cannot access settings at all (not even read-only)
+  useEffect(() => {
+    if (!loading && !canEditSettings) navigate('/admin/dashboard', { replace: true });
+  }, [loading, canEditSettings, navigate]);
   
   const [settings, setSettings] = useState({
     // General Settings

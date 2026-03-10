@@ -34,7 +34,10 @@ import {
   Lock,
   Inbox,
   MoreVertical,
+  Mail,
+  Loader2,
 } from 'lucide-react';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import {
   collection,
   getDocs,
@@ -213,6 +216,134 @@ const UserDetailModal = ({ user, onClose }) => (
   </div>
 );
 
+/* ─── Invite Admin Modal ─────────────────────────────────────────────────── */
+const InviteModal = ({ onClose, canPromoteToSuperAdmin }) => {
+  const [email,      setEmail]      = useState('');
+  const [role,       setRole]       = useState('admin');
+  const [loading,    setLoading]    = useState(false);
+  const [success,    setSuccess]    = useState(false);
+  const [emailSent,  setEmailSent]  = useState(true);
+  const [inviteUrl,  setInviteUrl]  = useState('');
+  const [copied,     setCopied]     = useState(false);
+  const [errMsg,     setErrMsg]     = useState('');
+
+  const handleSend = async () => {
+    if (!email.trim()) { setErrMsg('Email is required'); return; }
+    setLoading(true);
+    setErrMsg('');
+    try {
+      const fns = getFunctions();
+      const sendInvite = httpsCallable(fns, 'sendAdminInvite');
+      const result = await sendInvite({ email: email.trim(), role });
+      setEmailSent(result.data.emailSent !== false);
+      setInviteUrl(result.data.inviteUrl || '');
+      setSuccess(true);
+    } catch (err) {
+      setErrMsg(err?.message || 'Failed to send invite. Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(inviteUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-800 rounded-2xl max-w-md w-full border border-slate-700 shadow-2xl">
+        <div className="border-b border-slate-700 px-6 py-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-white font-semibold flex items-center gap-2">
+              <Mail className="w-4 h-4 text-indigo-400" />Invite Admin
+            </h3>
+            <p className="text-slate-400 text-xs mt-0.5">Send a 24-hour secure invite link via email</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700 transition-colors">
+            <XCircle className="w-5 h-5" />
+          </button>
+        </div>
+
+        {success ? (
+          <div className="p-6 text-center space-y-4">
+            <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto ${
+              emailSent ? 'bg-emerald-500/15 border border-emerald-500/30' : 'bg-amber-500/15 border border-amber-500/30'
+            }`}>
+              <CheckCircle className={`w-7 h-7 ${emailSent ? 'text-emerald-400' : 'text-amber-400'}`} />
+            </div>
+            <div>
+              <p className="text-white font-semibold">{emailSent ? 'Invite Sent!' : 'Invite Created'}</p>
+              <p className="text-slate-400 text-sm mt-1">
+                {emailSent
+                  ? <>A secure invite link was sent to <strong className="text-white">{email}</strong>. It expires in 24 hours.</>
+                  : <>SMTP is not configured. Share this invite link manually with <strong className="text-white">{email}</strong>:</>
+                }
+              </p>
+            </div>
+            {!emailSent && inviteUrl && (
+              <div className="text-left">
+                <div className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 flex items-center gap-2">
+                  <span className="text-indigo-300 text-xs break-all flex-1 select-all">{inviteUrl}</span>
+                  <button
+                    onClick={handleCopy}
+                    className="shrink-0 px-2 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs transition-colors"
+                  >
+                    {copied ? 'Copied!' : 'Copy'}
+                  </button>
+                </div>
+                <p className="text-amber-400/70 text-xs mt-2">To enable email delivery, set SMTP credentials in <code className="text-amber-300">functions/.env</code> and redeploy functions.</p>
+              </div>
+            )}
+            <button onClick={onClose} className="w-full py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-sm transition-colors">Done</button>
+          </div>
+        ) : (
+          <div className="p-6 space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-2">Recipient Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => { setEmail(e.target.value); setErrMsg(''); }}
+                placeholder="colleague@example.com"
+                className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-2">Role to Assign</label>
+              <select
+                value={role}
+                onChange={e => setRole(e.target.value)}
+                className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="admin">Admin</option>
+                {canPromoteToSuperAdmin && <option value="super_admin">Super Admin</option>}
+              </select>
+            </div>
+            {errMsg && <p className="text-red-400 text-xs">{errMsg}</p>}
+            <div className="flex gap-3 pt-1">
+              <button onClick={onClose} className="flex-1 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-sm transition-colors">Cancel</button>
+              <button
+                onClick={handleSend}
+                disabled={loading}
+                className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {loading
+                  ? <><Loader2 className="w-4 h-4 animate-spin" />Sending…</>
+                  : <><Mail className="w-4 h-4" />Send Invite</>}
+              </button>
+            </div>
+            <p className="text-xs text-slate-500 text-center">
+              The recipient receives a link that expires in 24 hours.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 /* ═══════════════════════════════════════════════════════════════════════════
    Main Component
    ═════════════════════════════════════════════════════════════════════════ */
@@ -222,7 +353,12 @@ const UserManagementNew = () => {
     adminUser,
     role: viewerRole,
     canManageUsers,
-    canPromoteToAdmin,
+    canBasicUserActions,
+    canDeleteUsers,
+    canChangeRoles,
+    canPromoteToSuperAdmin,
+    canManageCredits,
+    canApprovePending,
     isOwner: viewerIsOwner,
   } = useAdminAuth();
 
@@ -244,6 +380,7 @@ const UserManagementNew = () => {
   const [lastDoc,         setLastDoc]         = useState(null);
   const [hasMore,         setHasMore]         = useState(true);
   const [toast,           setToast]           = useState(null);
+  const [showInvite,      setShowInvite]      = useState(false);
   const usersPerPage = 20;
   const [userStats, setUserStats] = useState({ total: 0, active: 0, suspended: 0, unlimited: 0 });
 
@@ -407,14 +544,19 @@ const UserManagementNew = () => {
   const pageUsers = filteredUsers.slice(firstIdx, lastIdx);
   const totalPages = Math.ceil(filteredUsers.length / usersPerPage);
 
-  /* ── Ghost Owner row protection ──────────────────────────────────────── */
+  /* ── Row-level edit gate ──────────────────────────────────────────────── */
+  // Returns true only when the viewing admin is allowed to act on this row.
   const canEdit = (rowUser) => {
-    if (rowUser.role === 'owner' && !viewerIsOwner) return false; // Ghost protection
-    if (viewerRole === 'admin') {
-      // admin can only touch plain 'user' rows, and only to promote to 'admin'
-      return rowUser.role === 'user';
-    }
-    return true; // super_admin / owner: full edit
+    // Self-protection: NO admin (not even owner) can change their own role
+    if (rowUser.id === adminUser?.uid) return false;
+    // Ghost Owner protection — only real owner can touch owner rows
+    if (rowUser.role === 'owner' && !viewerIsOwner) return false;
+    // super_admin CANNOT edit other super_admin rows
+    // (owner rows are masked as Super Admin so this also covers ghost-owner protection)
+    if (rowUser.role === 'super_admin' && !viewerIsOwner) return false;
+    // admin can only act on plain 'user' rows (suspend/activate — no role changes)
+    if (viewerRole === 'admin') return rowUser.role === 'user';
+    return true; // owner: full edit on all other rows
   };
 
   /* ── Loading / error states ───────────────────────────────────────────── */
@@ -458,7 +600,7 @@ const UserManagementNew = () => {
           <h1 className="text-3xl font-bold text-white">User Management</h1>
           <p className="text-slate-400 mt-1 text-sm flex items-center gap-1.5">
             {viewerRole === 'admin' && (
-              <><Lock className="w-3.5 h-3.5 text-amber-400" /><span className="text-amber-400">Read-only view</span>&ensp;·&ensp;</>
+              <><Lock className="w-3.5 h-3.5 text-amber-400" /><span className="text-amber-400">Can suspend/activate users only</span>&ensp;·&ensp;</>
             )}
             {filteredUsers.length.toLocaleString()} users loaded
           </p>
@@ -468,9 +610,17 @@ const UserManagementNew = () => {
             <RefreshCw className="w-4 h-4" />
           </button>
           {canManageUsers && (
-            <button onClick={exportCsv} className="flex items-center gap-2 px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-600/30 rounded-xl text-sm font-medium transition-colors">
-              <Download className="w-4 h-4" />Export CSV
-            </button>
+            <>
+              <button
+                onClick={() => setShowInvite(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 border border-indigo-600/30 rounded-xl text-sm font-medium transition-colors"
+              >
+                <Mail className="w-4 h-4" />Invite Admin
+              </button>
+              <button onClick={exportCsv} className="flex items-center gap-2 px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-600/30 rounded-xl text-sm font-medium transition-colors">
+                <Download className="w-4 h-4" />Export CSV
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -493,8 +643,8 @@ const UserManagementNew = () => {
         ))}
       </div>
 
-      {/* ── Tab toggle — super_admin / owner only ────────────────────────── */}
-      {canManageUsers && (
+      {/* ── Tab toggle — super_admin / owner only (admin cannot approve admin requests) ── */}
+      {canApprovePending && (
         <div className="flex items-center gap-1 bg-slate-800/60 border border-slate-700/50 rounded-xl p-1 w-fit">
           <button
             onClick={() => setActiveTab('all')}
@@ -528,7 +678,7 @@ const UserManagementNew = () => {
       {/* ══════════════════════════════════════════════════════════════════
           PENDING REQUESTS TAB
          ══════════════════════════════════════════════════════════════════ */}
-      {activeTab === 'pending' && canManageUsers && (
+      {activeTab === 'pending' && canApprovePending && (
         <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden">
           <div className="px-6 py-4 border-b border-slate-700/50 flex items-center gap-3">
             <Inbox className="w-5 h-5 text-amber-400" />
@@ -640,6 +790,7 @@ const UserManagementNew = () => {
                         />
                       </th>
                     )}
+                    {/* spacer for admin view — no checkboxes */}
                     {['User', 'Role', 'Registered', 'Last Active', 'Credits', 'Limit', 'Status', 'Actions'].map(h => (
                       <th key={h} className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider whitespace-nowrap">{h}</th>
                     ))}
@@ -691,8 +842,11 @@ const UserManagementNew = () => {
                         </td>
 
                         {/* Role — Ghost masking + editable dropdown */}
+                        {/* admin viewers: badge only (cannot change roles)             */}
+                        {/* super_admin viewers: user ↔ admin only (no super_admin opt) */}
+                        {/* owner viewers: full dropdown incl. super_admin              */}
                         <td className="px-4 py-4">
-                          {editable && canPromoteToAdmin && !isProtected ? (
+                          {canChangeRoles && editable && !isProtected ? (
                             <select
                               value={user.role === 'owner' ? 'super_admin' : user.role}
                               onChange={e => updateRole(user.id, e.target.value)}
@@ -700,8 +854,8 @@ const UserManagementNew = () => {
                             >
                               <option value="user">User</option>
                               <option value="admin">Admin</option>
-                              {/* Admins can only promote to admin, not super_admin */}
-                              {canManageUsers && <option value="super_admin">Super Admin</option>}
+                              {/* Only owner can promote to / demote from super_admin */}
+                              {canPromoteToSuperAdmin && <option value="super_admin">Super Admin</option>}
                             </select>
                           ) : (
                             <span className={ghostRoleBadge(user.role)}>
@@ -738,15 +892,18 @@ const UserManagementNew = () => {
                               <Eye className="w-4 h-4" />
                             </button>
 
-                            {/* Credit edit — canManageUsers + editable */}
-                            {canManageUsers && editable && (
+                            {/* Credit edit — owner / super_admin only */}
+                            {canManageCredits && editable && (
                               <button onClick={() => { setSelectedUser(user); setShowCredits(true); }} className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-400 hover:text-emerald-400 transition-colors" title="Manage credits">
                                 <Edit className="w-4 h-4" />
                               </button>
                             )}
 
-                            {/* Status actions — canManageUsers + editable */}
-                            {canManageUsers && editable && (
+                            {/* Status actions:
+                                - owner / super_admin: activate + suspend + soft-delete
+                                - admin: activate + suspend on 'user' rows only (canEdit gates which rows)
+                                canBasicUserActions covers the admin tier */}
+                            {(canManageUsers || canBasicUserActions) && editable && (
                               <div className="relative group">
                                 <button className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-400 hover:text-white transition-colors">
                                   <MoreVertical className="w-4 h-4" />
@@ -763,14 +920,17 @@ const UserManagementNew = () => {
                                   )} className="w-full px-4 py-2 text-left text-xs text-red-400 hover:bg-slate-700/50 flex items-center gap-2">
                                     <Ban className="w-3.5 h-3.5" />Suspend
                                   </button>
-                                  <button onClick={() => openDangerModal(
-                                    'Soft Delete User?',
-                                    `Soft-deleting ${user.email} preserves their data but permanently revokes access.`,
-                                    () => updateStatus(user.id, 'deleted'),
-                                    'Delete'
-                                  )} className="w-full px-4 py-2 text-left text-xs text-red-500 hover:bg-slate-700/50 flex items-center gap-2">
-                                    <XCircle className="w-3.5 h-3.5" />Soft Delete
-                                  </button>
+                                  {/* Soft delete — owner / super_admin only, not admin */}
+                                  {canDeleteUsers && (
+                                    <button onClick={() => openDangerModal(
+                                      'Soft Delete User?',
+                                      `Soft-deleting ${user.email} preserves their data but permanently revokes access.`,
+                                      () => updateStatus(user.id, 'deleted'),
+                                      'Delete'
+                                    )} className="w-full px-4 py-2 text-left text-xs text-red-500 hover:bg-slate-700/50 flex items-center gap-2">
+                                      <XCircle className="w-3.5 h-3.5" />Soft Delete
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             )}
@@ -824,6 +984,9 @@ const UserManagementNew = () => {
       )}
       {showCredits && selectedUser && (
         <CreditModal user={selectedUser} onClose={() => { setShowCredits(false); setSelectedUser(null); }} onUpdate={updateCreditLimit} />
+      )}
+      {showInvite && (
+        <InviteModal onClose={() => setShowInvite(false)} canPromoteToSuperAdmin={canPromoteToSuperAdmin} />
       )}
 
       {/* Danger confirmation modal — safe suspend / soft delete */}

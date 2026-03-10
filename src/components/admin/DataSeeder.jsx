@@ -4,16 +4,29 @@
  */
 
 import { useState } from 'react';
-import { Database, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Database, AlertCircle, CheckCircle2, Lock } from 'lucide-react';
 import { collection, doc, setDoc, getDocs, Timestamp, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 
 const DataSeeder = () => {
-  const { adminUser } = useAdminAuth();
+  const { adminUser, isOwner } = useAdminAuth();
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
+
+  // DataSeeder is restricted to owner only — too dangerous for other roles
+  if (!isOwner) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh]">
+        <div className="text-center space-y-3">
+          <Lock className="w-12 h-12 text-slate-600 mx-auto" />
+          <p className="text-white font-semibold">Owner Access Required</p>
+          <p className="text-slate-400 text-sm">The data seeder is restricted to the platform owner.</p>
+        </div>
+      </div>
+    );
+  }
 
   const seedData = async () => {
     setLoading(true);

@@ -38,7 +38,47 @@ service cloud.firestore {
     function isSuperAdmin() {
       return isAuth()
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
-        && getUserRole() == 'super_admin';
+        && getUserRole() in ['super_admin', 'owner'];
+    }
+
+    function isOwnerRole() {
+      return isAuth()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getUserRole() == 'owner';
+    }
+
+    // ── Role-change guard helpers ────────────────────────────────────────────
+    // True iff the 'role' field is being changed in this write
+    function roleChanging() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']);
+    }
+
+    // True iff the target document's CURRENT role is owner or super_admin
+    // (ghost-owner protection: super_admin cannot touch these rows)
+    function targetIsPrivileged() {
+      return resource.data.role in ['owner', 'super_admin'];
+    }
+
+    // The new role value the client is trying to set
+    function newRole() {
+      return request.resource.data.role;
+    }
+
+    // super_admin may only set role to 'user' or 'admin' — never back to
+    // 'super_admin' or 'owner', and only on rows that are not already privileged.
+    function superAdminRoleChangeAllowed() {
+      return isSuperAdmin()
+        && !isOwnerRole()
+        && !targetIsPrivileged()
+        && newRole() in ['user', 'admin'];
+    }
+
+    // Owner may change any role (including to/from super_admin)
+    // EXCEPT their own row — prevents accidental self-demotion.
+    // userId must be passed in because path variables are not in scope
+    // inside helper functions.
+    function ownerRoleChangeAllowed(uid) {
+      return isOwnerRole() && request.auth.uid != uid;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -66,11 +106,26 @@ service cloud.firestore {
       // Users update their own profile except sensitive fields.
       // 'credits' (balance) and 'role' are server/admin-controlled.
       // 'creditsUsed' and 'searchCount' are owner-writable (Phase 3 batched writes).
+      //
+      // Role-change rules (enforced at DB level, matches UI RBAC):
+      //   admin       → cannot change 'role' field at all
+      //   super_admin → can change 'role' to 'user' or 'admin' only,
+      //                 and ONLY on rows that are not 'owner'/'super_admin'
+      //   owner       → can change 'role' to any value
       allow update: if (
-          isOwner(userId)
-          && !request.resource.data.diff(resource.data).affectedKeys()
-              .hasAny(['role', 'isActive', 'uid', 'createdAt'])
-        ) || isAdmin();
+          // Self-update: own non-sensitive fields only
+          (isOwner(userId)
+            && !request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['role', 'isActive', 'uid', 'createdAt']))
+          // Admin (all tiers): can update non-role fields (status, creditLimit, etc.)
+          || (isAdmin() && !roleChanging()
+              && !request.resource.data.diff(resource.data).affectedKeys()
+                  .hasAny(['uid', 'createdAt']))
+          // super_admin: role change under strict conditions (see helper)
+          || (roleChanging() && superAdminRoleChangeAllowed())
+          // owner: role change unrestricted except own row
+          || (roleChanging() && ownerRoleChangeAllowed(userId))
+        );
 
       allow delete: if isAdmin();
     }
@@ -226,6 +281,16 @@ service cloud.firestore {
     match /adminUsers/{email} {
       allow read:  if isAuth();
       allow write: if isSuperAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ADMIN INVITES   admin_invites/{token}
+    // Written and read exclusively by Cloud Functions via the Admin SDK.
+    // The Admin SDK bypasses all client-side security rules, so there is no
+    // need to grant any client access — deny everything.
+    // ═══════════════════════════════════════════════════════════════════════
+    match /admin_invites/{token} {
+      allow read, write: if false;
     }
   }
 }

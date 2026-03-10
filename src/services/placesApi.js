@@ -75,13 +75,21 @@ const FIELD_MASK = [
 //                Google's NLP sees an address in an adjacent locality and
 //                ranks it below Maninagar results → bleed eliminated.
 //
-// Grid budgets (early-exit pages keep actual calls well below max):
-//   city:          2×2 = 4 boxes × 2 queries × ≤3 pages = ≤24 calls
-//   neighbourhood: 2×1 = 2 boxes × 3 queries × ≤3 pages = ≤18 calls
-//   specific:      1×1 = 1 box   × 3 queries × ≤3 pages = ≤9  calls
+// Grid budgets — actual calls are EXACT for city (no paging variability):
+//   city:          4×4 = 16 cells × 2 queries × 1 page  = EXACTLY 32 calls
+//   neighbourhood: 4×3 = 12 cells × 2 queries × ≤3 pages = ≤72  max (~24-32 actual)
+//   specific:      1×1 =  1 cell  × 3 queries × ≤3 pages = ≤9   max (~3-6  actual)
+//
+// City uses pagesPerCell=1 so every (cell, query) pair fires ONCE and stops.
+// 16 cells × 2 variants = 32 calls exactly, regardless of result count.
+// 32 calls × up to 20 raw = 640 raw → ~250-280 unique after dedup.
+//
+// Neighbourhood: 12 cells × 2 variants with seenIds exits → ~24-32 actual calls.
+// More cells = smaller micro-zones = less overlap on dedup → 100+ unique results.
+// Specific: 3 variants for maximum depth on a single point.
 const GRID_CONFIG = {
-  city:          { cols: 2, rows: 2, pagesPerCell: 3 },
-  neighbourhood: { cols: 2, rows: 1, pagesPerCell: 3 },
+  city:          { cols: 4, rows: 4, pagesPerCell: 1 },
+  neighbourhood: { cols: 4, rows: 3, pagesPerCell: 3 },
   specific:      { cols: 1, rows: 1, pagesPerCell: 3 },
 };
 
@@ -170,9 +178,9 @@ const buildQueries = (keyword, location, searchScope, type) => {
     ];
   }
 
-  // City has 4 spatial cells — 2 variants are enough for yield.
-  // Neighbourhood/specific have 2–1 cells — 3 variants maximise depth.
-  return searchScope === 'city' ? all.slice(0, 2) : all;
+  // City/Neighbourhood: 2 variants (more cells do the yield work, not more queries).
+  // Specific: all 3 variants with adaptive paging for maximum depth on single point.
+  return searchScope === 'specific' ? all : all.slice(0, 2);
 };
 
 // ── Types that are clearly unrelated to any general business search ──────────
@@ -465,7 +473,10 @@ const searchQueryPage = async (textQuery, rectangle, pageToken = null, includedT
  * @param {string|null} includedType
  * @returns {{ places: Array, callCount: number }}
  */
-const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_DEFAULT, includedType = null) => {
+// seenIds — the live Set of place IDs already collected from prior cells/queries.
+// Passed by reference so this function can detect zero-yield pages and exit early,
+// saving API calls when an area is already saturated by previous sweeps.
+const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_DEFAULT, includedType = null, seenIds = null) => {
   const allPlaces = [];
   let pageToken   = null;
   let callCount   = 0;
@@ -478,11 +489,20 @@ const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_
     const { places, nextPageToken } = await searchQueryPage(textQuery, rectangle, pageToken, includedType);
     callCount++;
     allPlaces.push(...places);
-    console.log(`[cell-page] page ${p + 1} → ${places.length} results | nextToken=${!!nextPageToken}`);
 
-    // Early exit: Google signals no more results (nextPageToken absent)
-    // OR this page returned fewer than 20 results (last meaningful page).
-    if (!nextPageToken || places.length < 20) break;
+    // New-unique count for this page (uses seenIds snapshot from prior cells/queries).
+    // Measures how many results on THIS page haven't been collected yet.
+    const pageNewUniques = seenIds
+      ? places.filter(pl => pl.id && !seenIds.has(pl.id)).length
+      : places.length;
+
+    console.log(`[cell-page] page ${p + 1} → ${places.length} raw, ${pageNewUniques} new unique | nextToken=${!!nextPageToken}`);
+
+    // Three adaptive early-exit conditions (minimum API calls):
+    //   1. No more pages from Google.
+    //   2. Sparse page (< 20) — Google is running out of results in this cell.
+    //   3. Zero new uniques — all results already collected from prior cells.
+    if (!nextPageToken || places.length < 20 || pageNewUniques === 0) break;
     pageToken = nextPageToken;
   }
 
@@ -565,7 +585,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   // ── 1. Cache check ─────────────────────────────────────────────────────────
   // v9: 5×5=25 cells × 1 variant × 1 page = exactly 25 API calls → 200+ unique.
   //     pagesPerCell now per-scope in GRID_CONFIG (city=1, nbhd=2, specific=3).
-  const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:matrixv16`);
+  const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:matrixv21`);
 
   if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
@@ -634,11 +654,13 @@ const _searchSingle = async (keyword, location, options = {}) => {
       // 400 ms stagger before every call except the very first
       if (callIdx > 0) await new Promise((r) => setTimeout(r, CALL_STAGGER_MS));
 
-      const { places, callCount } = await searchQueryPaged(query, rectangle, pagesPerCell, includedType);
+      // Pass `seen` so searchQueryPaged can exit pages early when all results
+      // on a page are already collected (zero-yield page exit, saves pages 2-3).
+      const { places, callCount } = await searchQueryPaged(query, rectangle, pagesPerCell, includedType, seen);
       totalApiCalls += callCount;
       callIdx++;
 
-      // Aggressive deduplication by place.id across ALL cells and variants
+      // Deduplicate by place.id across ALL cells and variants.
       let newThisCall = 0;
       for (const p of places) {
         if (p.id && !seen.has(p.id)) {
@@ -664,6 +686,11 @@ const _searchSingle = async (keyword, location, options = {}) => {
           apiCalls: totalApiCalls,
         });
       }
+      // NOTE: We do NOT skip remaining queries on this cell even if newThisCall===0.
+      // Different query variants ("shop", "wholesaler") surface different businesses
+      // from Google's index even within the same geographic rectangle.
+      // The per-page seenIds check inside searchQueryPaged already prevents paying
+      // for additional pages when a page is fully saturated.
     }
   }
 
@@ -864,4 +891,127 @@ export const deduplicateResults = (leads) => {
   });
 };
 
-export default { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults };
+// ── Category-aware subtype definitions ─────────────────────────────────────
+// Each entry in a category is { value, label, hint, pattern }.
+// pattern = null means "default / catch-all" — matched when nothing else does.
+// A lead can match MULTIPLE subtypes (e.g. "Wholesale & Retail" → both).
+//
+// Covers every search type the app supports:
+//   products (any type, store, manufacturer, wholesaler)
+//   restaurant · lodging · hospital · bank · school · gym · real estate
+const SUBTYPE_DEFS = {
+  product: [
+    { value: 'retailer',      label: 'Retailer',        hint: 'Shops, stores, showrooms, outlets',              pattern: null },
+    { value: 'wholesaler',    label: 'Wholesaler',       hint: 'Wholesale markets, bulk dealers',                pattern: /wholesal|\bthok\b|bulk\s*(deal|sale|trade|suppl)|whole\s*sale/ },
+    { value: 'distributor',   label: 'Distributor',      hint: 'Distributors, stockists, authorised agents',     pattern: /distribut|stockist|\bc\s*[&]\s*f\b|authoris[ae]d\s*(dealer|distribut)|sole\s*(agent|distribut)|supply\s*(house|co\.?)|\bsupplier/ },
+    { value: 'manufacturer',  label: 'Manufacturer',     hint: 'Factories, industries, fabricators',             pattern: /manufactur|\bfactory\b|\bindustr(ies|ial|y)\b|\bfabricat|\bmfg\.?\b|\bproducer|\bproduction\b|\bworks\b/ },
+  ],
+  restaurant: [
+    { value: 'dine_in',       label: 'Restaurant',       hint: 'Dine-in restaurants and eateries',               pattern: null },
+    { value: 'cafe_bakery',   label: 'Cafe / Bakery',    hint: 'Cafes, coffee shops, bakeries, sweet shops',     pattern: /cafe|coffee|bakery|patisserie|bake|sweets?\s*(shop|house|corner)|mithai|confection/ },
+    { value: 'fastfood',      label: 'Fast Food',        hint: 'Fast food, street food, dhabas, tiffin centres', pattern: /fast\s*food|quick\s*bite|snack|pav|chaat|stall|dhaba|canteen|tiffin|parcel|takeaway|take.?away/ },
+    { value: 'catering',      label: 'Catering',         hint: 'Catering services, banquets, event food',        pattern: /cater(ing|er)?|banquet|event.*food|wedding.*food|party.*food|\bmess\b/ },
+  ],
+  lodging: [
+    { value: 'hotel',         label: 'Hotel',            hint: 'Hotels, resorts, heritage properties',           pattern: null },
+    { value: 'guesthouse',    label: 'Guest House',      hint: 'Guest houses, lodges, hostels, dharamshalas',    pattern: /guest\s*house|lodge|hostel|dorm|dharamshala|paying\s*guest|\bpg\b/ },
+    { value: 'service_apt',   label: 'Service Apt',      hint: 'Service apartments, furnished flats, homestays', pattern: /service\s*apart|furnished|homestay|vacation|holiday\s*(home|rental)/ },
+  ],
+  hospital: [
+    { value: 'hospital',      label: 'Hospital',         hint: 'Hospitals and nursing homes',                    pattern: null },
+    { value: 'clinic',        label: 'Clinic',           hint: 'Clinics, specialist doctors, polyclinics',       pattern: /clinic|polyclinic|\bdr[.\s]|\bdoctor\b|physician|specialist|surgeon/ },
+    { value: 'diagnostic',    label: 'Diagnostic',       hint: 'Labs, pathology, scan centres, imaging',         pattern: /diagnost|laborator|patholog|scan\s*centre|imaging|radiol|blood\s*test/ },
+    { value: 'pharmacy',      label: 'Pharmacy',         hint: 'Pharmacies, chemists, medical stores',           pattern: /pharmac|chemist|medical\s*(store|shop)|drug\s*store|\bmedicine/ },
+  ],
+  bank: [
+    { value: 'bank',          label: 'Bank',             hint: 'Scheduled banks (public & private)',             pattern: null },
+    { value: 'finance',       label: 'Finance / NBFC',   hint: 'NBFCs, finance companies, loan providers',       pattern: /\bfinance\b|nbfc|microfinance|lending|\bloan\b|credit\s*(society|co-?op)/ },
+    { value: 'insurance',     label: 'Insurance',        hint: 'Insurance companies and agents',                 pattern: /insur/ },
+    { value: 'exchange',      label: 'Forex / Exchange',  hint: 'Forex, money exchange, remittance',             pattern: /exchange|forex|remit|money\s*transfer|currency/ },
+  ],
+  school: [
+    { value: 'school',        label: 'School',           hint: 'Primary / secondary schools',                   pattern: null },
+    { value: 'college',       label: 'College / Uni',    hint: 'Colleges, universities, institutes',             pattern: /college|universit|instit|polytechnic|academy/ },
+    { value: 'coaching',      label: 'Coaching',         hint: 'Tuition classes, coaching centres',              pattern: /tuition|coaching|tutorial|\bclasses\b|study\s*circle|prep/ },
+    { value: 'training',      label: 'Training',         hint: 'Skill training, vocational, computer courses',   pattern: /training|skill|vocational|computer.*course|\biti\b|\bitc\b/ },
+  ],
+  gym: [
+    { value: 'gym',           label: 'Gym / Fitness',    hint: 'Gyms, fitness centres, crossfit',                pattern: null },
+    { value: 'yoga',          label: 'Yoga / Wellness',  hint: 'Yoga centres, meditation, naturopathy',          pattern: /yoga|meditat|naturopathy|wellness|ayurved|pranayam/ },
+    { value: 'martial_arts',  label: 'Martial Arts',     hint: 'Martial arts, boxing, karate, academies',        pattern: /martial|boxing|karate|taekwondo|judo|wrestling|sport.*academ/ },
+    { value: 'spa',           label: 'Spa / Salon',      hint: 'Spas, beauty salons, massage centres',           pattern: /spa|salon|massage|beauty\s*parlou?r|sauna|steam/ },
+  ],
+  real_estate: [
+    { value: 'broker',        label: 'Agent / Broker',   hint: 'Real estate brokers and agents',                 pattern: null },
+    { value: 'builder',       label: 'Builder / Dev',    hint: 'Builders, developers, construction companies',   pattern: /builder|developer|construct|promoter|infrastructure|township/ },
+    { value: 'property_mgmt', label: 'Property Mgmt',    hint: 'Property management, rental management',         pattern: /property\s*management|rental.*management|facility.*management/ },
+  ],
+};
+
+// Maps the `type` dropdown value → SUBTYPE_DEFS key.
+const TYPE_TO_SUBTYPE_KEY = {
+  '':                   'product',
+  'store':              'product',
+  'manufacturer':       'product',
+  'wholesaler':         'product',
+  'restaurant':         'restaurant',
+  'lodging':            'lodging',
+  'hospital':           'hospital',
+  'bank':               'bank',
+  'school':             'school',
+  'gym':                'gym',
+  'real_estate_agency': 'real_estate',
+};
+
+/**
+ * Returns chip definitions for the current search type.
+ * Always starts with { value: '', label: 'All' }.
+ * Used by SearchPanel to render context-aware filter chips for every category.
+ */
+export const getFilterChips = (type) => {
+  const key  = TYPE_TO_SUBTYPE_KEY[type] ?? 'product';
+  const defs = SUBTYPE_DEFS[key]         ?? SUBTYPE_DEFS.product;
+  return [
+    { value: '', label: 'All', hint: 'Show all results' },
+    ...defs.map(({ value, label, hint }) => ({ value, label, hint })),
+  ];
+};
+
+/**
+ * Detect subtype(s) of a lead within its category.
+ * Returns a Set — a lead can match multiple subtypes (e.g. hospital + diagnostic).
+ * Falls back to the first defined subtype ("default" role) when no pattern matches.
+ */
+const detectSubtype = (lead, subtypeDefs) => {
+  const name  = (lead.displayName?.text || '').toLowerCase();
+  const addr  = (lead.formattedAddress  || '').toLowerCase();
+  const types = (lead.types || []).join(' ').toLowerCase();
+  const all   = `${name} ${addr} ${types}`;
+
+  const matched = new Set();
+  for (const { value, pattern } of subtypeDefs) {
+    if (pattern && pattern.test(all)) matched.add(value);
+  }
+  // Fallback: nothing matched → assign the first subtype (e.g. 'retailer', 'dine_in', 'bank').
+  if (matched.size === 0) matched.add(subtypeDefs[0].value);
+  return matched;
+};
+
+/**
+ * Filter leads by category-appropriate subtype.
+ * subtype = '' → return all unchanged.
+ * Works for every search category: products, restaurants, banks, hospitals, etc.
+ * A lead can match multiple subtypes, so it appears under all relevant chips.
+ *
+ * @param {Array}  leads   — raw leads from searchBusinesses()
+ * @param {string} type    — business type key (from the type dropdown)
+ * @param {string} subtype — subtype value from getFilterChips()
+ */
+export const filterBySubtype = (leads, type, subtype) => {
+  if (!subtype) return leads;
+  const key  = TYPE_TO_SUBTYPE_KEY[type] ?? 'product';
+  const defs = SUBTYPE_DEFS[key]         ?? SUBTYPE_DEFS.product;
+  return (leads || []).filter((lead) => detectSubtype(lead, defs).has(subtype));
+};
+
+export default { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults, getFilterChips, filterBySubtype };

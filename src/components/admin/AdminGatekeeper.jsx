@@ -1,37 +1,26 @@
 /**
- * AdminGatekeeper — Enterprise Step-Up Authentication
+ * AdminGatekeeper — Invite-based admin access gate
  *
- * 100% frontend OTP using EmailJS + Firebase Firestore.
- * No backend / Node.js server required.
+ * Flow A — Invite link (/admin?token=xxx):
+ *   - Not logged in  → show "Log in first to accept" screen
+ *   - Logged in      → auto-call acceptAdminInvite CF → elevate role → dashboard
  *
- * Flow:
- *   loading              → skeleton
- *   not logged in        → /login
- *   canAccessAdmin       → /admin/dashboard  (straight through)
- *   pending already      → "Request Pending" screen
- *   normal user          → Step 1: send OTP  →  Step 2: 6-box verify  →  Step 3: pending
+ * Flow B — No token:
+ *   - canAccessAdmin   → /admin/dashboard (straight through)
+ *   - isPending        → "Request Pending" screen
+ *   - Normal user      → "Request Admin Access" button (simple Firestore write)
  */
-import { useState, useRef, useEffect } from 'react';
-import { Navigate, useNavigate } from 'react-router-dom';
-import emailjs from '@emailjs/browser';
-import {
-  doc, setDoc, getDoc, deleteDoc, updateDoc, serverTimestamp,
-} from 'firebase/firestore';
+import { useState, useEffect } from 'react';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
-  ShieldCheck, Mail, Lock, Clock,
-  CheckCircle2, XCircle, Loader2, RefreshCw,
+  ShieldCheck, Mail, Clock,
+  CheckCircle2, XCircle, Loader2, ArrowRight,
 } from 'lucide-react';
-
-/* ─── EmailJS config ────────────────────────────────────────────────────── */
-const EJS_SERVICE_ID  = import.meta.env.VITE_EMAILJS_SERVICE_ID  || 'YOUR_SERVICE_ID';
-const EJS_TEMPLATE_ID = import.meta.env.VITE_EMAILJS_TEMPLATE_ID || 'YOUR_TEMPLATE_ID';
-const EJS_PUBLIC_KEY  = import.meta.env.VITE_EMAILJS_PUBLIC_KEY  || 'YOUR_PUBLIC_KEY';
-
-/* ─── OTP generator ─────────────────────────────────────────────────────── */
-const genOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
 /* ─── Toast ─────────────────────────────────────────────────────────────── */
 const Toast = ({ msg, type }) => {
@@ -71,70 +60,6 @@ const Btn = ({ children, onClick, disabled, loading: spin, variant = 'primary', 
   );
 };
 
-/* ─── 6-Box OTP Input ────────────────────────────────────────────────────── */
-const OtpBoxes = ({ value, onChange, disabled, firstRef }) => {
-  const refs = useRef([]);
-
-  const setRef = (el, i) => {
-    refs.current[i] = el;
-    if (i === 0 && firstRef) firstRef.current = el;
-  };
-
-  const handleKeyDown = (e, idx) => {
-    if (e.key === 'Backspace') {
-      if (value[idx]) {
-        const arr = value.split('');
-        arr[idx] = '';
-        onChange(arr.join(''));
-      } else if (idx > 0) {
-        refs.current[idx - 1]?.focus();
-      }
-      return;
-    }
-    if (!/^\d$/.test(e.key)) return;
-    const arr = (value + '      ').slice(0, 6).split('');
-    arr[idx] = e.key;
-    onChange(arr.join('').replace(/ /g, ''));
-    if (idx < 5) setTimeout(() => refs.current[idx + 1]?.focus(), 0);
-  };
-
-  const handlePaste = (e) => {
-    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
-    if (pasted) {
-      onChange(pasted);
-      setTimeout(() => refs.current[Math.min(pasted.length, 5)]?.focus(), 0);
-    }
-    e.preventDefault();
-  };
-
-  return (
-    <div className="flex gap-2.5 justify-center">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <input
-          key={i}
-          ref={el => setRef(el, i)}
-          type="text"
-          inputMode="numeric"
-          maxLength={1}
-          disabled={disabled}
-          value={value[i] || ''}
-          onChange={() => {}}
-          onKeyDown={e => handleKeyDown(e, i)}
-          onPaste={handlePaste}
-          onFocus={e => e.target.select()}
-          className={`
-            w-11 h-14 text-center text-xl font-bold rounded-xl outline-none caret-transparent
-            bg-white/5 border-2 transition-all duration-150 text-white
-            ${value[i] ? 'border-indigo-400 bg-indigo-900/30' : 'border-white/15'}
-            focus:border-indigo-400 focus:bg-indigo-900/20
-            disabled:opacity-40 disabled:cursor-not-allowed
-          `}
-        />
-      ))}
-    </div>
-  );
-};
-
 /* ══════════════════════════════════════════════════════════════════════════
    Main Component
 ══════════════════════════════════════════════════════════════════════════ */
@@ -142,116 +67,71 @@ const AdminGatekeeper = () => {
   const { canAccessAdmin, loading: authLoading, adminRequestStatus } = useAdminAuth();
   const { currentUser } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
-  // 'email' | 'otp' | 'pending'
-  const [step,      setStep]    = useState('email');
-  const [otp,       setOtp]     = useState('');
-  const [sending,   setSending] = useState(false);
-  const [verifying, setVerifying] = useState(false);
-  const [toast,     setToast]   = useState({ msg: '', type: 'info' });
-  const [timer,     setTimer]   = useState(0);
-  const firstBox = useRef(null);
+  const token     = searchParams.get('token');
+  const isPending = adminRequestStatus === 'pending';
 
-  /* countdown */
+  // 'idle' | 'accepting' | 'success' | 'error' | 'requesting' | 'requested'
+  const [phase,    setPhase]   = useState('idle');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [toast,    setToast]   = useState({ msg: '', type: 'info' });
+
+  const showToast = (msg, type = 'info', ms = 4500) => {
+    setToast({ msg, type });
+    if (ms) setTimeout(() => setToast({ msg: '', type: 'info' }), ms);
+  };
+
+  /* ── Auto-accept invite on mount when token + user both present ───────── */
   useEffect(() => {
-    if (timer <= 0) return;
-    const id = setInterval(() => setTimer(t => t - 1), 1000);
-    return () => clearInterval(id);
-  }, [timer]);
+    if (!token || authLoading || !currentUser || canAccessAdmin) return;
 
-  /* auto-verify on 6th digit */
-  useEffect(() => {
-    if (otp.length === 6 && step === 'otp' && !verifying) handleVerify(otp);
+    const accept = async () => {
+      setPhase('accepting');
+      try {
+        const fns = getFunctions();
+        const acceptInvite = httpsCallable(fns, 'acceptAdminInvite');
+        await acceptInvite({ token });
+        setPhase('success');
+        // Full page reload so AdminAuthContext re-reads the updated role
+        setTimeout(() => { window.location.href = '/admin/dashboard'; }, 2200);
+      } catch (err) {
+        setPhase('error');
+        setErrorMsg(err?.message || 'Failed to accept invite. The link may have expired or already been used.');
+      }
+    };
+
+    accept();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [otp]);
+  }, [token, authLoading, currentUser]);
 
-  /* focus first box when OTP step mounts */
-  useEffect(() => {
-    if (step === 'otp') setTimeout(() => firstBox.current?.focus(), 100);
-  }, [step]);
+  /* ── Request admin access — simple Firestore write, no OTP ───────────── */
+  const handleRequestAccess = async () => {
+    setPhase('requesting');
+    try {
+      await updateDoc(doc(db, 'users', currentUser.uid), {
+        admin_request_status: 'pending',
+        requestedAt: serverTimestamp(),
+      });
+      setPhase('requested');
+    } catch (err) {
+      setPhase('idle');
+      showToast(err.message || 'Failed to submit request.', 'error');
+    }
+  };
 
-  /* ── Routing ──────────────────────────────────────────────────────────── */
+  /* ── Guards ──────────────────────────────────────────────────────────── */
   if (authLoading) return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center">
       <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
     </div>
   );
-  if (!currentUser)   return <Navigate to="/login" replace />;
-  if (canAccessAdmin) return <Navigate to="/admin/dashboard" replace />;
+  // Redirect immediately if no token and not logged in
+  if (!currentUser && !token) return <Navigate to="/login" replace />;
+  // Redirect immediately if already has access (no token flow needed)
+  if (canAccessAdmin && !token) return <Navigate to="/admin/dashboard" replace />;
 
-  const isPending = adminRequestStatus === 'pending' || step === 'pending';
-
-  /* ── Helpers ──────────────────────────────────────────────────────────── */
-  const showToast = (msg, type = 'info', ms = 4000) => {
-    setToast({ msg, type });
-    if (ms) setTimeout(() => setToast({ msg: '', type: 'info' }), ms);
-  };
-
-  /* ── Send OTP ─────────────────────────────────────────────────────────── */
-  const handleSendCode = async () => {
-    setToast({ msg: '', type: 'info' });
-    setSending(true);
-    try {
-      const code = genOtp();
-
-      // 1. Store in Firestore
-      await setDoc(doc(db, 'otp_codes', currentUser.email), {
-        code,
-        createdAt: serverTimestamp(),
-      });
-
-      // 2. Send via EmailJS
-      await emailjs.send(
-        EJS_SERVICE_ID,
-        EJS_TEMPLATE_ID,
-        {
-          to_email: currentUser.email,
-          to_name:  currentUser.displayName || currentUser.email,
-          otp_code: code,
-          app_name: 'Lead Finder',
-        },
-        EJS_PUBLIC_KEY,
-      );
-
-      setStep('otp');
-      setOtp('');
-      setTimer(60);
-      showToast('Code sent! Check your inbox.', 'success');
-    } catch (err) {
-      console.error(err);
-      showToast(err?.text || err?.message || 'Failed to send code. Try again.', 'error');
-    } finally {
-      setSending(false);
-    }
-  };
-
-  /* ── Verify OTP ───────────────────────────────────────────────────────── */
-  const handleVerify = async (code) => {
-    setVerifying(true);
-    setToast({ msg: '', type: 'info' });
-    try {
-      const snap = await getDoc(doc(db, 'otp_codes', currentUser.email));
-      if (!snap.exists()) throw new Error('Code expired. Please resend.');
-      if (snap.data().code !== code) throw new Error('Incorrect code. Please try again.');
-
-      // Valid — clean up + mark pending
-      await deleteDoc(doc(db, 'otp_codes', currentUser.email));
-      await updateDoc(doc(db, 'users', currentUser.uid), {
-        admin_request_status: 'pending',
-      });
-
-      showToast('Verified! Request submitted.', 'success');
-      setStep('pending');
-    } catch (err) {
-      showToast(err.message, 'error');
-      setOtp('');
-      setTimeout(() => firstBox.current?.focus(), 50);
-    } finally {
-      setVerifying(false);
-    }
-  };
-
-  /* ── UI ───────────────────────────────────────────────────────────────── */
+  /* ── UI shell ───────────────────────────────────────────────────────── */
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 flex items-center justify-center p-4 relative overflow-hidden">
 
@@ -271,14 +151,75 @@ const AdminGatekeeper = () => {
           </div>
           <div className="text-center">
             <h1 className="text-2xl font-bold text-white tracking-tight">Admin Portal</h1>
-            <p className="text-slate-500 text-sm mt-0.5">Lead Finder — Secure Gatekeeper</p>
+            <p className="text-slate-500 text-sm mt-0.5">Lead Finder — Secure Access</p>
           </div>
         </div>
 
         <GlassCard className="p-8 space-y-6">
 
-          {/* ═══ PENDING ═══════════════════════════════════════════════ */}
-          {isPending && (
+          {/* ═══ NOT LOGGED IN — invite link present ══════════════════════ */}
+          {!currentUser && token && (
+            <div className="text-center space-y-5">
+              <div className="w-16 h-16 rounded-full bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center mx-auto">
+                <Mail className="w-8 h-8 text-indigo-400" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-white">Admin Invitation</h2>
+                <p className="text-slate-400 text-sm mt-1 leading-relaxed">
+                  You've received an admin invite. Please log in first, then re-open the invite link from your email.
+                </p>
+              </div>
+              <Btn onClick={() => navigate('/login')}>
+                <ArrowRight className="w-4 h-4" />
+                Log In
+              </Btn>
+              <Btn variant="ghost" onClick={() => navigate('/app')}>Back to App</Btn>
+            </div>
+          )}
+
+          {/* ═══ ACCEPTING INVITE ══════════════════════════════════════════ */}
+          {currentUser && token && phase === 'accepting' && (
+            <div className="text-center space-y-5">
+              <Loader2 className="w-12 h-12 text-indigo-400 animate-spin mx-auto" />
+              <div>
+                <h2 className="text-xl font-bold text-white">Accepting Invite…</h2>
+                <p className="text-slate-400 text-sm mt-1">Verifying your invitation. Just a moment.</p>
+              </div>
+            </div>
+          )}
+
+          {/* ═══ INVITE ACCEPTED ═══════════════════════════════════════════ */}
+          {currentUser && token && phase === 'success' && (
+            <div className="text-center space-y-5">
+              <div className="w-16 h-16 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center mx-auto">
+                <CheckCircle2 className="w-8 h-8 text-emerald-400" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-white">Welcome to the Team!</h2>
+                <p className="text-slate-400 text-sm mt-1">Your admin access is active. Redirecting to dashboard…</p>
+              </div>
+              <div className="flex justify-center">
+                <Loader2 className="w-5 h-5 text-indigo-400 animate-spin" />
+              </div>
+            </div>
+          )}
+
+          {/* ═══ INVITE ERROR ══════════════════════════════════════════════ */}
+          {currentUser && token && phase === 'error' && (
+            <div className="text-center space-y-5">
+              <div className="w-16 h-16 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center mx-auto">
+                <XCircle className="w-8 h-8 text-red-400" />
+              </div>
+              <div>
+                <h2 className="text-xl font-bold text-white">Invite Failed</h2>
+                <p className="text-slate-400 text-sm mt-1 leading-relaxed">{errorMsg}</p>
+              </div>
+              <Btn variant="ghost" onClick={() => navigate('/app')}>Return to App</Btn>
+            </div>
+          )}
+
+          {/* ═══ PENDING (no token, awaiting approval) ════════════════════ */}
+          {currentUser && !token && (isPending || phase === 'requested') && (
             <div className="text-center space-y-5">
               <div className="w-16 h-16 rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center mx-auto">
                 <Clock className="w-8 h-8 text-amber-400" />
@@ -298,13 +239,13 @@ const AdminGatekeeper = () => {
             </div>
           )}
 
-          {/* ═══ STEP 1: EMAIL ═════════════════════════════════════════ */}
-          {!isPending && step === 'email' && (
+          {/* ═══ DEFAULT: Request access ═══════════════════════════════════ */}
+          {currentUser && !token && !isPending && phase !== 'requested' && (
             <>
               <div>
-                <h2 className="text-xl font-bold text-white mb-1">Identity Verification</h2>
+                <h2 className="text-xl font-bold text-white mb-1">Request Admin Access</h2>
                 <p className="text-slate-400 text-sm leading-relaxed">
-                  We'll send a one-time code to confirm your identity before processing your admin access request.
+                  Submit a request to the platform owner. You'll gain access once approved — or use an invite link sent directly to your email.
                 </p>
               </div>
 
@@ -320,57 +261,12 @@ const AdminGatekeeper = () => {
               <Toast msg={toast.msg} type={toast.type} />
 
               <div className="space-y-3">
-                <Btn onClick={handleSendCode} loading={sending}>
-                  <Mail className="w-4 h-4" />
-                  Send Verification Code
+                <Btn onClick={handleRequestAccess} loading={phase === 'requesting'}>
+                  <ShieldCheck className="w-4 h-4" />
+                  Request Admin Access
                 </Btn>
                 <Btn variant="ghost" onClick={() => navigate('/app')}>Cancel</Btn>
               </div>
-            </>
-          )}
-
-          {/* ═══ STEP 2: OTP ═══════════════════════════════════════════ */}
-          {!isPending && step === 'otp' && (
-            <>
-              <div className="text-center">
-                <div className="w-12 h-12 rounded-full bg-indigo-500/15 border border-indigo-500/25 flex items-center justify-center mx-auto mb-3">
-                  <Lock className="w-5 h-5 text-indigo-400" />
-                </div>
-                <h2 className="text-xl font-bold text-white mb-1">Enter Your Code</h2>
-                <p className="text-slate-400 text-sm">
-                  6-digit code sent to{' '}
-                  <span className="text-slate-200 font-medium">{currentUser?.email}</span>
-                </p>
-              </div>
-
-              <OtpBoxes value={otp} onChange={setOtp} disabled={verifying} firstRef={firstBox} />
-
-              {verifying && (
-                <div className="flex items-center justify-center gap-2 text-indigo-400 text-sm">
-                  <Loader2 className="w-4 h-4 animate-spin" /> Verifying…
-                </div>
-              )}
-
-              <Toast msg={toast.msg} type={toast.type} />
-
-              <div className="text-center">
-                {timer > 0 ? (
-                  <span className="text-xs text-slate-600">Resend available in {timer}s</span>
-                ) : (
-                  <button
-                    onClick={handleSendCode}
-                    disabled={sending}
-                    className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    {sending ? 'Sending…' : 'Resend code'}
-                  </button>
-                )}
-              </div>
-
-              <Btn variant="ghost" onClick={() => { setStep('email'); setOtp(''); setToast({ msg: '', type: 'info' }); }}>
-                ← Back
-              </Btn>
             </>
           )}
 

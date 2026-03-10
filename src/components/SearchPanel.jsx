@@ -23,7 +23,7 @@ import Papa from 'papaparse';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import SaveLeadsModal from './SaveLeadsModal.jsx';
-import { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults } from '../services/placesApi';
+import { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults, getFilterChips, filterBySubtype } from '../services/placesApi';
 import { useAuth }   from '../contexts/AuthContext';
 import { useCredit } from '../contexts/CreditContext';
 // deduplicateResults is always applied — not a user toggle
@@ -405,8 +405,9 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   const [lastMeta,  setLastMeta]  = useState(null);
 
   // ── Filter state ────────────────────────────────────────────────────────────
-  const [filterPhone,   setFilterPhone]   = useState(false);
-  const [filterWebsite, setFilterWebsite] = useState(false);
+  const [filterPhone,    setFilterPhone]    = useState(false);
+  const [filterWebsite,  setFilterWebsite]  = useState(false);
+  const [subtype,        setSubtype]        = useState('');   // context-aware — value from getFilterChips(type)
 
   // ── Selection + save state ──────────────────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false);
@@ -420,6 +421,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     let out = deduplicateResults(results);   // always deduplicate
     if (filterPhone)   out = filterByPhoneNumber(out, true);
     if (filterWebsite) out = filterByAddress(out, false).filter((l) => l.websiteUri);
+    if (subtype)       out = filterBySubtype(out, type, subtype);
     return out;
   })();
 
@@ -720,7 +722,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             <div className="relative flex-1 min-w-[160px]">
               <select
                 value={type}
-                onChange={(e) => setType(e.target.value)}
+                onChange={(e) => { setType(e.target.value); setSubtype(''); }}
                 className="w-full appearance-none pl-3 pr-8 py-2.5 md:py-3.5 text-sm
                   bg-transparent border-0 border-b-2 border-slate-200 dark:border-white/10 rounded-none
                   focus:border-indigo-500 dark:focus:border-indigo-500
@@ -814,7 +816,40 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
           </div>
 
           {/* Toolbar */}
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-2.5">
+
+            {/* Row 1: Context-aware filter chips — zero API calls, instant client-side filter */}
+            {/* Chips adapt to the selected type: products show Retailer/Wholesaler/Distributor/Manufacturer, */}
+            {/* restaurants show Restaurant/Cafe/Fast Food/Catering, banks show Bank/Finance/Insurance/Forex, etc. */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-semibold text-slate-500 dark:text-gray-400 mr-1">Filter:</span>
+              {getFilterChips(type).map((r) => (
+                <button
+                  key={r.value}
+                  type="button"
+                  title={r.hint}
+                  onClick={() => setSubtype(r.value)}
+                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all active:scale-[0.97] ${
+                    subtype === r.value
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                      : 'bg-white dark:bg-[#171717] text-slate-600 dark:text-gray-400 border-slate-200 dark:border-white/10 hover:border-indigo-300 hover:text-indigo-600'
+                  }`}
+                >
+                  {r.label}
+                  {subtype === r.value && r.value !== '' && (
+                    <span className="ml-1 opacity-70">· {visible.length}</span>
+                  )}
+                </button>
+              ))}
+              {subtype !== '' && (
+                <span className="text-xs text-slate-400 dark:text-gray-600 ml-1">
+                  {visible.length} of {deduplicateResults(results).length} results
+                </span>
+              )}
+            </div>
+
+            {/* Row 2: Count + cache | Filters + actions */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
             {/* Result count + cache badge */}
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold text-slate-900">
@@ -940,7 +975,9 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 </button>
               )}
             </div>
-          </div>
+          </div> {/* end Row 2 */}
+
+          </div> {/* end space-y-2.5 toolbar wrapper */}
 
           {/* Grid */}
           {visible.length > 0 ? (

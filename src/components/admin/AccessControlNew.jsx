@@ -9,7 +9,8 @@ import {
   Ban,
   UserCheck,
   Search,
-  Filter
+  Filter,
+  Lock
 } from 'lucide-react';
 import { collection, getDocs, doc, updateDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
@@ -17,7 +18,8 @@ import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
 
 const AccessControlNew = () => {
-  const { adminUser } = useAdminAuth();
+  // canApprovePending = owner + super_admin; admin can only suspend/activate (status, not role)
+  const { adminUser, canApprovePending, canBasicUserActions } = useAdminAuth();
   const [pendingUsers, setPendingUsers] = useState([]);
   const [recentApprovals, setRecentApprovals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -233,20 +235,31 @@ const AccessControlNew = () => {
                   </div>
                   
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleApprove(user.id, user.email)}
-                      className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
-                    >
-                      <CheckCircle className="w-4 h-4" />
-                      Approve
-                    </button>
-                    <button
-                      onClick={() => handleReject(user.id, user.email)}
-                      className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
-                    >
-                      <XCircle className="w-4 h-4" />
-                      Reject
-                    </button>
+                    {/* Approve / Reject — super_admin + owner only */}
+                    {canApprovePending ? (
+                      <>
+                        <button
+                          onClick={() => handleApprove(user.id, user.email)}
+                          className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                        >
+                          <CheckCircle className="w-4 h-4" />
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => handleReject(user.id, user.email)}
+                          className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+                        >
+                          <XCircle className="w-4 h-4" />
+                          Reject
+                        </button>
+                      </>
+                    ) : (
+                      /* Admin role — can only see, cannot approve/reject */
+                      <span className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700/50 text-slate-400 rounded-lg text-xs">
+                        <Lock className="w-3.5 h-3.5" />
+                        View only
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
