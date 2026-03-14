@@ -1,23 +1,7 @@
 /**
- * Lead Finder — Credit Context  (Phase 3 — Global Tracking)
+ * Lead Finder - Credit Context
  *
- * All users share a single platform pool from Google's $200/month free tier.
- * No per-user credit limits. Any user can search until the platform hits $195.
- *
- * Exposed values:
- *   totalApiCalls   {number}    Total Places API calls made this month (global)
- *   monthlyApiCost  {number}    Platform USD spent this month
- *   monthlyCapUsd   {number}    Safety cap ($195)
- *   remainingCalls  {number}    MONTHLY_FREE_CALLS − totalApiCalls
- *   platformPctUsed {number}    0–100% of cap consumed
- *   mySearchCount   {number}    This user's search count (analytics only)
- *   myCallsUsed     {number}    This user's API calls used (analytics only)
- *   loading         {boolean}
- *   deductCredits   {Function}  (apiCalls, meta?) → Promise<void>
- *
- * Legacy aliases (so nothing breaks):
- *   credits         → null   (no per-user balance)
- *   creditsUsed     → myCallsUsed
+ * Exposes both global platform usage and per-user monthly allocation usage.
  */
 
 import { createContext, useContext, useEffect, useState, useCallback } from 'react';
@@ -27,12 +11,15 @@ import { useAuth } from './AuthContext';
 import {
   deductCredits as deductCreditsService,
   ensureGlobalUsageDoc,
+  getEffectiveUserMonthMetrics,
   MONTHLY_FREE_CALLS,
 } from '../services/creditService';
+import { CREDIT_CONFIG } from '../config';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MONTHLY_CAP_USD = 195.00;
+const MONTHLY_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD || 195.00;
+const DEFAULT_USER_BUDGET_USD = CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD || 50;
 
 const currentMonthStr = () => {
   const d = new Date();
@@ -63,6 +50,9 @@ export const CreditProvider = ({ children }) => {
   // Per-user analytics state (no balance, just counters)
   const [mySearchCount,  setMySearchCount]  = useState(0);
   const [myCallsUsed,    setMyCallsUsed]    = useState(0);
+  const [myMonthlyUsdUsed, setMyMonthlyUsdUsed] = useState(0);
+  const [myMonthlyLimitUsd, setMyMonthlyLimitUsd] = useState(DEFAULT_USER_BUDGET_USD);
+  const [myUnlimited, setMyUnlimited] = useState(false);
   const [loadingUser,    setLoadingUser]    = useState(true);
 
   // ── Real-time listener: system/global_usage ───────────────────────────────
@@ -109,6 +99,9 @@ export const CreditProvider = ({ children }) => {
     if (!currentUser?.uid) {
       setMySearchCount(0);
       setMyCallsUsed(0);
+      setMyMonthlyUsdUsed(0);
+      setMyMonthlyLimitUsd(DEFAULT_USER_BUDGET_USD);
+      setMyUnlimited(false);
       setLoadingUser(false);
       return;
     }
@@ -119,8 +112,32 @@ export const CreditProvider = ({ children }) => {
       (snap) => {
         if (snap.exists()) {
           const d = snap.data();
-          setMySearchCount(d.searchCount  ?? 0);
-          setMyCallsUsed(d.creditsUsed    ?? 0);
+          const effectiveMetrics = getEffectiveUserMonthMetrics(d, currentMonthStr());
+
+          setMySearchCount(d.searchCount ?? 0);
+          setMyCallsUsed(effectiveMetrics.monthlyApiCalls);
+          setMyMonthlyUsdUsed(effectiveMetrics.monthlyApiCost);
+
+          if (d.creditLimit === 'unlimited') {
+            setMyUnlimited(true);
+            setMyMonthlyLimitUsd(0);
+          } else if (typeof d.creditLimit === 'number') {
+            setMyUnlimited(false);
+            setMyMonthlyLimitUsd(Math.max(0, d.creditLimit));
+          } else if (typeof d.creditLimit === 'string' && d.creditLimit.trim() !== '') {
+            const parsed = Number.parseFloat(d.creditLimit);
+            setMyUnlimited(false);
+            setMyMonthlyLimitUsd(Number.isFinite(parsed) ? Math.max(0, parsed) : DEFAULT_USER_BUDGET_USD);
+          } else {
+            setMyUnlimited(false);
+            setMyMonthlyLimitUsd(DEFAULT_USER_BUDGET_USD);
+          }
+        } else {
+          setMySearchCount(0);
+          setMyCallsUsed(0);
+          setMyMonthlyUsdUsed(0);
+          setMyMonthlyLimitUsd(DEFAULT_USER_BUDGET_USD);
+          setMyUnlimited(false);
         }
         setLoadingUser(false);
       },
@@ -143,6 +160,12 @@ export const CreditProvider = ({ children }) => {
 
   // ── Derived values ────────────────────────────────────────────────────────
   const remainingCalls  = Math.max(0, MONTHLY_FREE_CALLS - totalApiCalls);
+  const myCreditRemainingUsd = myUnlimited
+    ? null
+    : Math.max(0, +(myMonthlyLimitUsd - myMonthlyUsdUsed).toFixed(4));
+  const myCreditPctUsed = myUnlimited
+    ? 0
+    : Math.min(+((myMonthlyUsdUsed / Math.max(myMonthlyLimitUsd, 0.0001)) * 100).toFixed(1), 100);
   const platformPctUsed = Math.min(
     +((monthlyApiCost / MONTHLY_CAP_USD) * 100).toFixed(1),
     100
@@ -158,8 +181,13 @@ export const CreditProvider = ({ children }) => {
     // Per-user analytics
     mySearchCount,
     myCallsUsed,
+    myMonthlyUsdUsed,
+    myMonthlyLimitUsd,
+    myCreditRemainingUsd,
+    myCreditPctUsed,
+    myCreditIsUnlimited: myUnlimited,
     // Legacy aliases — keeps any existing consumers working
-    credits:     null,
+    credits:     myUnlimited ? 'unlimited' : myCreditRemainingUsd,
     creditsUsed: myCallsUsed,
     // Actions
     loading:       loadingUser || loadingGlobal,

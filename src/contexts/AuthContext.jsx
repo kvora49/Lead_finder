@@ -53,6 +53,10 @@ const syncUserDoc = async (user, extra = {}) => {
       role:        'user',               // NEVER elevated from the client
       isActive:    true,
       credits:     CREDIT_CONFIG.DEFAULT_CREDITS,
+      creditLimit: CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD,
+      creditMonth: null,
+      userMonthlyApiCost: 0,
+      userMonthlyApiCalls: 0,
       creditsUsed: 0,
       searchCount: 0,
       provider:    extra.provider || 'email',

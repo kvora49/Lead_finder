@@ -22,6 +22,7 @@ import {
   getDoc,
   Timestamp,
 } from 'firebase/firestore';
+import { useNavigate } from 'react-router-dom';
 import { db } from '../../firebase';
 import { CREDIT_CONFIG } from '../../config';
 import {
@@ -37,8 +38,10 @@ import {
 } from 'recharts';
 
 const FREE_TIER_USD = CREDIT_CONFIG.FREE_TIER_USD ?? 200;
+const PLATFORM_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD ?? 195;
 
 const DashboardNew = () => {
+  const navigate = useNavigate();
   const [stats, setStats] = useState({
     totalUsers:    0,
     activeUsers7d: 0,
@@ -83,7 +86,7 @@ const DashboardNew = () => {
 
       const freeTierPct = Math.min(
         100,
-        parseFloat(((monthlyCost / FREE_TIER_USD) * 100).toFixed(1))
+        parseFloat(((monthlyCost / PLATFORM_CAP_USD) * 100).toFixed(1))
       );
 
       setStats({ totalUsers, activeUsers7d, totalApiCalls, monthlyCost, freeTierPct, currentMonth });
@@ -166,6 +169,18 @@ const DashboardNew = () => {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate('/admin/users')}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors text-white text-sm font-medium"
+          >
+            Allocate User Credits
+          </button>
+          <button
+            onClick={() => navigate('/admin/credits')}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors text-gray-200 text-sm font-medium border border-slate-700"
+          >
+            Open Platform Usage
+          </button>
           <div className="flex items-center gap-2 px-3 py-2 bg-slate-800 rounded-lg text-sm text-gray-300">
             <Calendar className="w-4 h-4 text-gray-400" />
             {new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
@@ -215,7 +230,7 @@ const DashboardNew = () => {
           icon={DollarSign}
           label="Monthly API Cost"
           value={`$${Number(stats.monthlyCost).toFixed(2)}`}
-          sub={`${stats.freeTierPct}% of $${FREE_TIER_USD} free tier`}
+          sub={`${stats.freeTierPct}% of $${PLATFORM_CAP_USD} platform cap`}
           accent={stats.freeTierPct > 80 ? 'red' : stats.freeTierPct > 50 ? 'orange' : 'green'}
         />
       </div>
@@ -225,13 +240,13 @@ const DashboardNew = () => {
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-white font-semibold flex items-center gap-2">
             <BarChart3 className="w-5 h-5 text-blue-400" />
-            Google Maps Free Tier Usage
+            Platform Usage
           </h3>
           <span className={`text-sm font-medium ${
             stats.freeTierPct > 80 ? 'text-red-400' :
             stats.freeTierPct > 50 ? 'text-orange-400' : 'text-green-400'
           }`}>
-            ${Number(stats.monthlyCost).toFixed(2)} / ${FREE_TIER_USD}
+            ${Number(stats.monthlyCost).toFixed(2)} / $${PLATFORM_CAP_USD}
           </span>
         </div>
         <div className="w-full bg-slate-700 rounded-full h-4 overflow-hidden">
@@ -246,8 +261,27 @@ const DashboardNew = () => {
         <div className="flex justify-between mt-2 text-xs text-gray-500">
           <span>$0</span>
           <span className="text-gray-400">{stats.freeTierPct}% used this month</span>
-          <span>${FREE_TIER_USD} free limit</span>
+          <span>$${PLATFORM_CAP_USD} platform cap</span>
         </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <button
+          onClick={() => navigate('/admin/credits')}
+          className="text-left bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 hover:bg-slate-800/70 transition-all"
+        >
+          <p className="text-sm font-semibold text-blue-400 mb-2">Global Credit Tracker</p>
+          <p className="text-3xl font-bold text-white mb-2">${Number(stats.monthlyCost).toFixed(2)}</p>
+          <p className="text-sm text-slate-400">View full platform usage, user spend, and allocation alerts.</p>
+        </button>
+        <button
+          onClick={() => navigate('/admin/users')}
+          className="text-left bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 hover:bg-slate-800/70 transition-all"
+        >
+          <p className="text-sm font-semibold text-emerald-400 mb-2">Credit Allocation</p>
+          <p className="text-3xl font-bold text-white mb-2">Manage Users</p>
+          <p className="text-sm text-slate-400">Open User Management to assign per-user monthly budgets like $20 or $90.</p>
+        </button>
       </div>
 
       {/* Charts */}
@@ -274,7 +308,7 @@ const DashboardNew = () => {
         <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
           <h3 className="text-white font-semibold mb-1 flex items-center gap-2">
             <DollarSign className="w-5 h-5 text-blue-400" />
-            Monthly Cost vs Free Tier
+            Monthly Cost vs Platform Cap
           </h3>
           <p className="text-slate-500 text-xs mb-4">Daily cost accumulation — {stats.currentMonth || new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' })}</p>
           <ResponsiveContainer width="100%" height={260}>
@@ -289,11 +323,11 @@ const DashboardNew = () => {
                 const d     = i + 1;
                 const label = new Date(year, month, d)
                   .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                if (d > todayDay) return { day: label, cost: null, limit: FREE_TIER_USD };
+                if (d > todayDay) return { day: label, cost: null, limit: PLATFORM_CAP_USD };
                 // eased growth curve (ease-in-out quad)
                 const t     = d / todayDay;
                 const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-                return { day: label, cost: parseFloat((total * eased).toFixed(2)), limit: FREE_TIER_USD };
+                return { day: label, cost: parseFloat((total * eased).toFixed(2)), limit: PLATFORM_CAP_USD };
               });
             })()}>
               <defs>
@@ -326,7 +360,7 @@ const DashboardNew = () => {
                 itemStyle={{ color: '#f1f5f9', fontSize: 12 }}
                 formatter={(v, name) => [
                   `$${Number(v).toFixed(2)}`,
-                  name === 'cost' ? 'API Cost' : 'Free Tier Limit',
+                  name === 'cost' ? 'API Cost' : 'Platform Cap',
                 ]}
               />
               <Area
@@ -352,7 +386,7 @@ const DashboardNew = () => {
           </ResponsiveContainer>
           <div className="flex items-center gap-5 mt-3 text-xs text-slate-500">
             <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-blue-500 inline-block rounded" />Actual cost</span>
-            <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-red-500 inline-block rounded border-dashed" />Free tier limit</span>
+            <span className="flex items-center gap-1.5"><span className="w-4 h-0.5 bg-red-500 inline-block rounded border-dashed" />Platform cap</span>
           </div>
         </div>
       </div>
@@ -377,7 +411,7 @@ const DashboardNew = () => {
               : Free Tier {stats.freeTierPct}% Used
             </p>
             <p className="text-gray-300 text-sm">
-              Monthly API cost is ${Number(stats.monthlyCost).toFixed(2)} of the ${FREE_TIER_USD} free tier.
+              Monthly API cost is ${Number(stats.monthlyCost).toFixed(2)} of the ${PLATFORM_CAP_USD} platform cap.
               {stats.freeTierPct > 95
                 ? ' Billing will begin immediately — action required!'
                 : ' Review usage or increase credit limits to avoid overage charges.'}

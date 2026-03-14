@@ -17,7 +17,7 @@ import { useCredit } from '../../contexts/CreditContext';
 const NAV = [
   { to: '/app',             icon: Gauge,      label: 'Dashboard',      end: true  },
   { to: '/app/lists',       icon: FolderOpen, label: 'My Lists',       end: false },
-  { to: '/platform-usage',  icon: Activity,   label: 'Platform Usage', end: false },
+  { to: '/platform-usage',  icon: Activity,   label: 'My Usage',       end: false },
 ];
 
 // â”€â”€â”€ Single nav link â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -44,11 +44,11 @@ const SidebarContent = ({ onClose }) => {
   const navigate = useNavigate();
   const { currentUser, userProfile, signOut, isAdmin } = useAuth();
   const {
-    totalApiCalls,
-    remainingCalls,
-    platformPctUsed,
-    monthlyApiCost,
-    monthlyCapUsd,
+    myMonthlyUsdUsed,
+    myMonthlyLimitUsd,
+    myCreditRemainingUsd,
+    myCreditPctUsed,
+    myCreditIsUnlimited,
   } = useCredit();
 
   // â”€â”€ Dark mode toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -102,7 +102,7 @@ const SidebarContent = ({ onClose }) => {
       <div className="mx-3 mb-3 rounded-xl bg-slate-50 dark:bg-white/5 border border-slate-200 dark:border-white/10 p-3">
         <div className="flex items-center justify-between mb-2">
           <span className="text-[11px] font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wider">
-            Platform Usage
+            My Credit Usage
           </span>
           <Zap className="w-3.5 h-3.5 text-indigo-500" strokeWidth={1.5} />
         </div>
@@ -110,28 +110,30 @@ const SidebarContent = ({ onClose }) => {
         <div className="w-full bg-slate-200 dark:bg-white/10 rounded-full h-1.5 mb-2 overflow-hidden">
           <div
             className={`h-1.5 rounded-full transition-all duration-500 ${
-              platformPctUsed >= 97 ? 'bg-red-500'
-              : platformPctUsed >= 80 ? 'bg-amber-500'
+              myCreditPctUsed >= 97 ? 'bg-red-500'
+              : myCreditPctUsed >= 80 ? 'bg-amber-500'
               : 'bg-emerald-500'
             }`}
-            style={{ width: `${Math.max(platformPctUsed ?? 0, 1)}%` }}
+            style={{ width: `${Math.max(myCreditIsUnlimited ? 100 : (myCreditPctUsed ?? 0), 1)}%` }}
           />
         </div>
 
         <div className="flex justify-between text-[11px]">
           <span className="text-slate-400 dark:text-gray-500">
-            {(totalApiCalls ?? 0).toLocaleString()} used
+            {myCreditIsUnlimited ? 'Unlimited allocation' : `${Number(myCreditPctUsed ?? 0).toFixed(1)}% used`}
           </span>
           <span className={`font-semibold ${
-            platformPctUsed >= 80 ? 'text-amber-500' : 'text-emerald-500'
+            myCreditPctUsed >= 80 ? 'text-amber-500' : 'text-emerald-500'
           }`}>
-            ${(monthlyApiCost ?? 0).toFixed(2)} / ${monthlyCapUsd}
+            {myCreditIsUnlimited
+              ? 'Unlimited'
+              : `$${(myMonthlyUsdUsed ?? 0).toFixed(2)} / $${(myMonthlyLimitUsd ?? 0).toFixed(2)}`}
           </span>
         </div>
 
-        {remainingCalls < 500 && (
+        {!myCreditIsUnlimited && (myCreditRemainingUsd ?? 0) < 5 && (
           <p className="mt-1.5 text-[10px] text-amber-500 font-medium">
-            âš  Less than 500 calls remaining
+            Low remaining monthly credits
           </p>
         )}
       </div>

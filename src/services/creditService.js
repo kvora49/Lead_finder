@@ -1,14 +1,10 @@
 ﻿/**
- * Lead Finder â€” Credit Service  (Phase 3 â€” Global Tracking)
+ * Lead Finder - Credit Service
  *
- * Model: ALL users share a single global pool from Google's $200/month
- * free tier (~6,093 API calls). No per-user credit limits exist.
- * Any authenticated user can search as long as the platform hasn't
- * hit the $195 safety cap this month.
- *
- * The only gate: system/global_usage monthly budget.
- * Per-user analytics (searchCount, creditsUsed) are recorded for
- * admin visibility but do NOT block searches.
+ * Model:
+ * - Global monthly usage is tracked in system/global_usage and capped at $195.
+ * - Each user has a dynamic monthly USD allocation (users/{uid}.creditLimit).
+ * - Actual Google API usage cost is charged from measured apiCalls only.
  */
 
 import { db } from '../firebase';
@@ -23,7 +19,8 @@ import {
 import { CREDIT_CONFIG } from '../config';
 
 const COST_PER_CALL   = CREDIT_CONFIG.COST_PER_REQUEST_USD; // $0.032
-const MONTHLY_CAP_USD = 195.00;
+const MONTHLY_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD || 195.00;
+const DEFAULT_USER_BUDGET_USD = CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD || 50;
 const GLOBAL_DOC_PATH = ['system', 'global_usage'];
 
 /** Total free calls per month (for display) */
@@ -32,6 +29,38 @@ export const MONTHLY_FREE_CALLS = Math.floor(MONTHLY_CAP_USD / COST_PER_CALL); /
 const currentMonth = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const parseUserLimit = (creditLimitRaw) => {
+  if (creditLimitRaw === 'unlimited') return { isUnlimited: true, limitUsd: Infinity };
+  if (typeof creditLimitRaw === 'number') {
+    return { isUnlimited: false, limitUsd: Math.max(0, creditLimitRaw) };
+  }
+  if (typeof creditLimitRaw === 'string' && creditLimitRaw.trim() !== '') {
+    const n = Number.parseFloat(creditLimitRaw);
+    if (Number.isFinite(n)) return { isUnlimited: false, limitUsd: Math.max(0, n) };
+  }
+  return { isUnlimited: false, limitUsd: DEFAULT_USER_BUDGET_USD };
+};
+
+export const getEffectiveUserMonthMetrics = (userData = {}, month = currentMonth()) => {
+  const legacyApiCalls = Number(userData.creditsUsed ?? 0);
+  const legacyCostUsd = +(legacyApiCalls * COST_PER_CALL).toFixed(4);
+
+  const hasCurrentMonthRecord = userData.creditMonth === month;
+  const explicitApiCalls = hasCurrentMonthRecord ? Number(userData.userMonthlyApiCalls ?? 0) : 0;
+  const explicitCostUsd = hasCurrentMonthRecord ? +(Number(userData.userMonthlyApiCost ?? 0)).toFixed(4) : 0;
+
+  const shouldUseLegacyFallback = !hasCurrentMonthRecord || (
+    explicitApiCalls === 0 && explicitCostUsd === 0 && legacyApiCalls > 0
+  );
+
+  return {
+    month,
+    monthlyApiCalls: shouldUseLegacyFallback ? legacyApiCalls : explicitApiCalls,
+    monthlyApiCost: shouldUseLegacyFallback ? legacyCostUsd : explicitCostUsd,
+    isLegacyFallback: shouldUseLegacyFallback,
+  };
 };
 
 /**
@@ -46,8 +75,8 @@ const currentMonth = () => {
  * @param {object} [meta]    { keyword, location, scope }
  */
 export const deductCredits = async (userId, apiCalls, meta = {}) => {
-  if (!userId)                    throw new Error('userId is required.');
-  if (!apiCalls || apiCalls <= 0) return;  // cached â€” free, skip
+  if (!userId) throw new Error('userId is required.');
+  if (!apiCalls || apiCalls <= 0) return;
 
   const costUsd   = +(apiCalls * COST_PER_CALL).toFixed(4);
   const month     = currentMonth();
@@ -64,7 +93,24 @@ export const deductCredits = async (userId, apiCalls, meta = {}) => {
       throw new Error('User profile not found. Please sign in again.');
     }
 
-    // â”€â”€ GLOBAL GUARD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const ud = userSnap.data();
+    const { isUnlimited, limitUsd } = parseUserLimit(ud.creditLimit);
+    const currentUserMetrics = getEffectiveUserMonthMetrics(ud, month);
+    const isNewUserMonth = ud.creditMonth !== month;
+    const userCurrentMonthCost = currentUserMetrics.monthlyApiCost;
+    const userCurrentMonthCalls = currentUserMetrics.monthlyApiCalls;
+
+    if (!isUnlimited && limitUsd <= 0) {
+      throw new Error('Your credit allocation is 0. Please contact admin.');
+    }
+
+    if (!isUnlimited && userCurrentMonthCost + costUsd > limitUsd) {
+      const remaining = Math.max(0, limitUsd - userCurrentMonthCost);
+      throw new Error(
+        `Insufficient user credits. Remaining $${remaining.toFixed(2)} of $${limitUsd.toFixed(2)} monthly allocation.`
+      );
+    }
+
     const globalData    = globalSnap.exists() ? globalSnap.data() : {};
     const isNewMonth    = !globalSnap.exists() || globalData.month !== month;
     const currentCost   = isNewMonth ? 0 : (globalData.monthly_api_cost ?? 0);
@@ -77,7 +123,8 @@ export const deductCredits = async (userId, apiCalls, meta = {}) => {
       );
     }
 
-    // â”€â”€ Write 1: global usage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const newUserMonthCost = +(userCurrentMonthCost + costUsd).toFixed(4);
+
     const newGlobal = {
       month,
       monthly_api_cost: isNewMonth ? costUsd : currentCost + costUsd,
@@ -87,18 +134,22 @@ export const deductCredits = async (userId, apiCalls, meta = {}) => {
     if (!globalSnap.exists() || isNewMonth) tx.set(globalRef, newGlobal);
     else                                     tx.update(globalRef, newGlobal);
 
-    // â”€â”€ Write 2: per-user analytics (no balance deduction) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const ud = userSnap.data();
+    // Keep legacy counters while adding precise per-user monthly USD tracking.
     tx.update(userRef, {
       creditsUsed: (ud.creditsUsed ?? 0) + apiCalls,
       searchCount: (ud.searchCount ?? 0) + 1,
+      creditMonth: month,
+      userMonthlyApiCost: newUserMonthCost,
+      userMonthlyApiCalls: userCurrentMonthCalls + apiCalls,
+      creditRemainingUsd: isUnlimited ? null : +(Math.max(0, limitUsd - newUserMonthCost).toFixed(4)),
+      lastCreditChargeAt: serverTimestamp(),
     });
 
-    // â”€â”€ Write 3: audit receipt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     tx.set(doc(collection(db, 'users', userId, 'credit_logs')), {
       userId,
       apiCalls,
       costUsd,
+      userMonthlyLimitUsd: isUnlimited ? 'unlimited' : limitUsd,
       keyword:  meta.keyword  || '',
       location: meta.location || '',
       scope:    meta.scope    || '',
@@ -108,7 +159,8 @@ export const deductCredits = async (userId, apiCalls, meta = {}) => {
 
     console.log(
       `[credits] uid=${userId} +${apiCalls} calls ($${costUsd}) | ` +
-      `platform: $${currentCost.toFixed(2)} â†’ $${(currentCost + costUsd).toFixed(2)}/$${MONTHLY_CAP_USD}`
+      `user: $${userCurrentMonthCost.toFixed(2)} -> $${newUserMonthCost.toFixed(2)} | ` +
+      `platform: $${currentCost.toFixed(2)} -> $${(currentCost + costUsd).toFixed(2)}/$${MONTHLY_CAP_USD}`
     );
   });
 };
@@ -135,7 +187,7 @@ export const ensureGlobalUsageDoc = async () => {
   }
 };
 
-// â”€â”€ Backward-compat stubs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Backward compatibility stubs.
 /* eslint-disable no-unused-vars */
 export const initializeGlobalCredits  = ()        => ensureGlobalUsageDoc();
 export const getGlobalCredits         = ()        => getGlobalUsage().then(d => d.totalApiCalls ?? 0);

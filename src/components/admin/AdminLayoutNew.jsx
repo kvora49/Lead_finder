@@ -59,9 +59,9 @@ const AdminLayoutNew = () => {
     },
     { 
       icon: CreditCard, 
-      label: 'Credit Analytics', 
+      label: 'Platform Usage', 
       path: '/admin/credits',
-      description: 'Credit usage & monitoring'
+      description: 'Global budget & allocations'
     },
     { 
       icon: Shield, 

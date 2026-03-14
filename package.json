@@ -12,7 +12,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0",
-    "seed": "node scripts/seedData.js"
+    "seed": "node scripts/seedData.js",
+    "migrate:monthly-credits": "node scripts/migrateMonthlyCredits.js"
   },
   "dependencies": {
     "@emailjs/browser": "^4.4.1",
