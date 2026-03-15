@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const DARK_MAP_STYLES = [
   { elementType: 'geometry', stylers: [{ color: '#1a1a2e' }] },
@@ -11,7 +11,24 @@ const DARK_MAP_STYLES = [
 
 const LeadMapView = ({ leads, apiKey }) => {
   const mapRef = useRef(null);
-  const isDark = document.documentElement.classList.contains('dark');
+
+  // Reactive dark mode state — updates when user toggles dark/light
+  const [isDark, setIsDark] = useState(
+    () => document.documentElement.classList.contains('dark')
+  );
+
+  // MutationObserver watches for class changes on <html> element
+  // When dark class is added/removed, isDark updates -> map re-initialises
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      setIsDark(document.documentElement.classList.contains('dark'));
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const leadsWithCoords = leads.filter((l) => l.lat && l.lng);
@@ -111,7 +128,7 @@ const LeadMapView = ({ leads, apiKey }) => {
     <div
       ref={mapRef}
       className="w-full rounded-2xl border border-slate-200 dark:border-white/10 overflow-hidden"
-      style={{ height: '520px', minHeight: '300px' }}
+      style={{ height: 'clamp(300px, 55vh, 520px)', minHeight: '300px' }}
     />
   );
 };

@@ -50,7 +50,7 @@ const Login = () => {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 flex">
+    <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] flex">
 
       {/* ── Left brand panel (lg+) ─────────────────────────── */}
       <div className="hidden lg:flex lg:w-1/2 bg-gradient-to-br from-indigo-600 via-violet-600 to-purple-700
@@ -93,7 +93,7 @@ const Login = () => {
       </div>
 
       {/* ── Right form panel ──────────────────────────────── */}
-      <div className="flex-1 max-w-xl flex flex-col justify-center px-6 sm:px-12 lg:px-16 py-12">
+      <div className="flex-1 max-w-xl flex flex-col justify-center px-6 sm:px-12 lg:px-16 py-12 bg-white dark:bg-[#0A0A0A]">
 
         {/* Mobile logo */}
         <div className="lg:hidden flex items-center gap-2 mb-10">
@@ -104,18 +104,18 @@ const Login = () => {
                 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
           </div>
-          <span className="text-base font-bold text-slate-900">Lead Finder</span>
+          <span className="text-base font-bold text-slate-900 dark:text-white">Lead Finder</span>
         </div>
 
         <div className="w-full max-w-sm mx-auto lg:mx-0">
-          <h2 className="text-2xl font-bold text-slate-900 mb-1">Welcome back</h2>
-          <p className="text-sm text-slate-500 mb-8">Sign in to your account to continue</p>
+          <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-1">Welcome back</h2>
+          <p className="text-sm text-slate-500 dark:text-gray-400 mb-8">Sign in to your account to continue</p>
 
           {/* Error */}
           {error && (
-            <div className="mb-5 flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl p-4">
+            <div className="mb-5 flex items-start gap-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-500/30 rounded-xl p-4">
               <AlertCircle className="w-4 h-4 text-red-500 flex-none mt-0.5" />
-              <p className="text-sm text-red-700">{error}</p>
+              <p className="text-sm text-red-700 dark:text-red-400">{error}</p>
             </div>
           )}
 
@@ -124,14 +124,15 @@ const Login = () => {
 
             {/* Email */}
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1.5">Email</label>
+              <label className="block text-sm font-medium text-slate-700 dark:text-gray-300 mb-1.5">Email</label>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                 <input
                   type="email" value={email} onChange={e => setEmail(e.target.value)}
                   placeholder="you@example.com" required disabled={loading}
-                  className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-lg bg-white
-                    focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
+                  className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 dark:border-white/10 rounded-lg bg-white dark:bg-white/5 text-slate-800 dark:text-white
+                    placeholder-slate-400 dark:placeholder-gray-500
+                    focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400
                     disabled:opacity-60 transition"
                 />
               </div>
@@ -140,9 +141,9 @@ const Login = () => {
             {/* Password */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <label className="text-sm font-medium text-slate-700">Password</label>
+                <label className="text-sm font-medium text-slate-700 dark:text-gray-300">Password</label>
                 <Link to="/forgot-password"
-                  className="text-xs text-indigo-600 hover:text-indigo-700 font-medium">
+                  className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 font-medium">
                   Forgot password?
                 </Link>
               </div>
@@ -152,8 +153,9 @@ const Login = () => {
                   type={showPassword ? 'text' : 'password'} value={password}
                   onChange={e => setPassword(e.target.value)}
                   placeholder="••••••••" required disabled={loading} autoComplete="current-password"
-                  className="w-full pl-10 pr-10 py-2.5 text-sm border border-slate-300 rounded-lg bg-white
-                    focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500
+                  className="w-full pl-10 pr-10 py-2.5 text-sm border border-slate-300 dark:border-white/10 rounded-lg bg-white dark:bg-white/5 text-slate-800 dark:text-white
+                    placeholder-slate-400 dark:placeholder-gray-500
+                    focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400
                     disabled:opacity-60 transition [&::-ms-reveal]:hidden"
                 />
                 {password && (
@@ -178,25 +180,25 @@ const Login = () => {
           {/* Divider */}
           <div className="relative my-5">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-slate-200" />
+              <div className="w-full border-t border-slate-200 dark:border-white/10" />
             </div>
             <div className="relative flex justify-center">
-              <span className="px-3 bg-slate-50 text-xs text-slate-400">or continue with</span>
+              <span className="px-3 bg-slate-50 dark:bg-[#0A0A0A] text-xs text-slate-400 dark:text-gray-500">or continue with</span>
             </div>
           </div>
 
           {/* Google */}
           <button onClick={handleGoogleLogin} disabled={loading}
-            className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-slate-300
-              rounded-lg text-sm font-medium text-slate-700 bg-white hover:bg-slate-50
+            className="w-full flex items-center justify-center gap-3 py-2.5 px-4 border border-slate-300 dark:border-white/10
+              rounded-lg text-sm font-medium text-slate-700 dark:text-gray-300 bg-white dark:bg-white/5 hover:bg-slate-50 dark:hover:bg-white/10
               disabled:opacity-50 transition shadow-sm">
             <GoogleIcon />
             Continue with Google
           </button>
 
-          <p className="text-center text-sm text-slate-500 mt-6">
+          <p className="text-center text-sm text-slate-500 dark:text-gray-400 mt-6">
             No account?{' '}
-            <Link to="/register" className="text-indigo-600 hover:text-indigo-700 font-semibold">
+            <Link to="/register" className="text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 font-semibold">
               Create one free
             </Link>
           </p>

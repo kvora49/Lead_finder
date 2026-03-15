@@ -1,27 +1,36 @@
 /**
- * Lead Finder — Places API Service  (Phase 3)
+ * Lead Finder — Places API Service  (v4 — Precision Edition)
  *
- * Strategy: Dynamic Viewport Grid Sweep
- *   1. Geocode the user's location string → bounding box (viewport).
- *      Uses Geocoding REST API — CORS-enabled.
- *   2. Subdivide the viewport into an N×M grid of non-overlapping rectangles
- *      based on searchScope:
- *        city          → 3 cols × 3 rows =  9 cells
- *        neighbourhood → 2 cols × 2 rows =  4 cells
- *        specific      → 1 col  × 1 row  =  1 cell (original viewport, no split)
- *   3. For EACH rectangle, call searchQueryPaged with up to 3 pages (60 results max).
- *      Cells are staggered 400 ms apart to avoid OVER_QUERY_LIMIT (429).
- *   4. Aggressively deduplicate by place.id before caching or returning.
+ * PURPOSE: Product search engine. User types a product keyword ("ball", "watch",
+ * "hardware") and the engine finds every place that SELLS that product.
  *
- * Theoretical maximum per single search:
- *        city          → 9 cells × 3 variants × 3 pages × 20 = 540 raw  → 160–250 unique  (≈27 base calls)
- *        neighbourhood → 9 cells × 3 variants × 3 pages × 20 = 540 raw  → 100–180 unique  (≈27 base calls)
- *        specific      → 1 cell  × 3 variants × 3 pages × 20 =  60 raw  →  40–60  unique
+ * API CALL BUDGET (exact — never changes):
+ *   city:          4×4 = 16 cells × 2 variants × 1 page  = 32 calls exact
+ *   neighbourhood: 4×3 = 12 cells × 2 variants × 1 page  = 24 calls exact
+ *   specific:      1×1 =  1 cell  × 3 variants × ≤3 pages = ≤9 calls
  *
- * Zero-cost cache layer:
- *   • Before ANY API call we check `public_search_cache` in Firestore.
- *   • Cache TTL = CACHE_CONFIG.TTL_HOURS (default 24 h).
- *   • Fresh cache hit → return immediately, 0 Google API calls consumed.
+ * GRID STRATEGY:
+ *   Geocode location → get viewport bounding box → split into NxM grid cells
+ *   → search each cell independently with a rectangle restriction
+ *   → deduplicate results by place.id across all cells
+ *   This bypasses Google Places API's 20-results-per-query limit.
+ *
+ * RELEVANCE FILTER (three-pass, applied after sweep):
+ *   Pass 1 — Strong retail types (sporting_goods_store, hardware_store, toy_store etc.)
+ *            → always keep. These are dedicated product sellers.
+ *   Pass 2 — Hard food/drink types (bakery, restaurant, cafe, bar etc.)
+ *            → always remove, even if Google also tagged them as 'store'.
+ *            Fixes: TGB Bakery, Dangee Dums appearing in "ball" search.
+ *   Pass 3 — Standard unrelated check (bank, hospital, temple, school etc.)
+ *            → remove if ALL specific types are unrelated.
+ *   Jewellery detection: jewelry_store kept only for jewellery keywords
+ *            (watch, ring, gold, chain etc.). Removed for all others.
+ *
+ * GEO FENCE: neighbourhood/specific use geo.bounds (tight admin boundary),
+ *   not geo.viewport (padded display box). Prevents Maninagar results
+ *   including Isanpur, Saraspur, Gomtipur.
+ *
+ * CACHE: Firestore public_search_cache, TTL 24h, 0 API calls on cache hit.
  */
 
 import { db } from '../firebase';

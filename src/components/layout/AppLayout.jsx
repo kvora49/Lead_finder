@@ -9,7 +9,7 @@ import Sidebar from './Sidebar';
  *
  * A fixed top header contains the hamburger toggle + "Lead Finder" brand.
  * The sidebar panel slides below the header using translate transforms.
- * Main content shifts right (ml-64) when the sidebar is open.
+ * Sidebar overlays content as a fixed panel — no content shift on any screen size.
  */
 const AppLayout = () => {
   // Default closed — sidebar auto-shows on desktop via md:translate-x-0 in Sidebar.jsx
