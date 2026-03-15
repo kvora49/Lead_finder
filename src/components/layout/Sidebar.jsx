@@ -1,5 +1,6 @@
 ﻿import { useState, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   FolderOpen,
   Shield,
@@ -52,11 +53,16 @@ const SidebarContent = ({ onClose }) => {
   } = useCredit();
 
   // â”€â”€ Dark mode toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const [isDark, setIsDark] = useState(() =>
-    document.documentElement.classList.contains('dark')
-  );
+  const [isDark, setIsDark] = useState(() => {
+    // Check localStorage first, then fall back to system preference.
+    const saved = localStorage.getItem('leadfinder-theme');
+    if (saved === 'dark') return true;
+    if (saved === 'light') return false;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
+    localStorage.setItem('leadfinder-theme', isDark ? 'dark' : 'light');
   }, [isDark]);
 
   const handleSignOut = async () => {
@@ -163,10 +169,21 @@ const SidebarContent = ({ onClose }) => {
             text-slate-500 dark:text-gray-400 hover:bg-slate-100 dark:hover:bg-white/10
             hover:text-slate-900 dark:hover:text-white transition-all active:scale-[0.97]"
         >
-          {isDark
-            ? <Sun  className="w-4 h-4 flex-none" strokeWidth={1.5} />
-            : <Moon className="w-4 h-4 flex-none" strokeWidth={1.5} />
-          }
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.span
+              key={isDark ? 'sun' : 'moon'}
+              initial={{ rotate: -90, opacity: 0, scale: 0.6 }}
+              animate={{ rotate: 0, opacity: 1, scale: 1 }}
+              exit={{ rotate: 90, opacity: 0, scale: 0.6 }}
+              transition={{ duration: 0.25, ease: 'easeOut' }}
+              style={{ display: 'flex', flexShrink: 0 }}
+            >
+              {isDark
+                ? <Sun className="w-4 h-4" strokeWidth={1.5} />
+                : <Moon className="w-4 h-4" strokeWidth={1.5} />
+              }
+            </motion.span>
+          </AnimatePresence>
           {isDark ? 'Light mode' : 'Dark mode'}
         </button>
 

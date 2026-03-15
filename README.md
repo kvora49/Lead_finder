@@ -30,7 +30,7 @@ A premium full-stack SaaS application for discovering business leads worldwide. 
 - **Lucide React** — icon library
 - **jsPDF + jspdf-autotable** — PDF export
 - **PapaParse** — CSV export
-- **Cloudflare Pages** — deployment target
+- **Firebase Hosting** — production deployment target
 
 ---
 
@@ -55,9 +55,10 @@ A premium full-stack SaaS application for discovering business leads worldwide. 
 │   │   │   ├── SystemLogsNew.jsx      # Admin action log
 │   │   │   ├── AccessControlNew.jsx   # RBAC management
 │   │   │   ├── SettingsNew.jsx        # Platform settings
-│   │   │   └── DataSeeder.jsx         # Dev: seed Firestore with test data
+│   │   │   └── UserDetailsModal.jsx   # Admin slide-in user details drawer
 │   │   ├── SearchPanel.jsx            # Full-screen hero search UI + results grid
-│   │   ├── LeadCard.jsx               # Business result card
+│   │   ├── LeadMapView.jsx            # Map view for searched leads
+│   │   ├── CheckEmail.jsx             # Registration email verification notice
 │   │   ├── MyLists.jsx                # Saved leads page
 │   │   ├── SaveLeadsModal.jsx         # Save-to-list modal
 │   │   ├── CreditSyncStatus.jsx       # Realtime credit display
@@ -80,8 +81,10 @@ A premium full-stack SaaS application for discovering business leads worldwide. 
 │   └── index.js                       # Firebase Cloud Functions
 ├── scripts/
 │   ├── addAdmin.js                    # CLI: promote user to admin
-│   ├── setupAdmin.js                  # CLI: first admin setup
-│   └── seedData.js                    # CLI: seed Firestore test data
+│   ├── addCredits.js                  # CLI: add credits to a user
+│   ├── migrateMonthlyCredits.js       # CLI: migrate monthly credit fields
+│   ├── seedBasicData.js               # CLI: seed baseline Firestore data
+│   └── setupAdmin.js                  # CLI: first admin setup
 ├── firestore.rules                    # Firestore security rules (RBAC)
 ├── firestore.indexes.json             # Composite index definitions
 ├── firebase.json                      # Firebase project config
@@ -188,7 +191,7 @@ Input: "Kurti, Saree" in "Ahmedabad, Surat"
 | Role | Capabilities |
 |---|---|
 | `user` | Search, save leads, view own credits |
-| `admin` | All user capabilities + admin dashboard, user management, credit adjustments |
+| `admin` | All user capabilities + admin dashboard, user management, credit adjustments (read-only for protected owner row) |
 | `super_admin` | All admin capabilities + access control, role changes |
 
 ### Promote a user to admin
@@ -208,15 +211,23 @@ node scripts/addAdmin.js user@example.com
 
 ---
 
-## ☁️ Deployment (Cloudflare Pages)
+## ☁️ Deployment (Firebase Hosting)
 
 ```bash
 npm run build
-# Deploy the dist/ folder to Cloudflare Pages
+firebase deploy --only hosting,firestore:rules,firestore:indexes
 ```
 
-Set the following environment variable in Cloudflare dashboard if using server-side key injection:
-- `VITE_GOOGLE_API_KEY`
+To include backend updates in the same release:
+
+```bash
+firebase deploy --only functions
+```
+
+Required setup:
+- Log in once: `firebase login`
+- Select project: `firebase use <your-project-id>`
+- Ensure `src/config.js` and Firebase credentials are configured for production.
 
 ---
 

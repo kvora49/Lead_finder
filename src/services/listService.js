@@ -17,6 +17,7 @@ import {
   getDoc,
   deleteDoc,
   writeBatch,
+  updateDoc,
   query,
   orderBy,
   serverTimestamp,
@@ -179,4 +180,12 @@ export const getLeads = async (userId, listId) => {
  */
 export const deleteLead = async (userId, listId, leadId) => {
   await deleteDoc(doc(leadsCol(userId, listId), leadId));
+};
+
+export const updateLeadNote = async (userId, listId, leadId, note) => {
+  const ref = doc(db, 'users', userId, 'lists', listId, 'leads', leadId);
+  await updateDoc(ref, {
+    note: note.trim(),
+    noteUpdatedAt: new Date().toISOString(),
+  });
 };

@@ -23,6 +23,7 @@ import {
   Timestamp,
 } from 'firebase/firestore';
 import { useNavigate } from 'react-router-dom';
+import CountUp from 'react-countup';
 import { db } from '../../firebase';
 import { CREDIT_CONFIG } from '../../config';
 import {
@@ -140,7 +141,14 @@ const DashboardNew = () => {
         </div>
       </div>
       <p className="text-2xl font-bold text-white mb-1">
-        {typeof value === 'number' ? value.toLocaleString() : value}
+        {typeof value === 'number' ? (
+          <CountUp
+            end={value}
+            duration={1.4}
+            separator=","
+            decimals={value % 1 !== 0 ? 2 : 0}
+          />
+        ) : value}
       </p>
       <p className="text-sm text-gray-400">{label}</p>
       {sub && <p className="text-xs text-gray-500 mt-1">{sub}</p>}
@@ -265,7 +273,7 @@ const DashboardNew = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <button
           onClick={() => navigate('/admin/credits')}
           className="text-left bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 hover:bg-slate-800/70 transition-all"
@@ -285,7 +293,7 @@ const DashboardNew = () => {
       </div>
 
       {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
           <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
             <TrendingUp className="w-5 h-5 text-green-400" />

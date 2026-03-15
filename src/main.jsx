@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { Toaster } from 'sonner';
 import { AuthProvider }      from './contexts/AuthContext.jsx';
 import { AdminAuthProvider } from './contexts/AdminAuthContext.jsx';
 import { CreditProvider }    from './contexts/CreditContext.jsx';
@@ -14,13 +15,13 @@ import SystemLogsNew          from './components/admin/SystemLogsNew.jsx';
 import CreditAnalyticsNew     from './components/admin/CreditAnalyticsNew.jsx';
 import SearchAnalyticsNew     from './components/admin/SearchAnalyticsNew.jsx';
 import SettingsNew            from './components/admin/SettingsNew.jsx';
-import DataSeeder             from './components/admin/DataSeeder.jsx';
 import AccessControlNew       from './components/admin/AccessControlNew.jsx';
 import AppLayout              from './components/layout/AppLayout.jsx';
 import App                    from './App.jsx';
 import Login                 from './components/Login.jsx';
 import Register              from './components/Register.jsx';
 import ForgotPassword        from './components/ForgotPassword.jsx';
+import CheckEmail            from './components/CheckEmail.jsx';
 import MyLists               from './components/MyLists.jsx';
 import PlatformUsagePage     from './pages/PlatformUsagePage.jsx';
 import './index.css';
@@ -109,6 +110,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             <Route path="/login"           element={<Login />} />
             <Route path="/register"        element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/check-email"     element={<CheckEmail />} />
 
             {/* ── Protected user area (nested inside AppLayout sidebar shell) ── */}
             <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
@@ -137,7 +139,6 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               <Route path="credits"    element={<CreditAnalyticsNew />} />
               <Route path="analytics"  element={<SearchAnalyticsNew />} />
               <Route path="settings"   element={<SettingsNew />} />
-              <Route path="seeder"     element={<DataSeeder />} />
               <Route path="access"     element={<AccessControlNew />} />
             </Route>
 
@@ -145,6 +146,13 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             <Route path="/"  element={<Navigate to="/app"  replace />} />
             <Route path="*"  element={<Navigate to="/app"  replace />} />
           </Routes>
+          <Toaster
+            position="bottom-right"
+            richColors
+            toastOptions={{
+              style: { fontFamily: 'Inter, system-ui, sans-serif' },
+            }}
+          />
           </CreditProvider>
         </AdminAuthProvider>
       </AuthProvider>

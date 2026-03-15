@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Lead Finder — Places API Service  (Phase 3)
  *
  * Strategy: Dynamic Viewport Grid Sweep
@@ -29,6 +29,10 @@ import {
   doc, getDoc, setDoc, serverTimestamp,
 } from 'firebase/firestore';
 import { GOOGLE_API_KEY, CACHE_CONFIG } from '../config';
+
+// Gate all debug logs behind DEV flag — zero console output in production builds
+const log  = import.meta.env.DEV ? console.log.bind(console)  : () => {};
+const warn = import.meta.env.DEV ? console.warn.bind(console) : () => {};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -88,9 +92,9 @@ const FIELD_MASK = [
 // More cells = smaller micro-zones = less overlap on dedup → 100+ unique results.
 // Specific: 3 variants for maximum depth on a single point.
 const GRID_CONFIG = {
-  city:          { cols: 4, rows: 4, pagesPerCell: 1 },
-  neighbourhood: { cols: 4, rows: 3, pagesPerCell: 3 },
-  specific:      { cols: 1, rows: 1, pagesPerCell: 3 },
+  city:          { cols: 4, rows: 4, pagesPerCell: 1 },  // 16 cells × 2 variants × 1 page = 32 calls exact
+  neighbourhood: { cols: 4, rows: 3, pagesPerCell: 1 },  // 12 cells × 2 variants × 1 page = 24 calls exact
+  specific:      { cols: 1, rows: 1, pagesPerCell: 3 },  //  1 cell  × 3 variants × ≤3 pages = ≤9 calls
 };
 
 // Global fallback (should not be needed — all scopes are in GRID_CONFIG).
@@ -191,36 +195,68 @@ const buildQueries = (keyword, location, searchScope, type) => {
 // types (establishment, store, point_of_interest) and check the specific
 // ones.  If EVERY specific type is in this set → the place is unrelated.
 // Conservative by design: places with no types or all-generic types are kept.
+// ── GENERIC: types that carry zero information.
+// Only truly generic tags — everything else is treated as a specific signal.
 const GENERIC_PLACE_TYPES = new Set([
-  'point_of_interest', 'establishment', 'store', 'shopping_mall', 'market',
+  'point_of_interest',
+  'establishment',
 ]);
+
+// ── UNRELATED: place categories that can NEVER sell any physical product.
+//
+// DESIGN PRINCIPLE:
+// This is a product search app. The filter removes places that are
+// categorically impossible product sellers — regardless of keyword.
+// A restaurant cannot sell balls OR watches OR hardware OR kurti.
+// A temple cannot sell anything. A bank cannot sell anything.
+//
+// We do NOT remove retail store types (electronics_store, clothing_store,
+// jewelry_store, shoe_store etc.) because:
+//   1. Google only returns them for a keyword if they actually relate to it.
+//      e.g. Google returns an electronics store for "ball" only if that
+//      store sells something called "ball" or is in a ball market area.
+//   2. Our job is to remove CLEARLY WRONG CATEGORIES (restaurants, temples)
+//      not to second-guess Google's relevance ranking for retail stores.
+//
+// jewelry_store specifically: handled separately below via keyword detection.
+// For "ball" → jewelry_store removed. For "watch"/"ring" → kept.
 const UNRELATED_PLACE_TYPES = new Set([
-  // Jewellery / luxury
-  'jewelry_store',
-  // Finance
-  'bank', 'atm', 'finance', 'accounting', 'insurance_agency',
-  // Automotive
-  'car_dealer', 'car_rental', 'car_repair', 'car_wash', 'auto_parts_store',
-  'parking', 'gas_station',
-  // Food & drink
+  // ── Food & drink (cannot sell physical products) ──
   'restaurant', 'cafe', 'bar', 'food', 'bakery', 'meal_delivery',
-  'meal_takeaway', 'liquor_store',
-  // Health / medical
-  'hospital', 'doctor', 'dentist', 'pharmacy', 'drugstore',
-  'physiotherapist', 'veterinary_care',
-  // Accommodation
+  'meal_takeaway', 'fast_food_restaurant', 'ice_cream_shop',
+  'coffee_shop', 'night_club', 'liquor_store',
+
+  // ── Finance (cannot sell products) ──
+  'bank', 'atm', 'accounting', 'insurance_agency',
+
+  // ── Medical services (cannot sell general products) ──
+  'hospital', 'doctor', 'dentist', 'physiotherapist', 'veterinary_care',
+
+  // ── Accommodation (cannot sell products) ──
   'lodging', 'hotel', 'motel',
-  // Entertainment
-  'movie_theater', 'night_club', 'amusement_park', 'casino',
-  'bowling_alley', 'stadium', 'zoo', 'aquarium', 'art_gallery', 'museum',
-  // Personal care
+
+  // ── Entertainment & tourism (never a product seller) ──
+  'movie_theater', 'amusement_park', 'casino', 'stadium',
+  'zoo', 'aquarium', 'art_gallery', 'museum',
+  'tourist_attraction', 'event_venue', 'banquet_hall', 'wedding_venue',
+
+  // ── Personal care (cannot sell products) ──
   'beauty_salon', 'hair_care', 'spa', 'nail_salon',
-  // Education
+
+  // ── Education ──
   'school', 'university', 'library',
-  // Travel / transit
+
+  // ── Travel & transit ──
   'airport', 'bus_station', 'train_station', 'transit_station', 'subway_station',
-  // Religious / civic
+
+  // ── Religious & civic (never a business lead) ──
   'church', 'mosque', 'hindu_temple', 'place_of_worship', 'cemetery',
+  'local_government_office', 'courthouse', 'embassy', 'fire_station', 'police',
+
+  // ── Automotive services only (not dealers/parts) ──
+  // car_dealer and auto_parts_store are intentionally excluded —
+  // they sell physical products (cars, parts) relevant to some keywords.
+  'car_rental', 'car_repair', 'car_wash', 'parking', 'gas_station',
 ]);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -275,7 +311,7 @@ const generateGridBoxes = (viewport, searchScope) => {
     }
   }
 
-  console.log(
+  log(
     `[grid] scope=${searchScope} → ${cols}×${rows}=${boxes.length} cells`,
     `| latSpan=${latSpan.toFixed(5)}° lngSpan=${lngSpan.toFixed(5)}°`,
     `| cellH=${cellLatHeight.toFixed(5)}° cellW=${cellLngWidth.toFixed(5)}°`,
@@ -306,16 +342,16 @@ const readCache = async (cacheKey) => {
     const ttlMs     = CACHE_CONFIG.TTL_HOURS * 60 * 60 * 1000;
 
     if (Date.now() - cachedAt > ttlMs) {
-      console.log('[cache] expired →', cacheKey);
+      log('[cache] expired →', cacheKey);
       return null;
     }
 
-    console.log('[cache] HIT →', cacheKey, `(${data.results?.length ?? 0} results)`);
+    log('[cache] HIT →', cacheKey, `(${data.results?.length ?? 0} results)`);
     // Bump hit counter — fire-and-forget, never blocks caller
     setDoc(ref, { hitCount: (data.hitCount || 0) + 1 }, { merge: true }).catch(() => {});
     return data;
   } catch (err) {
-    console.warn('[cache] read error, bypassing cache:', err.message);
+    warn('[cache] read error, bypassing cache:', err.message);
     return null;
   }
 };
@@ -332,9 +368,9 @@ const writeCache = async (cacheKey, keyword, location, results) => {
       hitCount:    0,
       resultCount: results.length,
     });
-    console.log('[cache] WRITE →', cacheKey, `(${results.length} results)`);
+    log('[cache] WRITE →', cacheKey, `(${results.length} results)`);
   } catch (err) {
-    console.warn('[cache] write error (non-fatal):', err.message);
+    warn('[cache] write error (non-fatal):', err.message);
   }
 };
 
@@ -384,7 +420,7 @@ const geocodeLocation = async (location) => {
   const boundsLog = bn
     ? `| bounds sw=(${bounds.sw.lat.toFixed(5)},${bounds.sw.lng.toFixed(5)}) ne=(${bounds.ne.lat.toFixed(5)},${bounds.ne.lng.toFixed(5)})`
     : '| bounds: absent — falling back to viewport';
-  console.log(
+  log(
     '[geocode]', location,
     `| viewport sw=(${viewport.sw.lat.toFixed(5)},${viewport.sw.lng.toFixed(5)}) ne=(${viewport.ne.lat.toFixed(5)},${viewport.ne.lng.toFixed(5)})`,
     boundsLog,
@@ -496,7 +532,7 @@ const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_
       ? places.filter(pl => pl.id && !seenIds.has(pl.id)).length
       : places.length;
 
-    console.log(`[cell-page] page ${p + 1} → ${places.length} raw, ${pageNewUniques} new unique | nextToken=${!!nextPageToken}`);
+    log(`[cell-page] page ${p + 1} → ${places.length} raw, ${pageNewUniques} new unique | nextToken=${!!nextPageToken}`);
 
     // Three adaptive early-exit conditions (minimum API calls):
     //   1. No more pages from Google.
@@ -506,7 +542,7 @@ const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_
     pageToken = nextPageToken;
   }
 
-  console.log(`[cell] total ${allPlaces.length} raw results across ${callCount} page(s)`);
+  log(`[cell] total ${allPlaces.length} raw results across ${callCount} page(s)`);
   return { places: allPlaces, callCount };
 };
 
@@ -576,7 +612,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
 
   const { cols, rows, pagesPerCell = PAGES_PER_CELL_DEFAULT } = GRID_CONFIG[searchScope] ?? GRID_CONFIG.city;
   const totalCalls = queries.length * (cols * rows) * pagesPerCell;   // theoretical max
-  console.log(
+  log(
     `[search] scope=${searchScope} | grid=${cols}x${rows}=${cols*rows} cells`,
     `| ${queries.length} variants | budget≤${totalCalls} calls`,
     `| location="${fullLocation}"`,
@@ -618,8 +654,13 @@ const _searchSingle = async (keyword, location, options = {}) => {
   // Post-filter fence: same viewport, strict (0% margin).
   // Redundant for city (NLP handles it) but retained for neighbourhood/specific
   // to catch any Places API edge cases where results slightly exceed the rectangle.
-  const geoFenceBounds = searchScope !== 'city' ? geo.viewport : null;
-  console.log(
+  // FIX: Use geo.bounds (tight admin boundary) for neighbourhood/specific fence.
+  // geo.viewport is a padded display box 30-50% larger than the actual area.
+  // geo.bounds matches the real administrative boundary of e.g. "Maninagar"
+  // so results from adjacent areas (Isanpur, Saraspur) are excluded correctly.
+  // Falls back to geo.viewport if bounds is absent (rare — point locations).
+  const geoFenceBounds = searchScope !== 'city' ? geo.bounds : null;
+  log(
     `[grid] ${searchScope} sweep = geocoder viewport (exact)`,
     `| sw=(${sweepViewport.sw.lat.toFixed(5)},${sweepViewport.sw.lng.toFixed(5)})`,
     `  ne=(${sweepViewport.ne.lat.toFixed(5)},${sweepViewport.ne.lng.toFixed(5)})`,
@@ -670,7 +711,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
         }
       }
 
-      console.log(
+      log(
         `[matrix] ${callIdx}/${matrixTotal} | query="${query}"`,
         `-> ${places.length} raw, ${newThisCall} new unique`,
         `| total=${allLeads.length} | apiCalls=${totalApiCalls}`,
@@ -694,7 +735,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
     }
   }
 
-  console.log(`[search] grid sweep complete | ${totalApiCalls} API calls -> ${allLeads.length} unique places`);
+  log(`[search] grid sweep complete | ${totalApiCalls} API calls -> ${allLeads.length} unique places`);
 
   // ── 6. Geographic fence filter (neighbourhood & specific scopes only) ──────
   // For city scope the full-city grid is the intent — no filtering needed.
@@ -718,28 +759,111 @@ const _searchSingle = async (keyword, location, options = {}) => {
           && lead.lng >= fence.sw.lng
           && lead.lng <= fence.ne.lng;
     });
-    console.log(
+    log(
       `[geo-fence] ${before} → ${finalLeads.length} results after strict radius filter`,
       `| sw=(${fence.sw.lat.toFixed(5)},${fence.sw.lng.toFixed(5)})`,
       `  ne=(${fence.ne.lat.toFixed(5)},${fence.ne.lng.toFixed(5)})`,
     );
   }
 
-  // ── 7. Relevance filter — remove clearly unrelated business categories ───
-  // The Places API textQuery matches on name, address, reviews and nearby
-  // context, so a jewellery shop inside a kurti market complex can appear
-  // in results for "kurti".  We use each result's `types` (assigned by
-  // Google) to detect and remove obvious category mismatches.
-  // Conservative: only removes places where ALL specific types are unrelated.
+  // ── 7. Relevance filter ──────────────────────────────────────────────────
+  //
+  // PURPOSE: This is a PRODUCT SEARCH app. User types a product name like
+  // "ball", "watch", "kurti", "hardware" and wants every kind of place that
+  // SELLS or DEALS in that product — shops, supermarkets, wholesalers etc.
+  //
+  // DESIGN PRINCIPLE: Filter by Google PLACE TYPE only. Never by business name.
+  // Reason: Brand names like "Titan" tell you nothing about what is sold.
+  // Only Google's type tags reliably indicate the category of a business.
+  //
+  // TWO-PASS LOGIC:
+  //
+  // Pass 1 — Clear unrelated types:
+  //   A place is removed if ALL its specific (non-generic) types are in the
+  //   UNRELATED set. e.g. ['restaurant','food'] → all unrelated → REMOVED.
+  //   A place with ['sporting_goods_store','store'] → sporting_goods_store
+  //   is NOT unrelated → KEPT.
+  //
+  // Pass 2 — All-generic fallback:
+  //   Some Indian businesses are tagged by Google as only
+  //   ['store','point_of_interest','establishment'] — Google hasn't told us
+  //   what KIND of store. This is genuinely ambiguous.
+  //   For these we KEEP the place — better to show an extra result
+  //   than to incorrectly hide a valid product seller.
+  //   The user can see the name and judge for themselves.
+  //
+  // NOTE on jewelry_store:
+  //   jewelry_store is in UNRELATED. A jewellery store cannot sell balls,
+  //   hardware, or kurti. It only makes sense for jewellery keywords
+  //   (watch, ring, chain, gold, necklace, bracelet).
+  //   We detect jewellery keywords below and exempt jewelry_store for them.
+  //
+  // NOTE on electronics_store:
+  //   electronics_store is NOT in UNRELATED. Electronics stores sell
+  //   smartwatches, gadgets, cables, batteries — valid for many keywords.
+
+  const kwLower = keyword.trim().toLowerCase();
+
+  // Jewellery keyword detection:
+  // jewelry_store removed for ALL searches EXCEPT jewellery keywords.
+  // "ball"  -> jewelry_store removed (Titan watch shop should not appear)
+  // "watch" -> jewelry_store kept    (Titan watch shop should appear)
+  const JEWELLERY_KEYWORDS = /\b(watch|ring|chain|necklace|bracelet|bangle|earring|gold|silver|diamond|jewel|jewellery|jewelry|pendant|locket|bead|haar|kangan|mangalsutra|payal|anklet)\b/i;
+  const isJewellerySearch = JEWELLERY_KEYWORDS.test(kwLower);
+
+  // Strong positive retail types: dedicated product-selling stores.
+  // A place with ANY of these is always kept even if Google also tagged
+  // it with a food type (e.g. hardware shop that also sells packaged snacks).
+  const STRONG_RETAIL_TYPES = new Set([
+    'sporting_goods_store', 'toy_store', 'hardware_store',
+    'electronics_store', 'clothing_store', 'shoe_store',
+    'book_store', 'bicycle_store', 'furniture_store',
+    'home_goods_store', 'pet_store',
+    'convenience_store', 'department_store', 'supermarket',
+    'wholesale_store', 'warehouse_store', 'grocery_or_supermarket',
+  ]);
+
+  // Hard-remove food/drink types:
+  // Google tags Indian sweet shops and bakeries as ['bakery','food','store'].
+  // The 'store' tag made the old filter keep them. New rule:
+  // if ANY food/drink type present AND no strong retail override -> remove.
+  // TGB Bakery ['bakery','food','store'] -> bakery present, no strong retail -> REMOVED
+  // Big Basket ['grocery_or_supermarket','food','store'] -> strong retail present -> KEPT
+  const HARD_REMOVE_FOOD = new Set([
+    'restaurant', 'cafe', 'bar', 'bakery', 'food',
+    'meal_delivery', 'meal_takeaway', 'fast_food_restaurant',
+    'ice_cream_shop', 'coffee_shop', 'night_club', 'liquor_store',
+  ]);
+
   const beforeRelevance = finalLeads.length;
   finalLeads = finalLeads.filter((lead) => {
-    const types    = lead.types || [];
-    if (types.length === 0) return true;                    // no type info → keep
+    const types = lead.types || [];
+
+    // No type info at all -> keep (very rare)
+    if (types.length === 0) return true;
+
     const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
-    if (specific.length === 0) return true;                 // all-generic → keep
-    return !specific.every(t => UNRELATED_PLACE_TYPES.has(t)); // any specific relevant type → keep
+
+    // No specific types -> keep (ambiguous, could be any store)
+    if (specific.length === 0) return true;
+
+    // Strong retail override: always keep dedicated product stores
+    if (specific.some(t => STRONG_RETAIL_TYPES.has(t))) return true;
+
+    // Hard-remove: food/drink type present without strong retail override
+    // Removes bakeries and sweet shops tagged as ['bakery','food','store']
+    if (specific.some(t => HARD_REMOVE_FOOD.has(t))) return false;
+
+    // Jewellery check: jewelry_store kept only for jewellery keywords
+    const effectiveUnrelated = isJewellerySearch
+      ? UNRELATED_PLACE_TYPES
+      : new Set([...UNRELATED_PLACE_TYPES, 'jewelry_store']);
+
+    // Standard check: remove if ALL specific types are unrelated
+    return !specific.every(t => effectiveUnrelated.has(t));
   });
-  console.log(`[relevance] ${beforeRelevance} → ${finalLeads.length} after removing unrelated categories`);
+  log('[relevance] keyword="' + kwLower + '" jewellery=' + isJewellerySearch + ' | ' + beforeRelevance + ' -> ' + finalLeads.length + ' after filter');
+
 
   // ── 8. Cache write (fire-and-forget) ──────────────────────────────────────
   if (finalLeads.length > 0) {

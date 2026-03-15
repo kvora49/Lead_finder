@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { auth } from '../../firebase';
+import ConfirmDangerModal from '../ConfirmDangerModal';
+import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
+import { db } from '../../firebase';
 import { 
   LayoutDashboard, 
   Users, 
@@ -31,15 +34,38 @@ const AdminLayoutNew = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifLoading, setNotifLoading] = useState(false);
+
+  useEffect(() => {
+    const loadNotifications = async () => {
+      setNotifLoading(true);
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, 'systemLogs'),
+            orderBy('timestamp', 'desc'),
+            limit(15)
+          )
+        );
+        setNotifications(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      } catch (err) {
+        console.error('[AdminLayout] notifications:', err);
+      } finally {
+        setNotifLoading(false);
+      }
+    };
+    loadNotifications();
+  }, []);
 
   const handleLogout = async () => {
-    if (window.confirm('Are you sure you want to logout?')) {
-      try {
-        await auth.signOut();
-        navigate('/login');
-      } catch (error) {
-        console.error('Logout error:', error);
-      }
+    try {
+      await auth.signOut();
+      navigate('/login');
+    } catch (error) {
+      console.error('Logout error:', error);
     }
   };
 
@@ -101,7 +127,7 @@ const AdminLayoutNew = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 overflow-x-hidden">
       {/* Top Navigation Bar */}
       <header className="bg-slate-900/80 backdrop-blur-xl border-b border-slate-700/50 sticky top-0 z-50">
         <div className="px-4 sm:px-6 lg:px-8">
@@ -138,10 +164,66 @@ const AdminLayoutNew = () => {
             {/* Right Section */}
             <div className="flex items-center gap-4">
               {/* Notifications */}
-              <button className="relative p-2 text-gray-300 hover:text-white hover:bg-slate-800 rounded-lg transition-colors">
-                <Bell className="w-5 h-5" />
-                <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
-              </button>
+              <div className="relative">
+                <button
+                  onClick={() => setShowNotifications((o) => !o)}
+                  className="relative p-2 text-gray-300 hover:text-white
+                    hover:bg-slate-800 rounded-lg transition-colors"
+                >
+                  <Bell className="w-5 h-5" />
+                  {notifications.length > 0 && (
+                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5
+                      bg-red-500 rounded-full" />
+                  )}
+                </button>
+
+                {showNotifications && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setShowNotifications(false)}
+                    />
+                    <div className="absolute right-0 mt-2 w-80 bg-slate-800
+                      border border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-3
+                        border-b border-slate-700">
+                        <p className="text-sm font-semibold text-white">Recent activity</p>
+                        <button
+                          onClick={() => setShowNotifications(false)}
+                          className="text-gray-400 hover:text-white transition-colors"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <div className="max-h-72 overflow-y-auto">
+                        {notifLoading ? (
+                          <div className="p-6 text-center text-xs text-gray-500">Loading...</div>
+                        ) : notifications.length === 0 ? (
+                          <div className="p-6 text-center text-xs text-gray-500">
+                            No recent activity
+                          </div>
+                        ) : notifications.map((n) => (
+                          <div
+                            key={n.id}
+                            className="px-4 py-3 border-b border-slate-700/50
+                              hover:bg-slate-700/40 transition-colors"
+                          >
+                            <p className="text-xs font-medium text-white leading-snug">
+                              {n.action || n.type || n.message || 'System event'}
+                            </p>
+                            {n.adminEmail && (
+                              <p className="text-[10px] text-gray-500 mt-0.5">{n.adminEmail}</p>
+                            )}
+                            <p className="text-[10px] text-gray-600 mt-0.5">
+                              {n.timestamp?.toDate?.()?.toLocaleString('en-IN') || '—'}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
 
               {/* System Health */}
               <div className="hidden sm:flex items-center gap-2 px-3 py-2 bg-slate-800 rounded-lg">
@@ -190,7 +272,7 @@ const AdminLayoutNew = () => {
                         Settings
                       </button>
                       <button
-                        onClick={handleLogout}
+                        onClick={() => setShowLogoutModal(true)}
                         className="w-full px-4 py-2 text-left text-sm text-red-400 hover:bg-slate-700 rounded-lg transition-colors flex items-center gap-2"
                       >
                         <LogOut className="w-4 h-4" />
@@ -205,7 +287,7 @@ const AdminLayoutNew = () => {
         </div>
       </header>
 
-      <div className="flex">
+      <div className="flex w-full max-w-full overflow-x-hidden">
         {/* Desktop Sidebar */}
         <aside className={`hidden lg:block fixed left-0 top-16 h-[calc(100vh-4rem)] bg-slate-900/50 backdrop-blur-xl border-r border-slate-700/50 transition-all duration-300 z-40 ${
           sidebarOpen ? 'w-64' : 'w-20'
@@ -226,16 +308,16 @@ const AdminLayoutNew = () => {
                   }`}
                 >
                   <Icon className={`w-5 h-5 flex-shrink-0 ${isActive ? 'text-white' : ''}`} />
-                  {sidebarOpen && (
-                    <div className="flex-1 min-w-0">
-                      <p className={`text-sm font-medium ${isActive ? 'text-white' : ''}`}>
-                        {item.label}
-                      </p>
-                      <p className={`text-xs truncate ${isActive ? 'text-blue-100' : 'text-gray-500'}`}>
-                        {item.description}
-                      </p>
-                    </div>
-                  )}
+                  <div className={`flex-1 min-w-0 overflow-hidden transition-all duration-200 ${
+                    sidebarOpen ? 'opacity-100 max-w-xs' : 'opacity-0 max-w-0'
+                  }`}>
+                    <p className={`text-sm font-medium whitespace-nowrap ${isActive ? 'text-white' : ''}`}>
+                      {item.label}
+                    </p>
+                    <p className={`text-xs truncate ${isActive ? 'text-blue-100' : 'text-gray-500'}`}>
+                      {item.description}
+                    </p>
+                  </div>
                 </NavLink>
               );
             })}
@@ -250,12 +332,12 @@ const AdminLayoutNew = () => {
                 border border-emerald-500/20 hover:border-emerald-500/40"
             >
               <Monitor className="w-5 h-5 flex-shrink-0" />
-              {sidebarOpen && (
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold">Lead Finder App</p>
-                  <p className="text-xs text-emerald-500/70 truncate">Back to workspace</p>
-                </div>
-              )}
+              <div className={`flex-1 min-w-0 overflow-hidden transition-all duration-200 ${
+                sidebarOpen ? 'opacity-100 max-w-xs' : 'opacity-0 max-w-0'
+              }`}>
+                <p className="text-sm font-semibold whitespace-nowrap">Lead Finder App</p>
+                <p className="text-xs text-emerald-500/70 truncate">Back to workspace</p>
+              </div>
             </NavLink>
           </div>
 
@@ -323,7 +405,7 @@ const AdminLayoutNew = () => {
         )}
 
         {/* Main Content */}
-        <main className={`flex-1 transition-all duration-300 ${
+        <main className={`flex-1 transition-all duration-300 min-w-0 ${
           sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
         }`}>
           <div className="min-h-[calc(100vh-4rem)]">
@@ -331,6 +413,18 @@ const AdminLayoutNew = () => {
           </div>
         </main>
       </div>
+
+      <ConfirmDangerModal
+        isOpen={showLogoutModal}
+        title="Sign out"
+        message="Are you sure you want to sign out of the admin dashboard?"
+        confirmLabel="Sign out"
+        onConfirm={() => {
+          setShowLogoutModal(false);
+          handleLogout();
+        }}
+        onClose={() => setShowLogoutModal(false)}
+      />
     </div>
   );
 };

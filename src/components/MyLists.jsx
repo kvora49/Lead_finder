@@ -4,7 +4,7 @@
  * Full-featured lead list manager:
  *  • Browse all saved lists
  *  • View leads in a chosen list
- *  • Export leads as CSV  (papaparse)
+ *  • Export leads as Excel  (.xlsx)
  *  • Export leads as PDF  (jspdf + autotable)
  *  • Import leads from CSV (papaparse)
  *  • Delete individual leads or entire lists
@@ -17,8 +17,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import Papa from 'papaparse';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import { toast } from 'sonner';
 import {
   BookmarkCheck, Trash2, ArrowLeft,
   FileText, Table2, Upload, Loader2, Search,
@@ -32,6 +31,7 @@ import {
   deleteList,
   deleteLead,
   bulkSaveLeads,
+  updateLeadNote,
 } from '../services/listService';
 import ConfirmDangerModal from './ConfirmDangerModal';
 
@@ -51,8 +51,8 @@ const csvRowToLead = (row) => ({
 });
 
 // ─── Export helpers ───────────────────────────────────────────────────────────
-const exportCsv = (leads, listName) => {
-  const BOM = '\uFEFF';
+const exportExcel = async (leads, listName) => {
+  const { utils, write } = await import('xlsx');
   const rows = leads.map((l) => ({
     'Business Name': l.name        || '',
     'Address':       l.address     || '',
@@ -63,17 +63,65 @@ const exportCsv = (leads, listName) => {
     'Status':        l.status      || '',
     'Place ID':      l.placeId     || '',
   }));
-  const csv  = BOM + Papa.unparse(rows, { header: true });
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+
+  const ws = utils.json_to_sheet(rows);
+
+  // Make address easier to read in Excel by inserting line breaks after commas.
+  rows.forEach((row, idx) => {
+    const rawAddress = String(row['Address'] || '').trim();
+    if (!rawAddress) return;
+    const cellRef = `B${idx + 2}`;
+    const formatted = rawAddress.replace(/,\s*/g, ',\n');
+    if (ws[cellRef]) ws[cellRef].v = formatted;
+  });
+
+  // Make website cells reliably clickable via HYPERLINK formula.
+  rows.forEach((row, idx) => {
+    const raw = String(row['Website'] || '').trim();
+    if (!raw) return;
+    const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const cellRef = `D${idx + 2}`;
+    const escapedUrl = url.replace(/"/g, '""');
+    const escapedText = raw.replace(/"/g, '""');
+    ws[cellRef] = {
+      t: 'str',
+      f: `HYPERLINK("${escapedUrl}","${escapedText}")`,
+      v: raw,
+    };
+  });
+
+  ws['!cols'] = [
+    { wch: 36 },
+    { wch: 120 },
+    { wch: 20 },
+    { wch: 46 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 24 },
+  ];
+  ws['!rows'] = [{ hpt: 22 }, ...rows.map(() => ({ hpt: 42 }))];
+  ws['!autofilter'] = { ref: 'A1:H1' };
+
+  const wb = utils.book_new();
+  utils.book_append_sheet(wb, ws, 'My Leads');
+  const out = write(wb, { bookType: 'xlsx', type: 'array' });
+
+  const blob = new Blob(
+    [out],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+  );
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = `LeadFinder_${listName.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = `LeadFinder_${listName.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().slice(0,10)}.xlsx`;
   a.click();
   URL.revokeObjectURL(url);
 };
 
-const exportPdf = (leads, listName) => {
+const exportPdf = async (leads, listName) => {
+  const { default: jsPDF } = await import('jspdf');
+  const { default: autoTable } = await import('jspdf-autotable');
   const doc        = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const pageW      = doc.internal.pageSize.getWidth();
   const pageH      = doc.internal.pageSize.getHeight();
@@ -118,7 +166,7 @@ const exportPdf = (leads, listName) => {
       l.address || '',
       l.phone   || '',
       l.website || '',
-      l.rating  ? `★ ${l.rating}` : '',
+      l.rating  ? String(l.rating) : '',
       l.reviewCount ? Number(l.reviewCount).toLocaleString() : '',
       l.status  || '',
     ]),
@@ -141,12 +189,12 @@ const exportPdf = (leads, listName) => {
     },
     alternateRowStyles: { fillColor: SLATE_50 },
     columnStyles: {
-      0: { cellWidth: 8,  halign: 'center', textColor: SLATE_500 },
+      0: { cellWidth: 18, halign: 'center', textColor: SLATE_500, cellPadding: { left: 1.5, right: 1.5, top: 3.5, bottom: 3.5 } },
       1: { cellWidth: 52, fontStyle: 'bold' },
-      2: { cellWidth: 65 },
+      2: { cellWidth: 58 },
       3: { cellWidth: 32 },
-      4: { cellWidth: 50, textColor: [79, 70, 229] },
-      5: { cellWidth: 18, halign: 'center', textColor: [16, 185, 129] },
+      4: { cellWidth: 54, textColor: [79, 70, 229] },
+      5: { cellWidth: 20, halign: 'center', textColor: [16, 185, 129] },
       6: { cellWidth: 20, halign: 'right',  textColor: SLATE_500 },
       7: { cellWidth: 22, halign: 'center' },
     },
@@ -168,58 +216,148 @@ const exportPdf = (leads, listName) => {
 };
 
 // ─── Lead row ─────────────────────────────────────────────────────────────────
-const LeadRow = ({ lead, onDelete }) => (
-  <tr className="hover:bg-slate-50 transition-colors group">
-    <td className="px-4 py-3 text-sm font-medium text-slate-900 max-w-[200px]">
-      <span className="line-clamp-1">{lead.name || '—'}</span>
-    </td>
-    <td className="px-4 py-3 text-xs text-slate-600 max-w-[200px]">
-      <span className="flex items-start gap-1 line-clamp-2">
-        <MapPin className="w-3 h-3 mt-0.5 flex-none text-slate-400" />
-        {lead.address || '—'}
-      </span>
-    </td>
-    <td className="px-4 py-3 text-xs text-slate-700">
-      {lead.phone
-        ? <a href={`tel:${lead.phone}`}
-            className="flex items-center gap-1 text-emerald-700 hover:underline">
-            <Phone className="w-3 h-3" />{lead.phone}
-          </a>
-        : <span className="text-slate-300">—</span>
-      }
-    </td>
-    <td className="px-4 py-3 text-xs max-w-[160px] truncate">
-      {lead.website
-        ? <a href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`}
-            target="_blank" rel="noopener noreferrer"
-            className="flex items-center gap-1 text-indigo-600 hover:underline truncate">
-            <Globe className="w-3 h-3 flex-none" />
-            <span className="truncate">{lead.website.replace(/^https?:\/\//, '').split('/')[0]}</span>
-          </a>
-        : <span className="text-slate-300">—</span>
-      }
-    </td>
-    <td className="px-4 py-3 text-xs text-slate-600">
-      {lead.rating
-        ? <span className="flex items-center gap-1">
-            <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
-            {lead.rating}
-            {lead.reviewCount > 0 && (
-              <span className="text-slate-400">({lead.reviewCount})</span>
-            )}
-          </span>
-        : <span className="text-slate-300">—</span>
-      }
-    </td>
-    <td className="px-4 py-3">
-      <button
-        onClick={() => onDelete(lead.id)}
-        className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500
-          transition-all p-1 rounded">
-        <Trash2 className="w-3.5 h-3.5" />
-      </button>
-    </td>
-  </tr>
+const LeadRow = ({
+  lead,
+  onDelete,
+  bulkMode,
+  isSelected,
+  onToggleBulk,
+  editingNoteId,
+  noteText,
+  setNoteText,
+  setEditingNoteId,
+  onSaveNote,
+}) => (
+  <>
+    <tr
+      onClick={bulkMode ? () => onToggleBulk(lead.id) : undefined}
+      className={`hover:bg-slate-50 transition-colors group ${bulkMode ? 'cursor-pointer' : ''} ${
+        isSelected ? 'bg-indigo-50 ring-2 ring-indigo-500' : ''
+      }`}
+    >
+      {bulkMode && (
+        <td className="px-4 py-3 w-10 align-top">
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => onToggleBulk(lead.id)}
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+          />
+        </td>
+      )}
+      <td className="px-4 py-3 text-sm font-medium text-slate-900 max-w-[200px] align-top">
+        <span className="line-clamp-1">{lead.name || '—'}</span>
+      </td>
+      <td className="px-4 py-3 text-xs text-slate-600 max-w-[200px] align-top">
+        <span className="flex items-start gap-1 line-clamp-2">
+          <MapPin className="w-3 h-3 mt-0.5 flex-none text-slate-400" />
+          {lead.address || '—'}
+        </span>
+      </td>
+      <td className="px-4 py-3 text-xs text-slate-700 align-top">
+        {lead.phone
+          ? <a href={`tel:${lead.phone}`}
+              className="flex items-center gap-1 text-emerald-700 hover:underline"
+              onClick={(e) => e.stopPropagation()}>
+              <Phone className="w-3 h-3" />{lead.phone}
+            </a>
+          : <span className="text-slate-300">—</span>
+        }
+      </td>
+      <td className="px-4 py-3 text-xs max-w-[160px] truncate align-top">
+        {lead.website
+          ? <a href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`}
+              target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-1 text-indigo-600 hover:underline truncate"
+              onClick={(e) => e.stopPropagation()}>
+              <Globe className="w-3 h-3 flex-none" />
+              <span className="truncate">{lead.website.replace(/^https?:\/\//, '').split('/')[0]}</span>
+            </a>
+          : <span className="text-slate-300">—</span>
+        }
+      </td>
+      <td className="px-4 py-3 text-xs text-slate-600 align-top">
+        {lead.rating
+          ? <span className="flex items-center gap-1">
+              <Star className="w-3 h-3 text-amber-400 fill-amber-400" />
+              {lead.rating}
+              {lead.reviewCount > 0 && (
+                <span className="text-slate-400">({lead.reviewCount})</span>
+              )}
+            </span>
+          : <span className="text-slate-300">—</span>
+        }
+      </td>
+      <td className="px-4 py-3 align-top">
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(lead.id); }}
+          className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500
+            transition-all p-1 rounded">
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </td>
+    </tr>
+    <tr className="bg-white">
+      <td colSpan={bulkMode ? 7 : 6} className="px-4 pb-3 pt-0">
+        <div className="mt-2 pt-2 border-t border-slate-100 dark:border-white/5">
+          {editingNoteId === lead.id ? (
+            <div className="flex flex-col gap-1.5">
+              <textarea
+                value={noteText}
+                onChange={(e) => setNoteText(e.target.value)}
+                placeholder="Add a private note..."
+                rows={2}
+                autoFocus
+                className="w-full text-xs resize-none rounded-lg border
+                  border-slate-200 dark:border-white/10 bg-white dark:bg-white/5
+                  text-slate-700 dark:text-gray-300
+                  placeholder-slate-300 dark:placeholder-gray-600
+                  px-2.5 py-1.5 focus:outline-none
+                  focus:border-indigo-400 dark:focus:border-indigo-500
+                  transition-colors"
+              />
+              <div className="flex gap-1.5">
+                <button
+                  onClick={(e) => { e.stopPropagation(); onSaveNote(lead.id); }}
+                  className="text-[10px] font-semibold px-2.5 py-1 rounded-lg
+                    bg-indigo-600 text-white hover:bg-indigo-700 transition-colors"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setEditingNoteId(null); }}
+                  className="text-[10px] font-medium px-2.5 py-1 rounded-lg
+                    border border-slate-200 dark:border-white/10
+                    text-slate-500 dark:text-gray-400
+                    hover:border-slate-300 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setEditingNoteId(lead.id);
+                setNoteText(lead.note || '');
+              }}
+              className="flex items-center gap-1.5 text-[10px] w-full text-left
+                text-slate-400 dark:text-gray-600
+                hover:text-indigo-500 dark:hover:text-indigo-400 transition-colors"
+            >
+              <FileText className="w-3 h-3 flex-shrink-0" strokeWidth={1.5} />
+              {lead.note
+                ? <span className="truncate italic">{lead.note}</span>
+                : <span>Add note</span>
+              }
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  </>
 );
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -232,12 +370,16 @@ const MyLists = () => {
   const [selectedList,   setSelectedList]   = useState(null);
   const [leads,          setLeads]          = useState([]);
   const [loadingLeads,   setLoadingLeads]   = useState(false);
-  const [exporting,      setExporting]      = useState(null);   // 'csv' | 'pdf' | null
+  const [exporting,      setExporting]      = useState(null);   // 'excel' | 'pdf' | null
   const [importing,      setImporting]      = useState(false);
   const [importResult,   setImportResult]   = useState(null);
   const [error,          setError]          = useState('');
   const [deletingListId, setDeletingListId] = useState(null);
   const [searchFilter,   setSearchFilter]   = useState('');
+  const [editingNoteId,  setEditingNoteId]  = useState(null);
+  const [noteText,       setNoteText]       = useState('');
+  const [bulkMode,       setBulkMode]       = useState(false);
+  const [bulkSelected,   setBulkSelected]   = useState(new Set());
 
   // ── Danger modal state (Safe Delete) ────────────────────────────────────
   const [dangerModal, setDangerModal] = useState({
@@ -245,6 +387,8 @@ const MyLists = () => {
   });
 
   const importFileRef = useRef(null);
+  const activeListId = selectedList?.id;
+  const activeListName = selectedList?.name;
 
   // ── Load lists ─────────────────────────────────────────────────────────────
   const fetchLists = async () => {
@@ -267,6 +411,8 @@ const MyLists = () => {
     setSelectedList(list);
     setLeads([]);
     setSearchFilter('');
+    setBulkMode(false);
+    setBulkSelected(new Set());
     setImportResult(null);
     setError('');
     setLoadingLeads(true);
@@ -287,6 +433,7 @@ const MyLists = () => {
       await deleteList(uid, listId);
       setLists((prev) => prev.filter((l) => l.id !== listId));
       if (selectedList?.id === listId) setSelectedList(null);
+      toast.success('List deleted');
     } catch (err) {
       setError('Failed to delete list: ' + err.message);
     } finally {
@@ -319,6 +466,7 @@ const MyLists = () => {
             : l
         )
       );
+      toast.success('Lead removed');
     } catch (err) {
       setError('Failed to delete lead: ' + err.message);
     }
@@ -336,19 +484,22 @@ const MyLists = () => {
     });
   };
 
-  // ── Export CSV ─────────────────────────────────────────────────────────────
-  const handleExportCsv = () => {
+  // ── Export Excel ───────────────────────────────────────────────────────────
+  const handleExportExcel = async () => {
     if (!visibleLeads.length) return;
-    setExporting('csv');
-    try { exportCsv(visibleLeads, selectedList.name); }
+    setExporting('excel');
+    try {
+      await exportExcel(visibleLeads, selectedList.name);
+      toast.success('Excel downloaded!');
+    }
     finally { setExporting(null); }
   };
 
   // ── Export PDF ─────────────────────────────────────────────────────────────
-  const handleExportPdf = () => {
+  const handleExportPdf = async () => {
     if (!visibleLeads.length) return;
     setExporting('pdf');
-    try { exportPdf(visibleLeads, selectedList.name); }
+    try { await exportPdf(visibleLeads, selectedList.name); }
     finally { setExporting(null); }
   };
 
@@ -374,12 +525,14 @@ const MyLists = () => {
             .filter((r) => r.name || r.address);
           const count = await bulkSaveLeads(uid, selectedList.id, mapped);
           setImportResult({ count, listName: selectedList.name });
+          toast.success(`Imported ${count} leads successfully`);
           const fresh = await getLeads(uid, selectedList.id);
           setLeads(fresh);
           const freshLists = await getLists(uid);
           setLists(freshLists);
         } catch (err) {
           setError('Import failed: ' + err.message);
+          toast.error('Import failed. Check your CSV format.');
         } finally {
           setImporting(false);
           if (importFileRef.current) importFileRef.current.value = '';
@@ -405,11 +558,33 @@ const MyLists = () => {
       })
     : leads;
 
+  const handleBulkDelete = async () => {
+    const ids = Array.from(bulkSelected);
+    try {
+      await Promise.all(ids.map((id) => deleteLead(currentUser.uid, activeListId, id)));
+      const remaining = leads.filter((l) => !bulkSelected.has(l.id));
+      setLeads(remaining);
+      setBulkSelected(new Set());
+      setBulkMode(false);
+      toast.success(`${ids.length} lead${ids.length > 1 ? 's' : ''} deleted`);
+      const freshLists = await getLists(uid);
+      setLists(freshLists);
+    } catch {
+      toast.error('Failed to delete selected leads');
+    }
+  };
+
+  const handleBulkExportExcel = async () => {
+    const selectedLeads = leads.filter((l) => bulkSelected.has(l.id));
+    await exportExcel(selectedLeads, activeListName || 'selected-leads');
+    toast.success(`Exported ${selectedLeads.length} leads to Excel`);
+  };
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
-    <div className="min-h-screen bg-slate-50">
-      <div className="bg-white border-b border-slate-200 px-4 sm:px-6 py-4">
+    <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A]">
+      <div className="bg-white dark:bg-[#121212] border-b border-slate-200 dark:border-white/10 px-4 sm:px-6 py-4">
         <div className="max-w-7xl mx-auto flex items-center gap-4">
           <Link to="/app"
             className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 transition-colors">
@@ -422,8 +597,8 @@ const MyLists = () => {
               <BookmarkCheck className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h1 className="text-base font-bold text-slate-900">My Lists</h1>
-              <p className="text-xs text-slate-400">
+              <h1 className="text-base font-bold text-slate-900 dark:text-white">My Lists</h1>
+              <p className="text-xs text-slate-400 dark:text-gray-500">
                 {lists.length} list{lists.length !== 1 ? 's' : ''} saved
               </p>
             </div>
@@ -447,7 +622,7 @@ const MyLists = () => {
 
           {/* ── Left: list panel ─────────────────────────────────────── */}
           <div className="w-72 flex-none flex flex-col gap-3">
-            <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide px-1">
+            <h2 className="text-xs font-bold text-slate-500 dark:text-gray-400 uppercase tracking-wide px-1">
               Saved Lists
             </h2>
 
@@ -475,21 +650,21 @@ const MyLists = () => {
                     className={`group flex items-center gap-3 p-3 rounded-xl cursor-pointer
                       transition-all border ${
                         selectedList?.id === list.id
-                          ? 'bg-indigo-50 border-indigo-200 shadow-sm'
-                          : 'bg-white border-slate-200 hover:border-indigo-300 hover:bg-slate-50'
+                          ? 'bg-indigo-50 dark:bg-indigo-500/15 border-indigo-200 dark:border-indigo-500/30 shadow-sm'
+                          : 'bg-white dark:bg-[#171717] border-slate-200 dark:border-white/10 hover:border-indigo-300 hover:bg-slate-50 dark:hover:bg-white/5'
                       }`}>
                     <div className={`w-8 h-8 rounded-lg flex-none flex items-center justify-center ${
-                      selectedList?.id === list.id
-                        ? 'bg-indigo-100 text-indigo-600'
-                        : 'bg-slate-100 text-slate-500'
+                        selectedList?.id === list.id
+                          ? 'bg-indigo-100 dark:bg-indigo-500/20 text-indigo-600 dark:text-indigo-300'
+                          : 'bg-slate-100 dark:bg-white/10 text-slate-500 dark:text-gray-400'
                     }`}>
                       <BookmarkCheck className="w-4 h-4" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className={`text-sm font-semibold truncate ${
-                        selectedList?.id === list.id ? 'text-indigo-700' : 'text-slate-800'
+                        selectedList?.id === list.id ? 'text-indigo-700 dark:text-indigo-300' : 'text-slate-800 dark:text-gray-100'
                       }`}>{list.name}</p>
-                      <p className="text-xs text-slate-400">
+                      <p className="text-xs text-slate-400 dark:text-gray-500">
                         {list.leadCount ?? 0} lead{list.leadCount !== 1 ? 's' : ''}
                         {list.createdAt && (
                           <span className="ml-1.5">
@@ -528,18 +703,18 @@ const MyLists = () => {
           {/* ── Right: leads panel ───────────────────────────────────── */}
           <div className="flex-1 min-w-0 flex flex-col gap-4">
             {!selectedList ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-3">
+              <div className="flex-1 flex flex-col items-center justify-center text-slate-400 dark:text-gray-500 gap-3">
                 <BookmarkCheck className="w-14 h-14 opacity-20" />
                 <p className="text-sm font-medium">Select a list to view its leads</p>
               </div>
             ) : (
               <>
                 {/* Toolbar card */}
-                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+                <div className="bg-white dark:bg-[#171717] rounded-2xl border border-slate-200 dark:border-white/10 shadow-sm p-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-base font-bold text-slate-900">{selectedList.name}</h2>
-                      <p className="text-xs text-slate-400 mt-0.5">
+                      <h2 className="text-base font-bold text-slate-900 dark:text-white">{selectedList.name}</h2>
+                      <p className="text-xs text-slate-400 dark:text-gray-500 mt-0.5">
                         {loadingLeads
                           ? 'Loading…'
                           : `${visibleLeads.length}${searchFilter ? ' matching' : ''} of ${leads.length} lead${leads.length !== 1 ? 's' : ''}`
@@ -555,25 +730,26 @@ const MyLists = () => {
                           value={searchFilter}
                           onChange={(e) => setSearchFilter(e.target.value)}
                           placeholder="Filter leads…"
-                          className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg
-                            bg-slate-50 focus:bg-white focus:border-indigo-400 focus:ring-1
-                            focus:ring-indigo-100 outline-none w-40"
+                          className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 dark:border-white/10 rounded-lg
+                            bg-slate-50 dark:bg-white/5 text-slate-800 dark:text-gray-200
+                            focus:bg-white dark:focus:bg-white/10 focus:border-indigo-400 focus:ring-1
+                            focus:ring-indigo-100 dark:focus:ring-indigo-500/20 outline-none w-40"
                         />
                       </div>
 
                       {/* Export CSV */}
                       <button
-                        onClick={handleExportCsv}
+                        onClick={handleExportExcel}
                         disabled={!leads.length || !!exporting}
                         title="Export visible leads as CSV"
                         className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold
                           rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200
                           hover:bg-emerald-100 disabled:opacity-40 transition-colors">
-                        {exporting === 'csv'
+                        {exporting === 'excel'
                           ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                           : <Download className="w-3.5 h-3.5" />
                         }
-                        CSV
+                        Excel
                       </button>
 
                       {/* Export PDF */}
@@ -605,6 +781,22 @@ const MyLists = () => {
                         }
                         Import CSV
                       </button>
+
+                      <button
+                        onClick={() => { setBulkMode((m) => !m); setBulkSelected(new Set()); }}
+                        className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5
+                          rounded-full border transition-all active:scale-[0.97] ${
+                          bulkMode
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-white dark:bg-[#171717] text-slate-600 dark:text-gray-400 border-slate-200 dark:border-white/10 hover:border-indigo-300'
+                        }`}
+                      >
+                        {bulkMode && bulkSelected.size > 0
+                          ? `${bulkSelected.size} selected`
+                          : 'Select'
+                        }
+                      </button>
+
                       <input
                         ref={importFileRef}
                         type="file"
@@ -629,7 +821,43 @@ const MyLists = () => {
                 </div>
 
                 {/* Leads table */}
-                <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                <div className="flex-1 bg-white dark:bg-[#171717] rounded-2xl border border-slate-200 dark:border-white/10 shadow-sm overflow-hidden flex flex-col">
+                  {bulkMode && bulkSelected.size > 0 && (
+                    <div className="flex items-center gap-3 px-4 py-2.5 mb-3
+                      bg-indigo-50 dark:bg-indigo-500/10
+                      border border-indigo-200 dark:border-indigo-500/30 rounded-xl mx-3 mt-3">
+                      <span className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">
+                        {bulkSelected.size} lead{bulkSelected.size > 1 ? 's' : ''} selected
+                      </span>
+                      <button
+                        onClick={handleBulkExportExcel}
+                        className="text-xs font-medium px-3 py-1 rounded-full
+                          bg-emerald-50 dark:bg-emerald-500/10
+                          text-emerald-700 dark:text-emerald-400
+                          border border-emerald-200 dark:border-emerald-500/30
+                          hover:bg-emerald-100 transition-colors"
+                      >
+                        Export Excel
+                      </button>
+                      <button
+                        onClick={handleBulkDelete}
+                        className="text-xs font-medium px-3 py-1 rounded-full
+                          bg-red-50 dark:bg-red-500/10
+                          text-red-700 dark:text-red-400
+                          border border-red-200 dark:border-red-500/30
+                          hover:bg-red-100 transition-colors"
+                      >
+                        Delete selected
+                      </button>
+                      <button
+                        onClick={() => { setBulkMode(false); setBulkSelected(new Set()); }}
+                        className="ml-auto text-xs text-slate-400 hover:text-red-500 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+
                   {loadingLeads ? (
                     <div className="flex-1 flex items-center justify-center text-slate-400 gap-2 py-20">
                       <Loader2 className="w-5 h-5 animate-spin" /> Loading leads…
@@ -648,19 +876,55 @@ const MyLists = () => {
                   ) : (
                     <div className="overflow-auto flex-1">
                       <table className="w-full text-left">
-                        <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 z-10">
+                        <thead className="sticky top-0 bg-slate-50 dark:bg-white/5 border-b border-slate-200 dark:border-white/10 z-10">
                           <tr>
-                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Business</th>
-                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Address</th>
-                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Phone</th>
-                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Website</th>
-                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 whitespace-nowrap">Rating</th>
+                            {bulkMode && <th className="px-4 py-3 w-10" />}
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 dark:text-gray-400 whitespace-nowrap">Business</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 dark:text-gray-400 whitespace-nowrap">Address</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 dark:text-gray-400 whitespace-nowrap">Phone</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 dark:text-gray-400 whitespace-nowrap">Website</th>
+                            <th className="px-4 py-3 text-xs font-semibold text-slate-600 dark:text-gray-400 whitespace-nowrap">Rating</th>
                             <th className="px-4 py-3 w-10" />
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
                           {visibleLeads.map((lead) => (
-                            <LeadRow key={lead.id} lead={lead} onDelete={requestDeleteLead} />
+                            <LeadRow
+                              key={lead.id}
+                              lead={lead}
+                              onDelete={requestDeleteLead}
+                              bulkMode={bulkMode}
+                              isSelected={bulkSelected.has(lead.id)}
+                              onToggleBulk={(id) => {
+                                setBulkSelected((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(id)) next.delete(id); else next.add(id);
+                                  return next;
+                                });
+                              }}
+                              editingNoteId={editingNoteId}
+                              noteText={noteText}
+                              setNoteText={setNoteText}
+                              setEditingNoteId={setEditingNoteId}
+                              onSaveNote={async (leadId) => {
+                                try {
+                                  await updateLeadNote(currentUser.uid, activeListId, leadId, noteText);
+                                  setLeads((prev) => prev.map((l) => (
+                                    l.id === leadId
+                                      ? {
+                                          ...l,
+                                          note: noteText.trim(),
+                                          noteUpdatedAt: new Date().toISOString(),
+                                        }
+                                      : l
+                                  )));
+                                  setEditingNoteId(null);
+                                  toast.success('Note saved');
+                                } catch {
+                                  toast.error('Failed to save note');
+                                }
+                              }}
+                            />
                           ))}
                         </tbody>
                       </table>

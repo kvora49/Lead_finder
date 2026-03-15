@@ -2,16 +2,42 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Universal Business Lead Finder - Find wholesalers, retailers, and services globally using Google Places API" />
-    <title>Universal Lead Finder</title>
+
+    <!-- Favicon — custom Lead Finder icon (not Vite default) -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+
+    <!-- Primary meta -->
+    <title>Lead Finder — Business Intelligence</title>
+    <meta name="description" content="Find 500+ verified business leads in any city worldwide. Powered by Google Places API. Export to CSV or PDF instantly." />
+
+    <!-- Theme colour — makes Android Chrome address bar match app colour -->
+    <meta name="theme-color" content="#4f46e5" />
+
+    <!-- Open Graph — WhatsApp / LinkedIn / Twitter share previews -->
+    <meta property="og:title" content="Lead Finder — Business Intelligence" />
+    <meta property="og:description" content="Find 500+ verified business leads in any city worldwide." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://lead-finder.pages.dev" />
+
+    <!-- Twitter card -->
+    <meta name="twitter:card" content="summary" />
+
+    <!-- iOS home screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Lead Finder" />
+
+    <!-- Inter font — tailwind.config.js specifies Inter but it was never loaded -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
-    <!-- Root element where React app will be mounted -->
     <div id="root"></div>
-    
-    <!-- Main JavaScript entry point -->
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

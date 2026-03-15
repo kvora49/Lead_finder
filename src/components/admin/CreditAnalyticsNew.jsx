@@ -283,7 +283,7 @@ const CreditAnalyticsNew = () => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-6">
           <h3 className="text-lg font-semibold text-white mb-4">Daily Spend (Last 30 Days)</h3>
           <ResponsiveContainer width="100%" height={280}>

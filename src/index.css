@@ -94,6 +94,33 @@
   .custom-scrollbar::-webkit-scrollbar-thumb {
     @apply bg-gray-400 rounded hover:bg-gray-500;
   }
+
+  .btn-ripple {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn-ripple::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.3) 0%, transparent 65%);
+    transform: scale(0);
+    opacity: 1;
+    border-radius: inherit;
+    pointer-events: none;
+  }
+
+  .btn-ripple:active::after {
+    animation: rippleBurst 0.45s ease-out forwards;
+  }
+
+  @keyframes rippleBurst {
+    to {
+      transform: scale(2.5);
+      opacity: 0;
+    }
+  }
 }
 
 /**

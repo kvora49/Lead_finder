@@ -18,7 +18,30 @@ const ProtectedRoute = ({ children }) => {
   const { currentUser, loading } = useAuth();
 
   if (loading) return <FullPageSkeleton />;
-  return currentUser ? children : <Navigate to="/login" replace />;
+  if (!currentUser) return <Navigate to="/login" replace />;
+
+  const isGoogleUser = currentUser.providerData?.some(
+    (p) => p.providerId === 'google.com'
+  );
+
+  // Legacy users created before verification rollout are treated as verified.
+  const createdAt = currentUser.metadata?.creationTime
+    ? new Date(currentUser.metadata.creationTime).getTime()
+    : Date.now();
+  const verificationRolloutAt = new Date('2026-03-15T00:00:00Z').getTime();
+  const isLegacyAccount = createdAt < verificationRolloutAt;
+
+  if (!currentUser.emailVerified && !isGoogleUser && !isLegacyAccount) {
+    return (
+      <Navigate
+        to="/check-email"
+        state={{ email: currentUser.email }}
+        replace
+      />
+    );
+  }
+
+  return children;
 };
 
 export default ProtectedRoute;

@@ -93,7 +93,7 @@ const Login = () => {
       </div>
 
       {/* ── Right form panel ──────────────────────────────── */}
-      <div className="flex-1 flex flex-col justify-center px-6 sm:px-12 lg:px-16 py-12">
+      <div className="flex-1 max-w-xl flex flex-col justify-center px-6 sm:px-12 lg:px-16 py-12">
 
         {/* Mobile logo */}
         <div className="lg:hidden flex items-center gap-2 mb-10">

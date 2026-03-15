@@ -11,6 +11,7 @@
  *   Pending Requests  → only for super_admin / owner
  */
 import { useState, useEffect } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   Search,
   Eye,
@@ -36,6 +37,7 @@ import {
   MoreVertical,
   Mail,
   Loader2,
+  Zap,
 } from 'lucide-react';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import {
@@ -53,6 +55,7 @@ import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
 import { getEffectiveUserMonthMetrics } from '../../services/creditService';
 import ConfirmDangerModal from '../ConfirmDangerModal';
+import { toast } from 'sonner';
 
 /* ─── helpers ───────────────────────────────────────────────────────────── */
 const PAGE_SIZE = 50;
@@ -194,36 +197,57 @@ const CreditModal = ({ user, onClose, onUpdate }) => {
 
 /* ─── User Details Modal ────────────────────────────────────────────────── */
 const UserDetailModal = ({ user, onClose }) => (
-  <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-    <div className="bg-slate-800 rounded-2xl max-w-lg w-full border border-slate-700 shadow-2xl">
-      <div className="border-b border-slate-700 px-6 py-4 flex items-center justify-between">
-        <h3 className="text-white font-semibold">User Details</h3>
-        <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700 transition-colors">
-          <XCircle className="w-5 h-5" />
-        </button>
-      </div>
-      <div className="p-6 space-y-3 text-sm">
-        {[
-          ['Email',         user.email],
-          ['Display Name',  user.displayName],
-          ['User ID',       user.id],
-          ['Role',          ghostRoleLabel(user.role)],
-          ['API Calls Used',  (user.creditsUsed ?? 0).toLocaleString()],
-          ['Spent This Month', formatUsd(user.monthlyCreditUsdUsed)],
-          ['Credit Limit',  user.creditLimit === 'unlimited' ? 'Unlimited' : formatUsd(user.creditLimit)],
-          ['Searches',      (user.searchCount ?? 0).toLocaleString()],
-          ['Registered',    user.createdAt?.toLocaleDateString?.() ?? '—'],
-          ['Last Active',   user.lastActive?.toLocaleDateString?.() ?? '—'],
-        ].map(([label, val]) => (
-          <div key={label} className="flex justify-between gap-4">
-            <span className="text-slate-400">{label}</span>
-            <span className="text-white text-right font-medium break-all">{val}</span>
+  <AnimatePresence>
+    <>
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={{ duration: 0.2 }}
+        className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm"
+        onClick={onClose}
+      />
+
+      <motion.aside
+        initial={{ x: '100%' }}
+        animate={{ x: 0 }}
+        exit={{ x: '100%' }}
+        transition={{ type: 'spring', damping: 28, stiffness: 280 }}
+        className="fixed inset-y-0 right-0 z-[80] w-full max-w-lg bg-slate-800 border-l border-slate-700 shadow-2xl flex flex-col"
+      >
+        <div className="border-b border-slate-700 px-6 py-4 flex items-center justify-between shrink-0">
+          <div>
+            <h3 className="text-white font-semibold text-lg">User Details</h3>
+            <p className="text-slate-400 text-xs mt-0.5 truncate max-w-[260px]">{user.email}</p>
           </div>
-        ))}
-        <div className="pt-2"><StatusBadge status={user.status} /></div>
-      </div>
-    </div>
-  </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700 transition-colors" aria-label="Close user details">
+            <XCircle className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-3 text-sm overflow-y-auto">
+          {[
+            ['Email', user.email],
+            ['Display Name', user.displayName],
+            ['User ID', user.id],
+            ['Role', ghostRoleLabel(user.role)],
+            ['API Calls Used', (user.creditsUsed ?? 0).toLocaleString()],
+            ['Spent This Month', formatUsd(user.monthlyCreditUsdUsed)],
+            ['Credit Limit', user.creditLimit === 'unlimited' ? 'Unlimited' : formatUsd(user.creditLimit)],
+            ['Searches', (user.searchCount ?? 0).toLocaleString()],
+            ['Registered', user.createdAt?.toLocaleDateString?.() ?? '—'],
+            ['Last Active', user.lastActive?.toLocaleDateString?.() ?? '—'],
+          ].map(([label, val]) => (
+            <div key={label} className="flex justify-between gap-4">
+              <span className="text-slate-400">{label}</span>
+              <span className="text-white text-right font-medium break-all">{val}</span>
+            </div>
+          ))}
+          <div className="pt-2"><StatusBadge status={user.status} /></div>
+        </div>
+      </motion.aside>
+    </>
+  </AnimatePresence>
 );
 
 /* ─── Invite Admin Modal ─────────────────────────────────────────────────── */
@@ -389,8 +413,10 @@ const UserManagementNew = () => {
   const [currentPage,     setCurrentPage]     = useState(1);
   const [lastDoc,         setLastDoc]         = useState(null);
   const [hasMore,         setHasMore]         = useState(true);
-  const [toast,           setToast]           = useState(null);
   const [showInvite,      setShowInvite]      = useState(false);
+  const [showBulkGrantModal, setShowBulkGrantModal] = useState(false);
+  const [bulkGrantAmount, setBulkGrantAmount] = useState('');
+  const [bulkGranting, setBulkGranting] = useState(false);
   const usersPerPage = 20;
   const [userStats, setUserStats] = useState({ total: 0, active: 0, suspended: 0, unlimited: 0 });
 
@@ -403,8 +429,13 @@ const UserManagementNew = () => {
 
   /* ── Toast ────────────────────────────────────────────────────────────── */
   const showToast = (msg, type = 'success') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3500);
+    if (type === 'error') {
+      toast.error(msg);
+    } else if (type === 'info') {
+      toast.info(msg);
+    } else {
+      toast.success(msg);
+    }
   };
 
   /* ── Fetch all users ─────────────────────────────────────────────────── */
@@ -560,6 +591,35 @@ const UserManagementNew = () => {
     a.click();
   };
 
+  const handleBulkGrant = async () => {
+    const amount = parseFloat(bulkGrantAmount);
+    if (!amount || amount <= 0) {
+      toast.error('Enter a valid amount greater than 0');
+      return;
+    }
+    setBulkGranting(true);
+    try {
+      const snap = await getDocs(collection(db, 'users'));
+      await Promise.all(
+        snap.docs.map((d) => {
+          const current = typeof d.data().creditLimit === 'number'
+            ? d.data().creditLimit
+            : 0;
+          return updateDoc(doc(db, 'users', d.id), {
+            creditLimit: current + amount,
+          });
+        })
+      );
+      toast.success(`$${amount} granted to ${snap.docs.length} users`);
+      setShowBulkGrantModal(false);
+      setBulkGrantAmount('');
+    } catch (err) {
+      toast.error('Bulk grant failed: ' + err.message);
+    } finally {
+      setBulkGranting(false);
+    }
+  };
+
   /* ── Pagination ──────────────────────────────────────────────────────── */
   const lastIdx   = currentPage * usersPerPage;
   const firstIdx  = lastIdx - usersPerPage;
@@ -604,17 +664,7 @@ const UserManagementNew = () => {
 
   /* ─────────────────────────────────────────────────────────────────────── */
   return (
-    <div className="p-4 md:p-6 lg:p-8 space-y-6 min-h-screen">
-
-      {/* Toast notification */}
-      {toast && (
-        <div className={`fixed top-5 right-5 z-50 flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl text-sm font-medium animate-in fade-in slide-in-from-top-2 ${
-          toast.type === 'error' ? 'bg-red-600 text-white' : toast.type === 'info' ? 'bg-slate-700 text-white' : 'bg-emerald-600 text-white'
-        }`}>
-          {toast.type === 'error' ? <AlertTriangle className="w-4 h-4" /> : <CheckCircle className="w-4 h-4" />}
-          {toast.msg}
-        </div>
-      )}
+    <div className="p-4 md:p-6 lg:p-8 space-y-6 min-h-screen overflow-x-hidden max-w-full">
 
       {/* ── Page header ─────────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
@@ -633,6 +683,15 @@ const UserManagementNew = () => {
           </button>
           {canManageUsers && (
             <>
+              <button
+                onClick={() => setShowBulkGrantModal(true)}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg
+                  bg-emerald-500/10 text-emerald-400 border border-emerald-500/20
+                  hover:bg-emerald-500/20 transition-colors"
+              >
+                <Zap className="w-3.5 h-3.5" strokeWidth={1.5} />
+                Bulk grant
+              </button>
               <button
                 onClick={() => setShowInvite(true)}
                 className="flex items-center gap-2 px-4 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 border border-indigo-600/30 rounded-xl text-sm font-medium transition-colors"
@@ -797,7 +856,7 @@ const UserManagementNew = () => {
           </div>
 
           {/* Users Table */}
-          <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden">
+          <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden max-w-full">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-slate-900/60 border-b border-slate-700/50">
@@ -1035,6 +1094,51 @@ const UserManagementNew = () => {
         confirmLabel={dangerModal.confirmLabel || 'Confirm'}
         loading={dangerModal.loading}
       />
+
+      {showBulkGrantModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl
+            p-6 w-full max-w-sm mx-4 shadow-2xl">
+            <h3 className="text-sm font-semibold text-white mb-1">
+              Bulk credit grant
+            </h3>
+            <p className="text-xs text-gray-400 mb-4">
+              Adds this amount to every user's credit limit simultaneously.
+            </p>
+            <div className="flex items-center gap-2 mb-4">
+              <span className="text-sm text-gray-400">$</span>
+              <input
+                type="number"
+                min="0.01"
+                step="0.01"
+                value={bulkGrantAmount}
+                onChange={(e) => setBulkGrantAmount(e.target.value)}
+                placeholder="Amount per user"
+                className="flex-1 px-3 py-2 text-sm rounded-lg bg-slate-700
+                  border border-slate-600 text-white placeholder-gray-500
+                  focus:outline-none focus:border-emerald-500 transition-colors"
+              />
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => { setShowBulkGrantModal(false); setBulkGrantAmount(''); }}
+                className="text-xs px-4 py-2 rounded-lg border border-slate-600
+                  text-gray-400 hover:bg-slate-700 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!bulkGrantAmount || bulkGranting}
+                onClick={handleBulkGrant}
+                className="text-xs px-4 py-2 rounded-lg bg-emerald-600 text-white
+                  hover:bg-emerald-700 disabled:opacity-50 transition-colors"
+              >
+                {bulkGranting ? 'Granting...' : 'Grant to all users'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Save, X, Loader2, Plus, List, CheckCircle2 } from 'lucide-react';
 import { getLists, createList, bulkSaveLeads } from '../services/listService';
+import { toast } from 'sonner';
 
 /**
  * SaveLeadsModal  (Phase 4)
@@ -11,9 +12,10 @@ import { getLists, createList, bulkSaveLeads } from '../services/listService';
  *   userId      – current user's uid
  *   onClose     – close handler
  *   onSuccess   – called after successful save with { listName, savedCount }
+ *   onError     – called after failed save
  */
 // eslint-disable-next-line react-refresh/only-export-components
-const SaveLeadsModal = ({ leads, searchMeta = {}, userId, onClose, onSuccess }) => {
+const SaveLeadsModal = ({ leads, searchMeta = {}, userId, onClose, onSuccess, onError }) => {
   // Tab: 'existing' | 'new'
   const [tab,            setTab]            = useState('new');
   const [lists,          setLists]          = useState([]);
@@ -65,10 +67,13 @@ const SaveLeadsModal = ({ leads, searchMeta = {}, userId, onClose, onSuccess }) 
 
       const savedCount = await bulkSaveLeads(userId, targetId, leads);
       setSavedInfo({ listName: targetName, savedCount });
+      if (!onSuccess) toast.success('Leads saved to My Lists!');
       onSuccess?.({ listName: targetName, savedCount });
     } catch (err) {
       console.error('[SaveLeadsModal] save error:', err);
       setError(err.message || 'Failed to save leads. Please try again.');
+      if (!onError) toast.error('Failed to save. Please try again.');
+      onError?.(err);
     } finally {
       setSaving(false);
     }

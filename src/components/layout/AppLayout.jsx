@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
 import { Menu, Search } from 'lucide-react';
 import Sidebar from './Sidebar';
 
@@ -13,6 +14,7 @@ import Sidebar from './Sidebar';
 const AppLayout = () => {
   // Default closed — sidebar auto-shows on desktop via md:translate-x-0 in Sidebar.jsx
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const location = useLocation();
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] transition-colors duration-300">
@@ -54,12 +56,20 @@ const AppLayout = () => {
         />
       )}
 
-      {/* ── Main content — always starts at ml-0, shifts when sidebar opens ── */}
-      <div className={`min-h-screen flex flex-col pt-16 transition-all duration-300 ${
-        sidebarOpen ? 'ml-64' : 'ml-0'
-      }`}>
-        <main className="flex-1 px-4 md:px-8">
-          <Outlet />
+      {/* ── Main content ─────────────────────────────────────────────────────── */}
+      <div className="min-h-screen flex flex-col pt-16">
+        <main className="flex-1 px-4 md:px-8 w-full max-w-screen-2xl mx-auto">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={location.pathname}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+            >
+              <Outlet />
+            </motion.div>
+          </AnimatePresence>
         </main>
       </div>
 

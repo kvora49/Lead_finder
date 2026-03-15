@@ -17,13 +17,15 @@ import { useState, useCallback, useRef } from 'react';
 import {
   Search, MapPin, Phone, Globe, Star, RefreshCw,
   Zap, Database, AlertCircle, ChevronDown, X, Bookmark,
-  FileText, Table2, Copy,
+  FileText, Table2, Copy, Clock, LayoutGrid, Map as MapIcon,
 } from 'lucide-react';
 import Papa from 'papaparse';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import { motion } from 'framer-motion';
+import { toast } from 'sonner';
 import SaveLeadsModal from './SaveLeadsModal.jsx';
+import LeadMapView from './LeadMapView.jsx';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults, getFilterChips, filterBySubtype } from '../services/placesApi';
+import { GOOGLE_API_KEY } from '../config.js';
 import { useAuth }   from '../contexts/AuthContext';
 import { useCredit } from '../contexts/CreditContext';
 // deduplicateResults is always applied — not a user toggle
@@ -69,9 +71,8 @@ const leadWeb   = (lead) => lead.websiteUri || '';
 const leadRate  = (lead) => lead.rating ?? '';
 const leadRevs  = (lead) => lead.userRatingCount ?? '';
 
-const downloadSearchCsv = (leads, keyword, location) => {
-  // BOM ensures Excel opens UTF-8 correctly
-  const BOM = '\uFEFF';
+const downloadSearchExcel = async (leads, keyword, location) => {
+  const { utils, write } = await import('xlsx');
   const rows = leads.map((l) => ({
     'Business Name': leadLabel(l),
     'Address':       leadAddr(l),
@@ -80,17 +81,65 @@ const downloadSearchCsv = (leads, keyword, location) => {
     'Rating':        leadRate(l),
     'Total Reviews': leadRevs(l),
   }));
-  const csv = BOM + Papa.unparse(rows, { header: true });
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `LeadFinder_${keyword}_${location}_${new Date().toISOString().slice(0,10)}.csv`.replace(/\s+/g, '_');
+
+  const ws = utils.json_to_sheet(rows);
+
+  // Make address easier to read in Excel by inserting line breaks after commas.
+  rows.forEach((row, idx) => {
+    const rawAddress = String(row['Address'] || '').trim();
+    if (!rawAddress) return;
+    const cellRef = `B${idx + 2}`;
+    const formatted = rawAddress.replace(/,\s*/g, ',\n');
+    if (ws[cellRef]) ws[cellRef].v = formatted;
+  });
+
+  // Make website cells reliably clickable via HYPERLINK formula.
+  rows.forEach((row, idx) => {
+    const raw = String(row['Website'] || '').trim();
+    if (!raw) return;
+    const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    const cellRef = `D${idx + 2}`;
+    const escapedUrl = url.replace(/"/g, '""');
+    const escapedText = raw.replace(/"/g, '""');
+    ws[cellRef] = {
+      t: 'str',
+      f: `HYPERLINK("${escapedUrl}","${escapedText}")`,
+      v: raw,
+    };
+  });
+
+  ws['!cols'] = [
+    { wch: 36 }, // Business Name
+    { wch: 120 }, // Address (very wide + multiline)
+    { wch: 20 }, // Phone
+    { wch: 46 }, // Website
+    { wch: 10 }, // Rating
+    { wch: 14 }, // Total Reviews
+  ];
+  ws['!rows'] = [{ hpt: 22 }, ...rows.map(() => ({ hpt: 42 }))];
+  ws['!autofilter'] = { ref: 'A1:F1' };
+
+  const wb = utils.book_new();
+  utils.book_append_sheet(wb, ws, 'Search Results');
+  const out = write(wb, { bookType: 'xlsx', type: 'array' });
+
+  const blob = new Blob(
+    [out],
+    { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+  );
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `LeadFinder_${keyword}_${location}_${new Date().toISOString().slice(0,10)}.xlsx`.replace(/\s+/g, '_');
   a.click();
   URL.revokeObjectURL(url);
+  toast.success('Excel downloaded!');
 };
 
-const downloadSearchPdf = (leads, keyword, location) => {
+const downloadSearchPdf = async (leads, keyword, location) => {
+  const tid = toast.loading('Preparing PDF...');
+  const { default: jsPDF } = await import('jspdf');
+  const { default: autoTable } = await import('jspdf-autotable');
   const doc        = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const pageW      = doc.internal.pageSize.getWidth();
   const pageH      = doc.internal.pageSize.getHeight();
@@ -143,7 +192,7 @@ const downloadSearchPdf = (leads, keyword, location) => {
       leadAddr(l),
       leadPhone(l),
       leadWeb(l),
-      leadRate(l) ? `★ ${leadRate(l)}` : '',
+      leadRate(l) ? String(leadRate(l)) : '',
       leadRevs(l) ? Number(leadRevs(l)).toLocaleString() : '',
     ]),
     styles: {
@@ -165,13 +214,13 @@ const downloadSearchPdf = (leads, keyword, location) => {
     },
     alternateRowStyles: { fillColor: SLATE_50 },
     columnStyles: {
-      0: { cellWidth: 8,  halign: 'center', textColor: SLATE_500 },
+      0: { cellWidth: 18, halign: 'center', textColor: SLATE_500, cellPadding: { left: 1.5, right: 1.5, top: 3.5, bottom: 3.5 } },
       1: { cellWidth: 52, fontStyle: 'bold' },
-      2: { cellWidth: 72 },
+      2: { cellWidth: 66 },
       3: { cellWidth: 32 },
-      4: { cellWidth: 52, textColor: [79, 70, 229] },
-      5: { cellWidth: 18, halign: 'center', textColor: [16, 185, 129] },
-      6: { cellWidth: 20, halign: 'right',  textColor: SLATE_500 },
+      4: { cellWidth: 56, textColor: [79, 70, 229] },
+      5: { cellWidth: 22, halign: 'center', textColor: [16, 185, 129] },
+      6: { cellWidth: 22, halign: 'right',  textColor: SLATE_500 },
     },
     // Footer on every page
     didDrawPage: (data) => {
@@ -190,6 +239,8 @@ const downloadSearchPdf = (leads, keyword, location) => {
   });
 
   doc.save(`LeadFinder_${keyword}_${location}_${new Date().toISOString().slice(0,10)}.pdf`.replace(/\s+/g, '_'));
+  toast.dismiss(tid);
+  toast.success('PDF downloaded!');
 };
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -204,7 +255,9 @@ const ProgressBar = ({ progress }) => {
 
   return (
     <div className={`rounded-xl border p-4 transition-all ${
-      isDone ? 'border-emerald-200 bg-emerald-50' : 'border-indigo-200 bg-indigo-50'
+      isDone
+        ? 'border-emerald-200 bg-emerald-50 dark:border-emerald-500/30 dark:bg-emerald-500/10'
+        : 'border-indigo-200 bg-indigo-50 dark:border-indigo-500/30 dark:bg-indigo-500/10'
     }`}>
       <div className="flex items-center justify-between mb-2 gap-3">
         <div className="flex items-center gap-2 min-w-0">
@@ -212,7 +265,7 @@ const ProgressBar = ({ progress }) => {
             ? <Zap className="w-4 h-4 text-emerald-600 flex-none" />
             : <RefreshCw className="w-4 h-4 text-indigo-600 flex-none animate-spin" />
           }
-          <span className="text-sm font-medium text-slate-700 truncate">{message}</span>
+          <span className="text-sm font-medium text-slate-700 dark:text-gray-200 truncate">{message}</span>
         </div>
         {!isDone && (
           <span className="text-xs text-indigo-500 font-semibold flex-none">{pct}%</span>
@@ -233,13 +286,13 @@ const ProgressBar = ({ progress }) => {
       {(found > 0 || apiCalls > 0) && (
         <div className="flex items-center gap-4 mt-2">
           {found > 0 && (
-            <span className="text-xs text-slate-500">
-              <strong className="text-slate-700">{found}</strong> found
+            <span className="text-xs text-slate-500 dark:text-gray-400">
+              <strong className="text-slate-700 dark:text-white">{found}</strong> found
             </span>
           )}
           {apiCalls > 0 && (
-            <span className="text-xs text-slate-500">
-              <strong className="text-slate-700">{apiCalls}</strong> API calls
+            <span className="text-xs text-slate-500 dark:text-gray-400">
+              <strong className="text-slate-700 dark:text-white">{apiCalls}</strong> API calls
             </span>
           )}
         </div>
@@ -249,6 +302,17 @@ const ProgressBar = ({ progress }) => {
 };
 
 /** Single lead card — premium compact mobile-first design with accordion contact + copy */
+const LeadCardSkeleton = () => (
+  <div className="animate-pulse bg-white dark:bg-[#171717] rounded-2xl
+    border border-slate-200 dark:border-white/10 p-5 flex flex-col gap-3 h-44">
+    <div className="h-3.5 bg-slate-200 dark:bg-white/10 rounded-lg w-3/4" />
+    <div className="h-2.5 bg-slate-100 dark:bg-white/5 rounded-lg w-full" />
+    <div className="h-2.5 bg-slate-100 dark:bg-white/5 rounded-lg w-2/3" />
+    <div className="h-2.5 bg-slate-100 dark:bg-white/5 rounded-lg w-1/2" />
+    <div className="mt-auto h-8 bg-slate-100 dark:bg-white/5 rounded-lg w-full" />
+  </div>
+);
+
 const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle }) => {
   const [contactOpen, setContactOpen] = useState(false);
   const name    = lead.displayName?.text || 'Unknown Business';
@@ -259,7 +323,9 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
   const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 
   const copyText = (text) => {
-    navigator.clipboard.writeText(text).catch(() => {});
+    navigator.clipboard.writeText(text).then(() => {
+      toast.success('Copied!');
+    }).catch(() => {});
   };
 
   return (
@@ -408,6 +474,17 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   const [filterPhone,    setFilterPhone]    = useState(false);
   const [filterWebsite,  setFilterWebsite]  = useState(false);
   const [subtype,        setSubtype]        = useState('');   // context-aware — value from getFilterChips(type)
+  const [filterRating,   setFilterRating]   = useState(0);
+
+  const [savedSearches, setSavedSearches] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('lf-saved-searches') || '[]');
+    } catch {
+      return [];
+    }
+  });
+  const [showSavedDropdown, setShowSavedDropdown] = useState(false);
+  const [viewMode, setViewMode] = useState('grid');
 
   // ── Selection + save state ──────────────────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false);
@@ -422,8 +499,45 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     if (filterPhone)   out = filterByPhoneNumber(out, true);
     if (filterWebsite) out = filterByAddress(out, false).filter((l) => l.websiteUri);
     if (subtype)       out = filterBySubtype(out, type, subtype);
+    if (filterRating > 0) out = out.filter((l) => (l.rating ?? 0) >= filterRating);
     return out;
   })();
+
+  const saveCurrentSearch = () => {
+    if (!keyword.trim() || !location.trim()) return;
+    const entry = {
+      id: Date.now(),
+      keyword: keyword.trim(),
+      location: location.trim(),
+      scope: searchScope,
+      type,
+      savedAt: new Date().toISOString(),
+    };
+    const updated = [
+      entry,
+      ...savedSearches.filter(
+        (s) => !(s.keyword === entry.keyword && s.location === entry.location)
+      ),
+    ].slice(0, 10);
+    setSavedSearches(updated);
+    localStorage.setItem('lf-saved-searches', JSON.stringify(updated));
+    toast.success('Search template saved!');
+  };
+
+  const loadSavedSearch = (s) => {
+    setKeyword(s.keyword);
+    setLocation(s.location);
+    setSearchScope(s.scope || 'city');
+    setType(s.type || '');
+    setShowSavedDropdown(false);
+  };
+
+  const deleteSavedSearch = (id, e) => {
+    e.stopPropagation();
+    const updated = savedSearches.filter((s) => s.id !== id);
+    setSavedSearches(updated);
+    localStorage.setItem('lf-saved-searches', JSON.stringify(updated));
+  };
 
   // ── Handlers ────────────────────────────────────────────────────────────────
   const handleSearch = useCallback(async (e) => {
@@ -442,6 +556,11 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     setError(null);
     setResults([]);
     setLastMeta(null);
+    setFilterPhone(false);
+    setFilterWebsite(false);
+    setSubtype('');
+    setFilterRating(0);
+    setViewMode('grid');
     setProgress({ phase: 'start', message: 'Starting search…', current: 0, total: 1 });
 
     try {
@@ -502,6 +621,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     setError(null);
     setResults([]);
     setLastMeta(null);
+    setViewMode('grid');
     setProgress({ phase: 'start', message: 'Starting fresh search…', current: 0, total: 1 });
 
     try {
@@ -625,14 +745,14 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
           {/* Row 0: Search scope selector */}
           <div>
-            <div className="flex gap-1.5 p-1 bg-slate-100 dark:bg-white/10 rounded-xl w-fit">
+            <div className="flex flex-wrap gap-2 p-1 bg-slate-100 dark:bg-white/10 rounded-xl w-fit">
               {SEARCH_SCOPES.map((s) => (
                 <button
                   key={s.value}
                   type="button"
                   title={s.hint}
                   onClick={() => { setSearchScope(s.value); setArea(''); }}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all active:scale-[0.97] ${
+                  className={`flex-none px-3 py-1.5 text-xs font-semibold rounded-lg transition-all active:scale-[0.97] ${
                     searchScope === s.value
                       ? 'bg-white dark:bg-[#171717] text-indigo-700 dark:text-indigo-400 shadow-sm border border-indigo-100 dark:border-indigo-500/30'
                       : 'text-slate-500 dark:text-gray-400 hover:text-slate-800 dark:hover:text-white'
@@ -749,10 +869,88 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 className="flex items-center gap-2 px-5 py-2.5 md:py-3.5 text-sm font-semibold rounded-xl
                   bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm
                   hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed
-                  transition-all hover:-translate-y-px active:scale-[0.97] whitespace-nowrap">
+                  transition-all hover:-translate-y-px active:scale-[0.97] whitespace-nowrap btn-ripple">
                 <Search className="w-4 h-4" />
                 {isMultiSearch ? `Search · ${searchCount} queries` : 'Search'}
               </button>
+            )}
+
+            {keyword.trim() && location.trim() && (
+              <button
+                type="button"
+                onClick={saveCurrentSearch}
+                title="Save this search as a template"
+                className="flex-none p-2.5 rounded-xl border border-slate-200 dark:border-white/10
+                  text-slate-400 dark:text-gray-500 hover:text-indigo-600 dark:hover:text-indigo-400
+                  hover:border-indigo-300 dark:hover:border-indigo-500/40 transition-all active:scale-[0.97]"
+              >
+                <Bookmark className="w-4 h-4" strokeWidth={1.5} />
+              </button>
+            )}
+
+            {savedSearches.length > 0 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowSavedDropdown((o) => !o)}
+                  className="flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl
+                    border border-slate-200 dark:border-white/10 text-slate-600 dark:text-gray-400
+                    hover:bg-slate-50 dark:hover:bg-white/5 transition-all"
+                >
+                  <Clock className="w-3.5 h-3.5" strokeWidth={1.5} />
+                  <span className="hidden sm:inline">Saved</span>
+                  <span className="text-[10px] bg-indigo-100 dark:bg-indigo-500/20
+                    text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded-full font-semibold">
+                    {savedSearches.length}
+                  </span>
+                </button>
+
+                {showSavedDropdown && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-10"
+                      onClick={() => setShowSavedDropdown(false)}
+                    />
+                    <div className="absolute top-full left-0 mt-1 w-72 bg-white dark:bg-[#1e1e1e]
+                      border border-slate-200 dark:border-white/10 rounded-xl shadow-xl z-20 overflow-hidden">
+                      <div className="px-3 py-2 border-b border-slate-100 dark:border-white/5">
+                        <p className="text-[10px] font-semibold uppercase tracking-widest
+                          text-slate-400 dark:text-gray-600">
+                          Saved searches
+                        </p>
+                      </div>
+                      <div className="max-h-64 overflow-y-auto">
+                        {savedSearches.map((s) => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => loadSavedSearch(s)}
+                            className="w-full flex items-center gap-2 px-3 py-2.5 text-left
+                              hover:bg-slate-50 dark:hover:bg-white/5 transition-colors group"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                {s.keyword}
+                              </p>
+                              <p className="text-[10px] text-slate-400 dark:text-gray-600 truncate">
+                                {s.location}
+                              </p>
+                            </div>
+                            <span
+                              onClick={(e) => deleteSavedSearch(s.id, e)}
+                              className="flex-none opacity-0 group-hover:opacity-100 text-slate-300
+                                dark:text-gray-700 hover:text-red-500 dark:hover:text-red-400
+                                transition-all cursor-pointer p-0.5"
+                            >
+                              <X className="w-3 h-3" strokeWidth={1.5} />
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             )}
           </div>
 
@@ -762,6 +960,15 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
       {/* ── Progress ─────────────────────────────────────────────────── */}
       {progress && <ProgressBar progress={progress} />}
+
+      {/* Skeleton grid — shown while search is running and no results yet */}
+      {searching && results.length === 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 mt-4">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <LeadCardSkeleton key={i} />
+          ))}
+        </div>
+      )}
 
       {/* ── Error ────────────────────────────────────────────────────── */}
       {error && (
@@ -808,7 +1015,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 disabled={!keyword.trim() || !location.trim()}
                 className="flex-none flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg
                   bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50
-                  transition-all active:scale-[0.97]">
+                  transition-all active:scale-[0.97] btn-ripple">
                 <Search className="w-3.5 h-3.5" strokeWidth={1.5} />
                 <span className="hidden sm:inline">Search</span>
               </button>
@@ -846,15 +1053,61 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                   {visible.length} of {deduplicateResults(results).length} results
                 </span>
               )}
+
+              {/* Rating filter separator */}
+              <span className="w-px h-4 bg-slate-200 dark:bg-white/10 mx-1" />
+
+              {/* Rating chips */}
+              {[
+                { value: 0, label: 'Any ★' },
+                { value: 3, label: '3★+' },
+                { value: 4, label: '4★+' },
+                { value: 4.5, label: '4.5★+' },
+              ].map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setFilterRating(value)}
+                  className={`px-3 py-1 rounded-full text-xs font-semibold border
+                    transition-all active:scale-[0.97] ${
+                    filterRating === value
+                      ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                      : 'bg-white dark:bg-[#171717] text-slate-600 dark:text-gray-400 border-slate-200 dark:border-white/10 hover:border-amber-300 hover:text-amber-600 dark:hover:text-amber-400'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
             {/* Row 2: Count + cache | Filters + actions */}
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
             {/* Result count + cache badge */}
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold text-slate-900">
-                {visible.length} <span className="font-normal text-slate-500">result{visible.length !== 1 ? 's' : ''}</span>
+              <span className="text-sm font-semibold text-slate-900 dark:text-white">
+                {visible.length} <span className="font-normal text-slate-500 dark:text-gray-400">result{visible.length !== 1 ? 's' : ''}</span>
               </span>
+              <div className="flex items-center gap-0.5 bg-slate-100 dark:bg-white/5
+                rounded-lg p-0.5 border border-slate-200 dark:border-white/10">
+                {[
+                  { mode: 'grid', Icon: LayoutGrid, label: 'Grid' },
+                  { mode: 'map', Icon: MapIcon, label: 'Map' },
+                ].map(({ mode, Icon, label }) => (
+                  <button
+                    key={mode}
+                    onClick={() => setViewMode(mode)}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md
+                      text-xs font-medium transition-all ${
+                      viewMode === mode
+                        ? 'bg-white dark:bg-white/10 text-slate-900 dark:text-white shadow-sm'
+                        : 'text-slate-500 dark:text-gray-400 hover:text-slate-700 dark:hover:text-gray-300'
+                    }`}
+                  >
+                    <Icon className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    <span className="hidden sm:inline">{label}</span>
+                  </button>
+                ))}
+              </div>
               {lastMeta?.cached && (
                 <>
                   <span className="flex items-center gap-1 text-xs font-medium px-2 py-0.5
@@ -874,7 +1127,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 </>
               )}
               {!lastMeta?.cached && lastMeta?.apiCalls > 0 && (
-                <span className="text-xs text-slate-400">
+                <span className="text-xs text-slate-400 dark:text-gray-400">
                   {lastMeta.apiCalls} API call{lastMeta.apiCalls !== 1 ? 's' : ''}
                 </span>
               )}
@@ -889,84 +1142,86 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 active={filterWebsite} onChange={setFilterWebsite}
                 label="Has website" icon={<Globe className="w-3 h-3" />} />
 
-              {/* Separator */}
-              <span className="w-px h-4 bg-slate-200" />
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Separator */}
+                <span className="w-px h-4 bg-slate-200" />
 
-              {!selectionMode ? (
-                /* ── Normal mode: download + Add to My List ── */
-                <>
-                  <button
-                    onClick={() => downloadSearchCsv(visible, keyword, location)}
-                    title="Download results as Excel / CSV"
-                    className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
-                      bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100
-                      transition-colors">
-                    <Table2 className="w-3 h-3" />
-                    Excel
-                  </button>
-                  <button
-                    onClick={() => downloadSearchPdf(visible, keyword, location)}
-                    title="Download results as PDF"
-                    className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
-                      bg-red-50 text-red-700 border border-red-200 hover:bg-red-100
-                      transition-colors">
-                    <FileText className="w-3 h-3" />
-                    PDF
-                  </button>
-                  <span className="w-px h-4 bg-slate-200" />
-                  <button
-                    onClick={() => setSelectionMode(true)}
-                    className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
-                      bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100
-                      transition-colors">
-                    <Bookmark className="w-3 h-3" />
-                    Add to My List
-                  </button>
-                </>
-              ) : (
-                /* ── Selection mode controls ── */
-                <>
-                  {/* Select all */}
-                  <button
-                    onClick={toggleSelectAll}
-                    className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-full
-                      border transition-all ${
-                        allVisibleSelected
-                          ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-600 border-slate-300 hover:border-indigo-400'
-                      }`}>
-                    <div className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center flex-none
-                      ${ allVisibleSelected ? 'bg-white border-white' : 'border-current' }`}>
-                      {allVisibleSelected && (
-                        <svg className="w-2 h-2 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3.5}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                        </svg>
-                      )}
-                    </div>
-                    Select all
-                  </button>
+                {!selectionMode ? (
+                  /* ── Normal mode: download + Add to My List ── */
+                  <>
+                    <button
+                      onClick={() => downloadSearchExcel(visible, keyword, location)}
+                      title="Download results as Excel / CSV"
+                      className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
+                        bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100
+                        transition-colors ${results.length > 0 && !searching ? 'animate-export-ready' : ''}`}>
+                      <Table2 className="w-3 h-3" />
+                      Excel
+                    </button>
+                    <button
+                      onClick={async () => { await downloadSearchPdf(visible, keyword, location); }}
+                      title="Download results as PDF"
+                      className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
+                        bg-red-50 text-red-700 border border-red-200 hover:bg-red-100
+                        transition-colors ${results.length > 0 && !searching ? 'animate-export-ready' : ''}`}>
+                      <FileText className="w-3 h-3" />
+                      PDF
+                    </button>
+                    <span className="w-px h-4 bg-slate-200" />
+                    <button
+                      onClick={() => setSelectionMode(true)}
+                      className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
+                        bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100
+                        transition-colors">
+                      <Bookmark className="w-3 h-3" />
+                      Add to My List
+                    </button>
+                  </>
+                ) : (
+                  /* ── Selection mode controls ── */
+                  <>
+                    {/* Select all */}
+                    <button
+                      onClick={toggleSelectAll}
+                      className={`flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-full
+                        border transition-all ${
+                          allVisibleSelected
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-white text-slate-600 border-slate-300 hover:border-indigo-400'
+                        }`}>
+                      <div className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center flex-none
+                        ${ allVisibleSelected ? 'bg-white border-white' : 'border-current' }`}>
+                        {allVisibleSelected && (
+                          <svg className="w-2 h-2 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3.5}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                      </div>
+                      Select all
+                    </button>
 
-                  {/* Save selected */}
-                  <button
-                    onClick={() => setShowSaveModal(true)}
-                    disabled={selected.size === 0}
-                    className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
-                      bg-indigo-600 text-white border border-indigo-600 hover:bg-indigo-700
-                      disabled:opacity-40 transition-colors shadow-sm">
-                    <Bookmark className="w-3 h-3" />
-                    {selected.size > 0 ? `Save ${selected.size}` : 'Save'}
-                  </button>
+                    {/* Save selected */}
+                    <button
+                      onClick={() => setShowSaveModal(true)}
+                      disabled={selected.size === 0}
+                      className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full
+                        bg-indigo-600 text-white border border-indigo-600 hover:bg-indigo-700
+                        disabled:opacity-40 transition-colors shadow-sm">
+                      <Bookmark className="w-3 h-3" />
+                      {selected.size > 0 ? `Save ${selected.size}` : 'Save'}
+                    </button>
 
-                  {/* Cancel selection */}
-                  <button
-                    onClick={cancelSelection}
-                    className="flex items-center gap-1 text-xs font-medium px-2.5 py-1.5 rounded-full
-                      bg-white text-slate-500 border border-slate-300 hover:border-red-300
-                      hover:text-red-500 transition-colors">
-                    <X className="w-3 h-3" /> Cancel
-                  </button>
-                </>
-              )}
+                    {/* Cancel selection */}
+                    <button
+                      onClick={cancelSelection}
+                      className="flex items-center gap-1 text-xs font-medium px-2.5 py-1.5 rounded-full
+                        bg-white text-slate-500 border border-slate-300 hover:border-red-300
+                        hover:text-red-500 transition-colors">
+                      <X className="w-3 h-3" /> Cancel
+                    </button>
+                  </>
+                )}
+              </div>
 
               {!selectionMode && (
                 <button onClick={handleClear}
@@ -979,23 +1234,37 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
           </div> {/* end space-y-2.5 toolbar wrapper */}
 
-          {/* Grid */}
+          {/* Grid / Map */}
           {visible.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-              {visible.map((lead) => {
-                const key        = getLeadKey(lead);
-                const isSelected = selected.has(key);
-                return (
-                  <LeadCard
-                    key={key}
-                    lead={lead}
-                    selectionMode={selectionMode}
-                    isSelected={isSelected}
-                    onToggle={() => toggleLead(lead)}
-                  />
-                );
-              })}
-            </div>
+            viewMode === 'grid' ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+                {visible.map((lead, index) => {
+                  const key        = getLeadKey(lead);
+                  const isSelected = selected.has(key);
+                  return (
+                    <motion.div
+                      key={key}
+                      initial={{ opacity: 0, x: -16 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{
+                        duration: 0.22,
+                        delay: Math.min(index * 0.03, 0.6),
+                        ease: 'easeOut',
+                      }}
+                    >
+                      <LeadCard
+                        lead={lead}
+                        selectionMode={selectionMode}
+                        isSelected={isSelected}
+                        onToggle={() => toggleLead(lead)}
+                      />
+                    </motion.div>
+                  );
+                })}
+              </div>
+            ) : (
+              <LeadMapView leads={visible} apiKey={GOOGLE_API_KEY} />
+            )
           ) : (
             <div className="text-center py-10 text-slate-400 text-sm">
               No results match the active filters.
@@ -1023,6 +1292,11 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
           onSuccess={() => {
             setShowSaveModal(false);
             setSelected(new Set());
+            setSelectionMode(false);
+            toast.success('Leads saved to My Lists!');
+          }}
+          onError={() => {
+            toast.error('Failed to save leads. Please try again.');
           }}
         />
       )}

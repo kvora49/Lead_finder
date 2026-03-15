@@ -1,6 +1,7 @@
 ﻿import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, User, Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react';
+import { getAuth, sendEmailVerification } from 'firebase/auth';
 import { useAuth } from '../contexts/AuthContext';
 
 // Password strength scorer
@@ -47,8 +48,24 @@ const Register = () => {
     setError('');
     setLoading(true);
     try {
+      // Step 1: Create Firebase Auth account.
       await register(form.email, form.password, form.name.trim());
-      navigate('/app');
+
+      // Step 2: Send verification email (Firebase built-in, free).
+      const auth = getAuth();
+      if (auth.currentUser) {
+        try {
+          await sendEmailVerification(auth.currentUser);
+        } catch (verifyErr) {
+          console.warn('[Register] sendEmailVerification failed:', verifyErr.message);
+        }
+      }
+
+      // Step 3: Redirect to check-email page.
+      navigate('/check-email', {
+        replace: true,
+        state: { email: form.email },
+      });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -125,7 +142,7 @@ const Register = () => {
       </div>
 
       {/* ── Right form panel ──────────────────────────────── */}
-      <div className="flex-1 flex flex-col justify-center px-6 sm:px-12 lg:px-16 py-12 overflow-y-auto">
+      <div className="flex-1 max-w-xl flex flex-col justify-center px-6 sm:px-12 lg:px-16 py-12 overflow-y-auto">
 
         {/* Mobile logo */}
         <div className="lg:hidden flex items-center gap-2 mb-10">

@@ -21,23 +21,7 @@ import {
   ShieldCheck, Mail, Clock,
   CheckCircle2, XCircle, Loader2, ArrowRight,
 } from 'lucide-react';
-
-/* ─── Toast ─────────────────────────────────────────────────────────────── */
-const Toast = ({ msg, type }) => {
-  if (!msg) return null;
-  const styles = {
-    error:   'bg-red-500/15 border-red-500/40 text-red-300',
-    success: 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300',
-    info:    'bg-indigo-500/15 border-indigo-500/40 text-indigo-300',
-  };
-  const Icon = type === 'success' ? CheckCircle2 : type === 'error' ? XCircle : Loader2;
-  return (
-    <div className={`flex items-center gap-2.5 border rounded-xl px-4 py-3 text-sm ${styles[type]}`}>
-      <Icon className="w-4 h-4 flex-shrink-0" />
-      <span>{msg}</span>
-    </div>
-  );
-};
+import { toast } from 'sonner';
 
 /* ─── GlassCard ─────────────────────────────────────────────────────────── */
 const GlassCard = ({ children, className = '' }) => (
@@ -75,11 +59,14 @@ const AdminGatekeeper = () => {
   // 'idle' | 'accepting' | 'success' | 'error' | 'requesting' | 'requested'
   const [phase,    setPhase]   = useState('idle');
   const [errorMsg, setErrorMsg] = useState('');
-  const [toast,    setToast]   = useState({ msg: '', type: 'info' });
-
-  const showToast = (msg, type = 'info', ms = 4500) => {
-    setToast({ msg, type });
-    if (ms) setTimeout(() => setToast({ msg: '', type: 'info' }), ms);
+  const showToast = (msg, type = 'info') => {
+    if (type === 'error') {
+      toast.error(msg);
+    } else if (type === 'success') {
+      toast.success(msg);
+    } else {
+      toast.info(msg);
+    }
   };
 
   /* ── Auto-accept invite on mount when token + user both present ───────── */
@@ -257,8 +244,6 @@ const AdminGatekeeper = () => {
                   <span className="text-xs text-emerald-500 flex-shrink-0 font-medium">● verified</span>
                 </div>
               </div>
-
-              <Toast msg={toast.msg} type={toast.type} />
 
               <div className="space-y-3">
                 <Btn onClick={handleRequestAccess} loading={phase === 'requesting'}>
