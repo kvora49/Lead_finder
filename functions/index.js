@@ -29,8 +29,120 @@ const createTransporter = () =>
     },
   });
 
+const parseAdminEmails = (raw) => {
+  if (!raw) return [];
+  const normalized = String(raw)
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+
+  return [...new Set(normalized)].filter((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
+};
+
 const APP_URL    = "https://lead-finder-6b009.web.app";
 const INVITE_TTL = 24 * 60 * 60 * 1000; // 24 hours in ms
+const EMAIL_SECRETS = [
+  "SMTP_HOST",
+  "SMTP_PORT",
+  "SMTP_SECURE",
+  "SMTP_USER",
+  "SMTP_PASS",
+  "SMTP_FROM",
+];
+
+exports.sendSystemEmail = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS }, async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'Must be signed in.');
+
+  const { type, payload = {} } = request.data || {};
+  if (!type) throw new HttpsError('invalid-argument', 'type is required.');
+
+  const settingsSnap = await db.collection('systemConfig').doc('globalSettings').get();
+  const settings = settingsSnap.exists ? settingsSnap.data() : {};
+
+  const emailNotificationsEnabled = settings.emailNotificationsEnabled ?? true;
+  const sendWelcomeEmail = settings.sendWelcomeEmail ?? true;
+  const sendCreditAlerts = settings.sendCreditAlerts ?? true;
+  const adminEmails = parseAdminEmails(settings.adminNotificationEmail || '');
+
+  if (!emailNotificationsEnabled) {
+    return { ok: true, skipped: true, reason: 'email-notifications-disabled' };
+  }
+
+  const smtpReady = process.env.SMTP_USER && process.env.SMTP_PASS;
+  if (!smtpReady) {
+    logger.warn('sendSystemEmail skipped: SMTP credentials are missing.');
+    return { ok: false, skipped: true, reason: 'smtp-not-configured' };
+  }
+
+  const transporter = createTransporter();
+  const from = `"Lead Finder" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`;
+
+  if (type === 'welcome') {
+    if (!sendWelcomeEmail) {
+      return { ok: true, skipped: true, reason: 'welcome-email-disabled' };
+    }
+
+    const to = String(payload.userEmail || request.auth.token.email || '').trim().toLowerCase();
+    if (!to) throw new HttpsError('invalid-argument', 'userEmail is required for welcome emails.');
+
+    // Prevent arbitrary email targets from client calls.
+    if (to !== String(request.auth.token.email || '').trim().toLowerCase()) {
+      throw new HttpsError('permission-denied', 'You can only send welcome email to your own account.');
+    }
+
+    await transporter.sendMail({
+      from,
+      to,
+      subject: 'Welcome to Lead Finder',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#0f172a;">
+          <h2 style="margin-bottom:8px;">Welcome to Lead Finder</h2>
+          <p style="line-height:1.6;">Hi ${payload.displayName || 'there'},</p>
+          <p style="line-height:1.6;">Your account is now active. You can start searching and managing leads from your dashboard.</p>
+          <p style="line-height:1.6;">If you need help, contact your administrator.</p>
+        </div>
+      `,
+    });
+
+    return { ok: true, sentTo: [to], type };
+  }
+
+  if (type === 'credit_request' || type === 'credit_alert') {
+    if (!sendCreditAlerts) {
+      return { ok: true, skipped: true, reason: 'credit-alert-emails-disabled' };
+    }
+
+    if (adminEmails.length === 0) {
+      return { ok: true, skipped: true, reason: 'no-admin-notification-emails' };
+    }
+
+    const isRequest = type === 'credit_request';
+    const subject = isRequest
+      ? `Credit Request: ${payload.userEmail || request.auth.token.email || 'User'}`
+      : `Credit Alert: ${payload.userEmail || request.auth.token.email || 'User'}`;
+
+    await transporter.sendMail({
+      from,
+      to: adminEmails.join(', '),
+      subject,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#0f172a;">
+          <h2 style="margin-bottom:8px;">${isRequest ? 'Credit Top-up Request' : 'Credit Usage Alert'}</h2>
+          <p><strong>User:</strong> ${payload.userEmail || request.auth.token.email || 'Unknown'}</p>
+          <p><strong>Requested Amount (USD):</strong> ${Number(payload.requestedAmountUsd || 0).toFixed(2)}</p>
+          <p><strong>Remaining (USD):</strong> ${Number(payload.remainingUsd || 0).toFixed(2)}</p>
+          <p><strong>Usage (%):</strong> ${Number(payload.usagePct || 0).toFixed(1)}</p>
+          <p><strong>Reason:</strong> ${payload.reason || 'N/A'}</p>
+          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
+        </div>
+      `,
+    });
+
+    return { ok: true, sentTo: adminEmails, type };
+  }
+
+  throw new HttpsError('invalid-argument', `Unsupported email type: ${type}`);
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 // sendAdminInvite
@@ -38,7 +150,7 @@ const INVITE_TTL = 24 * 60 * 60 * 1000; // 24 hours in ms
 // Generates a secure random invite token, stores it in admin_invites/{token},
 // and sends an invitation email via SMTP.
 // ════════════════════════════════════════════════════════════════════════════
-exports.sendAdminInvite = onCall({ timeoutSeconds: 30 }, async (request) => {
+exports.sendAdminInvite = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Must be signed in.");
 
   // Verify caller role from Firestore (cannot trust client-side claim)

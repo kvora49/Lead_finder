@@ -15,7 +15,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   Search,
   Eye,
-  Edit,
   Ban,
   CheckCircle,
   XCircle,
@@ -49,6 +48,7 @@ import {
   limit,
   startAfter,
   where,
+  getDoc,
 } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
@@ -66,6 +66,15 @@ const currentMonthStr = () => {
 };
 
 const formatUsd = (value) => `$${Number(value || 0).toFixed(2)}`;
+
+/** Format a Date as DD/MM/YYYY */
+const formatAdminDate = (date) => {
+  if (!date || !(date instanceof Date) || isNaN(date)) return '—';
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+};
 
 /**
  * ghostRole — if the stored DB role is 'owner', return 'Super Admin' to mask it.
@@ -235,8 +244,8 @@ const UserDetailModal = ({ user, onClose }) => (
             ['Spent This Month', formatUsd(user.monthlyCreditUsdUsed)],
             ['Credit Limit', user.creditLimit === 'unlimited' ? 'Unlimited' : formatUsd(user.creditLimit)],
             ['Searches', (user.searchCount ?? 0).toLocaleString()],
-            ['Registered', user.createdAt?.toLocaleDateString?.() ?? '—'],
-            ['Last Active', user.lastActive?.toLocaleDateString?.() ?? '—'],
+            ['Registered', user.createdAt ? formatAdminDate(user.createdAt) : '—'],
+            ['Last Active', user.lastActive ? formatAdminDate(user.lastActive) : 'Never'],
           ].map(([label, val]) => (
             <div key={label} className="flex justify-between gap-4">
               <span className="text-slate-400">{label}</span>
@@ -410,6 +419,7 @@ const UserManagementNew = () => {
   const [showDetails,     setShowDetails]     = useState(false);
   const [showCredits,     setShowCredits]     = useState(false);
   const [bulkSelected,    setBulkSelected]    = useState([]);
+  const [bulkSelectMode,  setBulkSelectMode]  = useState(false);
   const [currentPage,     setCurrentPage]     = useState(1);
   const [lastDoc,         setLastDoc]         = useState(null);
   const [hasMore,         setHasMore]         = useState(true);
@@ -456,7 +466,7 @@ const UserManagementNew = () => {
           email:       u.email        || 'N/A',
           displayName: u.displayName  || u.email?.split('@')[0] || 'N/A',
           createdAt:   u.createdAt?.toDate?.()  ?? new Date(0),
-          lastActive:  u.lastActive?.toDate?.() ?? new Date(0),
+          lastActive:  u.lastActive?.toDate?.() ?? null,
           credits:     u.credits      ?? 0,
           creditsUsed: effectiveMetrics.monthlyApiCalls,
           monthlyCreditUsdUsed: effectiveMetrics.monthlyApiCost,
@@ -526,27 +536,54 @@ const UserManagementNew = () => {
 
   /* ── Mutation actions ─────────────────────────────────────────────────── */
   const updateStatus = async (userId, newStatus) => {
+      const userDoc = await getDoc(doc(db, 'users', userId));
+      const oldStatus = userDoc.data()?.status || 'active';
+      const user = users.find(u => u.id === userId);
     try {
       await updateDoc(doc(db, 'users', userId), { accountStatus: newStatus, lastModified: new Date() });
-      await logAdminAction(adminUser?.uid, adminUser?.email, 'Status Changed', userId, `→ ${newStatus}`);
+       await logAdminAction(
+         adminUser?.uid,
+         adminUser?.email,
+         'Status Changed',
+         userId,
+         `Updated status for ${user?.email || userId}: ${oldStatus} → ${newStatus}`
+       );
       setUsers(prev => prev.map(u => u.id === userId ? { ...u, status: newStatus } : u));
       showToast(`Status updated to ${newStatus}`);
     } catch (e) { showToast(e.message, 'error'); }
   };
 
   const updateCreditLimit = async (userId, newLimit) => {
+      const userDoc = await getDoc(doc(db, 'users', userId));
+      const oldLimit = userDoc.data()?.creditLimit || 'unknown';
+      const user = users.find(u => u.id === userId);
     try {
       await updateDoc(doc(db, 'users', userId), { creditLimit: newLimit, lastModified: new Date() });
-      await logAdminAction(adminUser?.uid, adminUser?.email, 'Credit Limit Changed', userId, `→ ${newLimit}`);
+       await logAdminAction(
+         adminUser?.uid,
+         adminUser?.email,
+         'Credit Limit Changed',
+         userId,
+         `Updated credit limit for ${user?.email || userId}: ${oldLimit} → ${newLimit}`
+       );
       setUsers(prev => prev.map(u => u.id === userId ? { ...u, creditLimit: newLimit } : u));
       showToast('User monthly allocation updated');
     } catch (e) { showToast(e.message, 'error'); }
   };
 
   const updateRole = async (userId, newRole) => {
+      const userDoc = await getDoc(doc(db, 'users', userId));
+      const oldRole = userDoc.data()?.role || 'unknown';
+      const user = users.find(u => u.id === userId);
     try {
       await updateDoc(doc(db, 'users', userId), { role: newRole, lastModified: new Date() });
-      await logAdminAction(adminUser?.uid, adminUser?.email, 'Role Changed', userId, `→ ${newRole}`);
+       await logAdminAction(
+         adminUser?.uid,
+         adminUser?.email,
+         'Role Changed',
+         userId,
+         `Updated role for ${user?.email || userId}: ${oldRole} → ${newRole}`
+       );
       setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u));
       showToast('Role updated');
     } catch (e) { showToast(e.message, 'error'); }
@@ -582,7 +619,7 @@ const UserManagementNew = () => {
         Number(u.monthlyCreditUsdUsed || 0).toFixed(2),
         u.creditLimit === 'unlimited' ? 'unlimited' : Number(u.creditLimit || 0).toFixed(2),
         u.creditsUsed,
-        u.createdAt.toLocaleDateString(),
+        u.createdAt ? formatAdminDate(u.createdAt) : '—',
       ].join(',')),
     ].join('\n');
     const a = document.createElement('a');
@@ -626,19 +663,36 @@ const UserManagementNew = () => {
   const pageUsers = filteredUsers.slice(firstIdx, lastIdx);
   const totalPages = Math.ceil(filteredUsers.length / usersPerPage);
 
-  /* ── Row-level edit gate ──────────────────────────────────────────────── */
-  // Returns true only when the viewing admin is allowed to act on this row.
-  const canEdit = (rowUser) => {
-    // Self-protection: NO admin (not even owner) can change their own role
+  /* ── Row-level edit gates ─────────────────────────────────────────────── */
+  // canEditRole — gates role changes, status changes, and deletion.
+  // Super admin and owner CANNOT change their own role.
+  const canEditRole = (rowUser) => {
+    // Self-protection: NO admin can change their own role
     if (rowUser.id === adminUser?.uid) return false;
     // Ghost Owner protection — only real owner can touch owner rows
     if (rowUser.role === 'owner' && !viewerIsOwner) return false;
     // super_admin CANNOT edit other super_admin rows
-    // (owner rows are masked as Super Admin so this also covers ghost-owner protection)
     if (rowUser.role === 'super_admin' && !viewerIsOwner) return false;
-    // admin can only act on plain 'user' rows (suspend/activate — no role changes)
+    // admin can only act on plain 'user' rows
     if (viewerRole === 'admin') return rowUser.role === 'user';
-    return true; // owner: full edit on all other rows
+    return true;
+  };
+
+  // canEditCredits — gates the Allocate (credit limit) button only.
+  // Super admin and owner CAN manage their own credit limit.
+  // Regular admins still cannot touch their own credits.
+  const canEditCredits = (rowUser) => {
+    // Ghost Owner protection — only real owner can touch owner rows
+    if (rowUser.role === 'owner' && !viewerIsOwner) return false;
+    // super_admin rows: only owner can touch them (except self-grant below)
+    if (rowUser.role === 'super_admin' && !viewerIsOwner) {
+      // Allow super_admin to manage their OWN credits only
+      if (rowUser.id === adminUser?.uid && viewerRole === 'super_admin') return true;
+      return false;
+    }
+    // admin can only act on plain 'user' rows
+    if (viewerRole === 'admin') return rowUser.role === 'user';
+    return true;
   };
 
   /* ── Loading / error states ───────────────────────────────────────────── */
@@ -664,7 +718,7 @@ const UserManagementNew = () => {
 
   /* ─────────────────────────────────────────────────────────────────────── */
   return (
-    <div className="p-4 md:p-6 lg:p-8 space-y-6 min-h-screen overflow-x-hidden max-w-full">
+    <div className="p-3 sm:p-4 md:p-6 lg:p-8 space-y-6 min-h-screen overflow-x-hidden max-w-full">
 
       {/* ── Page header ─────────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
@@ -700,6 +754,20 @@ const UserManagementNew = () => {
               </button>
               <button onClick={exportCsv} className="flex items-center gap-2 px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-600/30 rounded-xl text-sm font-medium transition-colors">
                 <Download className="w-4 h-4" />Export CSV
+              </button>
+              <button
+                onClick={() => { setBulkSelectMode((m) => !m); setBulkSelected([]); }}
+                className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5
+                  rounded-full border transition-all ${
+                  bulkSelectMode
+                    ? 'bg-indigo-600 dark:bg-indigo-600 text-white dark:text-white border-indigo-600 dark:border-indigo-600'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-600 hover:border-indigo-400 dark:hover:border-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300'
+                }`}
+              >
+                {bulkSelectMode && bulkSelected.length > 0
+                  ? `${bulkSelected.length} selected`
+                  : 'Select'
+                }
               </button>
             </>
           )}
@@ -850,7 +918,7 @@ const UserManagementNew = () => {
                 <span className="text-xs text-indigo-400 font-medium">{bulkSelected.length} selected</span>
                 <button onClick={async () => { for (const id of bulkSelected) await updateStatus(id, 'active'); setBulkSelected([]); }} className="px-3 py-1 bg-emerald-600/20 text-emerald-400 border border-emerald-600/30 rounded-lg text-xs font-medium">Activate</button>
                 <button onClick={() => setDangerModal({ open: true, title: 'Suspend Selected Users?', message: `Suspend ${bulkSelected.length} selected user(s)? They will lose access immediately.`, confirmLabel: 'Suspend', onConfirm: async () => { for (const id of bulkSelected) await updateStatus(id, 'suspended'); setBulkSelected([]); }, loading: false })} className="px-3 py-1 bg-red-600/20 text-red-400 border border-red-600/30 rounded-lg text-xs font-medium">Suspend</button>
-                <button onClick={() => setBulkSelected([])} className="px-3 py-1 bg-slate-700 text-slate-400 rounded-lg text-xs">Clear</button>
+                <button onClick={() => { setBulkSelected([]); setBulkSelectMode(false); }} className="px-3 py-1 bg-slate-700 text-slate-400 rounded-lg text-xs">Clear</button>
               </div>
             )}
           </div>
@@ -861,7 +929,7 @@ const UserManagementNew = () => {
               <table className="w-full text-sm">
                 <thead className="bg-slate-900/60 border-b border-slate-700/50">
                   <tr>
-                    {canManageUsers && (
+                    {canManageUsers && bulkSelectMode && (
                       <th className="px-4 py-3 w-10">
                         <input
                           type="checkbox"
@@ -872,27 +940,35 @@ const UserManagementNew = () => {
                       </th>
                     )}
                     {/* spacer for admin view — no checkboxes */}
-                    {['User', 'Role', 'Registered', 'Last Active', 'Spend', 'Limit', 'Status', 'Actions'].map(h => (
-                      <th key={h} className="px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                    {['User', 'Role', 'Registered', 'Last Active', 'Spend', 'Limit', 'Status', 'Actions'].map((h, i) => (
+                      <th
+                        key={h}
+                        className={`px-4 py-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider whitespace-nowrap ${
+                          i === 0 ? 'sticky left-0 z-10 bg-slate-900/60' : ''
+                        }`}
+                      >
+                        {h}
+                      </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700/30">
                   {pageUsers.length === 0 ? (
                     <tr>
-                      <td colSpan="9" className="px-4 py-12 text-center text-slate-400">
+                      <td colSpan={canManageUsers && bulkSelectMode ? 9 : 8} className="px-4 py-12 text-center text-slate-400">
                         <Users className="w-8 h-8 mx-auto mb-2 text-slate-600" />
                         No users found
                       </td>
                     </tr>
                   ) : pageUsers.map(user => {
-                    const editable     = canEdit(user);
+                    const editable      = canEditRole(user);
+                    const editableCredit = canEditCredits(user);
                     const isGhostOwner = user.role === 'owner';
                     const isProtected  = isGhostOwner && !viewerIsOwner;
 
                     return (
                       <tr key={user.id} className="hover:bg-slate-800/30 transition-colors">
-                        {canManageUsers && (
+                        {canManageUsers && bulkSelectMode && (
                           <td className="px-4 py-4">
                             <input
                               type="checkbox"
@@ -905,7 +981,7 @@ const UserManagementNew = () => {
                         )}
 
                         {/* User */}
-                        <td className="px-4 py-4">
+                        <td className="px-4 py-4 sticky left-0 z-10 bg-slate-800/50">
                           <div className="flex items-center gap-3">
                             <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 text-white text-sm font-bold bg-gradient-to-br ${
                               isGhostOwner ? 'from-violet-500 to-fuchsia-600' : 'from-blue-500 to-indigo-600'
@@ -947,10 +1023,16 @@ const UserManagementNew = () => {
                         </td>
 
                         <td className="px-4 py-4 text-xs text-slate-300 whitespace-nowrap">
-                          <div className="flex items-center gap-1.5"><Calendar className="w-3.5 h-3.5 text-slate-500" />{user.createdAt.toLocaleDateString()}</div>
+                          <div className="flex items-center gap-1.5">
+                            <Calendar className="w-3.5 h-3.5 text-slate-500" />
+                            {user.createdAt ? formatAdminDate(user.createdAt) : '—'}
+                          </div>
                         </td>
                         <td className="px-4 py-4 text-xs text-slate-300 whitespace-nowrap">
-                          <div className="flex items-center gap-1.5"><Activity className="w-3.5 h-3.5 text-slate-500" />{user.lastActive.toLocaleDateString()}</div>
+                          <div className="flex items-center gap-1.5">
+                            <Activity className="w-3.5 h-3.5 text-slate-500" />
+                            {user.lastActive ? formatAdminDate(user.lastActive) : <span className="text-slate-500 italic">Never</span>}
+                          </div>
                         </td>
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-1.5 text-xs font-medium text-white">
@@ -968,7 +1050,7 @@ const UserManagementNew = () => {
                         {/* Actions */}
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-2">
-                            {canManageCredits && editable && (
+                            {canManageCredits && editableCredit && (
                               <button
                                 onClick={() => { setSelectedUser(user); setShowCredits(true); }}
                                 className="px-3 py-1.5 rounded-lg bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-400 border border-emerald-600/30 text-xs font-semibold transition-colors"
@@ -982,13 +1064,6 @@ const UserManagementNew = () => {
                             <button onClick={() => { setSelectedUser(user); setShowDetails(true); }} className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-400 hover:text-blue-400 transition-colors" title="View">
                               <Eye className="w-4 h-4" />
                             </button>
-
-                            {/* Credit edit icon — kept as secondary shortcut */}
-                            {canManageCredits && editable && (
-                              <button onClick={() => { setSelectedUser(user); setShowCredits(true); }} className="p-1.5 rounded-lg hover:bg-slate-700 text-slate-400 hover:text-emerald-400 transition-colors" title="Manage credits">
-                                <Edit className="w-4 h-4" />
-                              </button>
-                            )}
 
                             {/* Status actions:
                                 - owner / super_admin: activate + suspend + soft-delete

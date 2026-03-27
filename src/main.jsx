@@ -16,6 +16,7 @@ import CreditAnalyticsNew     from './components/admin/CreditAnalyticsNew.jsx';
 import SearchAnalyticsNew     from './components/admin/SearchAnalyticsNew.jsx';
 import SettingsNew            from './components/admin/SettingsNew.jsx';
 import AccessControlNew       from './components/admin/AccessControlNew.jsx';
+import CreditRequestsNew      from './components/admin/CreditRequestsNew.jsx';
 import AppLayout              from './components/layout/AppLayout.jsx';
 import App                    from './App.jsx';
 import Login                 from './components/Login.jsx';
@@ -137,6 +138,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
               <Route path="users"      element={<UserManagementNew />} />
               <Route path="logs"       element={<SystemLogsNew />} />
               <Route path="credits"    element={<CreditAnalyticsNew />} />
+              <Route path="requests"   element={<CreditRequestsNew />} />
               <Route path="analytics"  element={<SearchAnalyticsNew />} />
               <Route path="settings"   element={<SettingsNew />} />
               <Route path="access"     element={<AccessControlNew />} />

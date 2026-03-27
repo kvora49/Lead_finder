@@ -1,5 +1,6 @@
-import { collection, addDoc, doc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, doc, updateDoc, increment, serverTimestamp, getDocs, query, where, getDoc, limit } from 'firebase/firestore';
 import { db } from '../firebase';
+import { triggerSystemEmail } from './notificationService';
 
 /**
  * Analytics Service
@@ -17,6 +18,9 @@ export const logActivity = async (activityData) => {
       user: activityData.user || activityData.userEmail,
       userEmail: activityData.userEmail || '',
       userId: activityData.userId || '',
+      // Track WHO the action was performed ON (target user for admin actions)
+      targetUserEmail: activityData.targetUserEmail || '',
+      targetUserId: activityData.targetUserId || '',
       details: activityData.details || '',
       userAgent: activityData.userAgent || navigator.userAgent || '',
       ...activityData.metadata
@@ -149,6 +153,21 @@ export const logExport = async (userId, userEmail, exportData) => {
 // Log admin actions
 export const logAdminAction = async (adminId, adminEmail, action, targetUserId, details) => {
   try {
+    let targetUserEmail = '';
+    
+    // Fetch target user's email if targetUserId is provided
+    if (targetUserId) {
+      try {
+        const userRef = doc(db, 'users', targetUserId);
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          targetUserEmail = userSnap.data().email || '';
+        }
+      } catch (fetchErr) {
+        console.warn('Could not fetch target user email:', fetchErr);
+      }
+    }
+    
     await logActivity({
       type: 'admin',
       severity: action.includes('suspend') || action.includes('delete') ? 'warning' : 'info',
@@ -156,8 +175,9 @@ export const logAdminAction = async (adminId, adminEmail, action, targetUserId, 
       user: adminEmail,
       userEmail: adminEmail,
       userId: adminId,
+      targetUserId: targetUserId || '',
+      targetUserEmail: targetUserEmail,
       details,
-      targetUser: targetUserId,
       metadata: {
         isAdminAction: true
       }
@@ -215,6 +235,101 @@ export const logCreditAlert = async (userId, userEmail, alertData) => {
   }
 };
 
+// Create a persistent credit top-up request for admin review
+export const createCreditRequest = async (requestData) => {
+  try {
+    if (!requestData.userId) {
+      console.error('[createCreditRequest] Missing userId');
+      return { ok: false, error: 'User ID is required' };
+    }
+
+    const payload = {
+      userId: requestData.userId,
+      userEmail: requestData.userEmail || '',
+      keyword: requestData.keyword || '',
+      location: requestData.location || '',
+      scope: requestData.scope || 'city',
+      estimatedCostUsd: Number(requestData.estimatedCostUsd || 0),
+      remainingUsd: Number(requestData.remainingUsd || 0),
+      requestedAmountUsd: Number(requestData.requestedAmountUsd || 0),
+      reason: requestData.reason || 'Insufficient credits for search',
+      status: 'pending',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    console.log('[createCreditRequest] Auth UID:', requestData.userId);
+    console.log('[createCreditRequest] Payload:', payload);
+
+    // Write to credit_requests collection
+    let docRef;
+    try {
+      docRef = await addDoc(collection(db, 'credit_requests'), payload);
+      console.log('[createCreditRequest] ✅ Document created:', docRef.id);
+    } catch (firebaseError) {
+      console.error('[createCreditRequest] ❌ Firebase write failed:', {
+        code: firebaseError.code,
+        message: firebaseError.message,
+      });
+      throw firebaseError;
+    }
+
+    // Log to system logs (non-blocking - don't fail the request if this fails)
+    try {
+      await logActivity({
+        type: 'credit',
+        severity: 'warning',
+        action: 'Credit Top-up Requested',
+        user: payload.userEmail,
+        userEmail: payload.userEmail,
+        userId: payload.userId,
+        details: `Requested ${payload.scope} search - Top-up: $${payload.requestedAmountUsd.toFixed(2)}`,
+        metadata: {
+          requestId: docRef.id,
+          estimatedCostUsd: payload.estimatedCostUsd,
+          remainingUsd: payload.remainingUsd,
+          requestedAmountUsd: payload.requestedAmountUsd,
+          status: payload.status,
+        },
+      });
+    } catch (logError) {
+      console.warn('[createCreditRequest] Log activity failed (non-critical):', logError.message);
+      // Don't throw - request was already created successfully
+    }
+
+    // Trigger admin email notifications (supports multiple recipients from settings)
+    try {
+      await triggerSystemEmail('credit_request', {
+        requestId: docRef.id,
+        userEmail: payload.userEmail,
+        requestedAmountUsd: payload.requestedAmountUsd,
+        remainingUsd: payload.remainingUsd,
+        reason: payload.reason,
+      });
+    } catch (emailErr) {
+      console.warn('[createCreditRequest] Email trigger failed (non-critical):', emailErr?.message || emailErr);
+    }
+
+    return { ok: true, id: docRef.id };
+  } catch (error) {
+    console.error('[createCreditRequest] ❌ Error:', {
+      code: error.code,
+      message: error.message,
+    });
+    
+    let userMessage = error.message || 'Failed to create credit request';
+    if (error.code === 'permission-denied') {
+      userMessage = 'Permission denied. Please try again or contact support.';
+    } else if (error.code === 'unauthenticated') {
+      userMessage = 'You need to be logged in to submit requests.';
+    } else if (error.code === 'not-found') {
+      userMessage = 'Collection not found. Try refreshing the page.';
+    }
+    
+    return { ok: false, error: userMessage };
+  }
+};
+
 // Update monthly analytics
 export const updateMonthlyAnalytics = async (monthKey, analyticsData) => {
   try {
@@ -265,6 +380,7 @@ export default {
   logAdminAction,
   logError,
   logCreditAlert,
+  createCreditRequest,
   updateMonthlyAnalytics,
   getCurrentMonthKey
 };

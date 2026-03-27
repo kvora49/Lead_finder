@@ -18,6 +18,7 @@ import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firest
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
 import { logAdminAction } from '../../services/analyticsService';
+import { toast } from 'sonner';
 
 const SettingsNew = () => {
   const navigate = useNavigate();
@@ -35,11 +36,10 @@ const SettingsNew = () => {
   
   const [settings, setSettings] = useState({
     // General Settings
-    globalCreditLimit: 200000,
-    defaultUserCreditLimit: 'unlimited',
+    globalCreditLimit: 200,
+    defaultUserCreditLimit: 50,
     monthlyResetEnabled: true,
     monthlyResetDate: 1,
-    freeTierThreshold: 200000,
     
     // Email Settings
     emailNotificationsEnabled: true,
@@ -69,6 +69,16 @@ const SettingsNew = () => {
 
   const [originalSettings, setOriginalSettings] = useState({});
 
+  const normalizeEmailList = (raw) => {
+    const items = String(raw || '')
+      .split(',')
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean)
+      .filter((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
+
+    return [...new Set(items)].join(', ');
+  };
+
   useEffect(() => {
     loadSettings();
   }, []);
@@ -92,7 +102,7 @@ const SettingsNew = () => {
 
   const handleSave = async () => {
     if (!canEdit) {
-      alert('Only Super Admins can modify system settings');
+      toast.error('Only Super Admins can modify system settings');
       return;
     }
 
@@ -102,9 +112,26 @@ const SettingsNew = () => {
       
       const updatedSettings = {
         ...settings,
+        adminNotificationEmail: normalizeEmailList(settings.adminNotificationEmail),
         lastModified: serverTimestamp(),
         lastModifiedBy: adminUser?.email || 'admin'
       };
+
+      // Track what changed for audit logging
+      const changedFields = [];
+      Object.keys(settings).forEach(key => {
+        if (key !== 'lastModified' && key !== 'lastModifiedBy') {
+          const oldValue = originalSettings[key];
+          const newValue = settings[key];
+          if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+            changedFields.push(`${key}: ${JSON.stringify(oldValue)} → ${JSON.stringify(newValue)}`);
+          }
+        }
+      });
+
+      const changeDetails = changedFields.length > 0 
+        ? `Updated ${activeTab} settings: ${changedFields.join('; ')}`
+        : `Updated ${activeTab} settings`;
 
       await setDoc(settingsRef, updatedSettings, { merge: true });
 
@@ -113,21 +140,22 @@ const SettingsNew = () => {
         adminUser?.email,
         'System Settings Updated',
         null,
-        `Updated ${activeTab} settings`
+        changeDetails
       );
 
       setOriginalSettings(updatedSettings);
-      alert('Settings saved successfully!');
+      toast.success('Settings saved successfully!');
     } catch (error) {
       console.error('Error saving settings:', error);
-      alert('Failed to save settings. Please try again.');
+      toast.error('Failed to save settings. Please try again.');
     } finally {
       setSaving(false);
     }
   };
 
   const handleReset = () => {
-    if (window.confirm('Are you sure you want to reset to the last saved settings?')) {
+    // eslint-disable-next-line no-restricted-globals
+    if (confirm('Reset to last saved settings?')) {
       setSettings(originalSettings);
     }
   };
@@ -256,19 +284,6 @@ const SettingsNew = () => {
                 />
               </SettingRow>
             )}
-
-            <SettingRow
-              label="Free Tier Threshold"
-              description="Maximum credits in free tier"
-            >
-              <input
-                type="number"
-                value={settings.freeTierThreshold}
-                onChange={(e) => setSettings({ ...settings, freeTierThreshold: parseInt(e.target.value) || 0 })}
-                className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={!canEdit}
-              />
-            </SettingRow>
           </>
         )}
 
@@ -278,8 +293,8 @@ const SettingsNew = () => {
             <h2 className="text-xl font-bold text-white mb-4">Credit Management</h2>
             
             <SettingRow
-              label="Global Credit Limit"
-              description="Maximum total credits available system-wide"
+              label="Global Monthly Budget Limit (USD)"
+              description="Maximum total monthly API spend allowed system-wide"
             >
               <input
                 type="number"
@@ -291,8 +306,8 @@ const SettingsNew = () => {
             </SettingRow>
 
             <SettingRow
-              label="Default User Credit Limit"
-              description="Default credit limit for new users"
+              label="Default User Monthly Budget (USD)"
+              description="Default monthly API spend limit applied to new users"
             >
               <select
                 value={settings.defaultUserCreditLimit}
@@ -300,11 +315,13 @@ const SettingsNew = () => {
                 className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 disabled={!canEdit}
               >
+                <option value="25">$25 monthly</option>
+                <option value="50">$50 monthly</option>
+                <option value="75">$75 monthly</option>
+                <option value="100">$100 monthly</option>
+                <option value="150">$150 monthly</option>
+                <option value="200">$200 monthly</option>
                 <option value="unlimited">Unlimited</option>
-                <option value="1000">1,000 credits</option>
-                <option value="5000">5,000 credits</option>
-                <option value="10000">10,000 credits</option>
-                <option value="50000">50,000 credits</option>
               </select>
             </SettingRow>
 
@@ -365,17 +382,37 @@ const SettingsNew = () => {
             </SettingRow>
 
             <SettingRow
-              label="Admin Notification Email"
-              description="Email address to receive admin notifications"
+              label="Admin Notification Emails"
+              description="Email addresses to receive admin notifications. Separate multiple addresses with commas."
             >
-              <input
-                type="email"
-                value={settings.adminNotificationEmail}
-                onChange={(e) => setSettings({ ...settings, adminNotificationEmail: e.target.value })}
-                placeholder="admin@example.com"
-                className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={!canEdit}
-              />
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={settings.adminNotificationEmail}
+                  onChange={(e) => setSettings({ ...settings, adminNotificationEmail: e.target.value })}
+                  placeholder="admin@example.com, admin2@example.com"
+                  className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                  disabled={!canEdit}
+                />
+                {settings.adminNotificationEmail && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {settings.adminNotificationEmail
+                      .split(',')
+                      .map(e => e.trim())
+                      .filter(e => e.length > 0)
+                      .map((email, i) => (
+                        <span
+                          key={i}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs
+                            bg-blue-500/20 text-blue-300 border border-blue-500/30"
+                        >
+                          {email}
+                        </span>
+                      ))
+                    }
+                  </div>
+                )}
+              </div>
             </SettingRow>
 
             <SettingRow
@@ -525,7 +562,20 @@ const SettingsNew = () => {
             <div className="bg-slate-900/50 border border-slate-700 rounded-lg p-4 space-y-3">
               <div className="flex justify-between">
                 <span className="text-gray-400">Last Modified:</span>
-                <span className="text-white">{settings.lastModified ? new Date(settings.lastModified.seconds * 1000).toLocaleString() : 'Never'}</span>
+                <span className="text-white">
+                  {settings.lastModified
+                    ? (() => {
+                        const d = new Date(settings.lastModified.seconds * 1000);
+                        const day = String(d.getDate()).padStart(2, '0');
+                        const month = String(d.getMonth() + 1).padStart(2, '0');
+                        const year = d.getFullYear();
+                        const hrs = String(d.getHours()).padStart(2, '0');
+                        const mins = String(d.getMinutes()).padStart(2, '0');
+                        return `${day}/${month}/${year}, ${hrs}:${mins}`;
+                      })()
+                    : 'Never'
+                  }
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-400">Modified By:</span>

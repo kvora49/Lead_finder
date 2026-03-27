@@ -22,10 +22,13 @@ import {
 import Papa from 'papaparse';
 import { motion } from 'framer-motion';
 import { toast } from 'sonner';
+import { useNavigate } from 'react-router-dom';
 import SaveLeadsModal from './SaveLeadsModal.jsx';
 import LeadMapView from './LeadMapView.jsx';
+import CreditRequestModal from './CreditRequestModal.jsx';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults, getFilterChips, filterBySubtype } from '../services/placesApi';
-import { GOOGLE_API_KEY } from '../config.js';
+import { createCreditRequest, logSearch, logActivity } from '../services/analyticsService';
+import { GOOGLE_API_KEY, CREDIT_CONFIG } from '../config.js';
 import { useAuth }   from '../contexts/AuthContext';
 import { useCredit } from '../contexts/CreditContext';
 // deduplicateResults is always applied — not a user toggle
@@ -49,19 +52,33 @@ const SEARCH_SCOPES = [
   {
     value: 'city',
     label: 'Entire City',
-    hint:  'Wide 3×3 grid covering the whole city',
+    hint:  '4×4 grid — covers the entire city (32 API calls)',
   },
   {
     value: 'neighbourhood',
     label: 'Neighbourhood',
-    hint:  'Focused 3×3 grid on a specific area or locality',
+    hint:  '4×3 grid — focused on your area (24 API calls)',
   },
   {
     value: 'specific',
     label: 'Specific Area',
-    hint:  'Pinpoint a building, market, or street (single cell)',
+    hint:  '1×1 grid — one exact building or street (≤9 API calls)',
   },
 ];
+
+const SEARCH_SCOPE_LABELS = {
+  city: 'Entire City',
+  neighbourhood: 'Neighbourhood',
+  specific: 'Specific Area',
+};
+
+const MAX_API_CALLS_PER_PAIR = {
+  city: 32,
+  neighbourhood: 24,
+  specific: 9,
+};
+
+const COST_PER_CALL_USD = CREDIT_CONFIG.COST_PER_REQUEST_USD || 0.032;
 
 // ─── Export helpers (work on raw Places API result objects) ──────────────────
 const leadLabel = (lead) => lead.displayName?.text || 'Unknown';
@@ -455,7 +472,14 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
 
 const SearchPanel = () => {  // ── Auth + Credits ─────────────────────────────────────────────────────────────────
   const { currentUser }   = useAuth();
-  const { deductCredits } = useCredit();
+  const navigate = useNavigate();
+  const {
+    deductCredits,
+    myCreditRemainingUsd,
+    myCreditIsUnlimited,
+    myMonthlyLimitUsd,
+    loading: loadingCredits,
+  } = useCredit();
   // ── Form state ──────────────────────────────────────────────────────────────
   const [keyword,     setKeyword]     = useState('');
   const [location,    setLocation]    = useState('');
@@ -490,8 +514,43 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected,      setSelected]      = useState(new Set());
   const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showCreditModal, setShowCreditModal] = useState(false);
+  const [creditRequestLoading, setCreditRequestLoading] = useState(false);
 
   const abortRef = useRef(false);
+
+  const estimateMaxSearchCostUsd = useCallback(() => {
+    const keywordCount = keyword.split(',').map((k) => k.trim()).filter(Boolean).length || 1;
+    const locationCount = location.split(',').map((l) => l.trim()).filter(Boolean).length || 1;
+    const pairCount = keywordCount * locationCount;
+    const callsPerPair = MAX_API_CALLS_PER_PAIR[searchScope] ?? MAX_API_CALLS_PER_PAIR.city;
+    return +(pairCount * callsPerPair * COST_PER_CALL_USD).toFixed(4);
+  }, [keyword, location, searchScope]);
+
+  const ensureSufficientCredits = useCallback((forRefresh = false) => {
+    if (loadingCredits) {
+      setError('Checking your credit balance. Please try again in a moment.');
+      return false;
+    }
+
+    if (myCreditIsUnlimited) return true;
+
+    const remainingUsd = Number(myCreditRemainingUsd ?? 0);
+    const estimatedCostUsd = estimateMaxSearchCostUsd();
+
+    if (remainingUsd + 0.0001 < estimatedCostUsd) {
+      const actionLabel = forRefresh ? 'refresh search' : 'search';
+      const message =
+        `Not enough credits to ${actionLabel}. ` +
+        `Estimated cost is $${estimatedCostUsd.toFixed(2)}, but only $${Math.max(0, remainingUsd).toFixed(2)} remains. ` +
+        'Please ask admin for more credits or use a smaller search scope.';
+      setError(message);
+      toast.error('Insufficient credits for this search');
+      return false;
+    }
+
+    return true;
+  }, [loadingCredits, myCreditIsUnlimited, myCreditRemainingUsd, estimateMaxSearchCostUsd]);
 
   // ── Derived filtered list — dedup is always on ────────────────────────────
   const visible = (() => {
@@ -503,6 +562,67 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     return out;
   })();
 
+  const isCreditError = !!error && /not enough credits|insufficient user credits|credit allocation|monthly allocation/i.test(error);
+
+  const openCreditModal = useCallback(() => {
+    setShowCreditModal(true);
+  }, []);
+
+  const handleCreditRequestSubmit = useCallback(async (details) => {
+    setCreditRequestLoading(true);
+    try {
+      if (!currentUser?.uid) {
+        toast.error('Authentication error. Please refresh and try again.');
+        return;
+      }
+
+      const estimatedCostUsd = estimateMaxSearchCostUsd();
+      const remainingUsd = Number(myCreditRemainingUsd ?? 0);
+      
+      console.log('[SearchPanel] Submitting credit request:', {
+        userId: currentUser?.uid,
+        userEmail: currentUser?.email,
+        estimatedCostUsd,
+        requestedAmountUsd: details.requestedAmountUsd,
+      });
+
+      const result = await createCreditRequest({
+        userId: currentUser?.uid,
+        userEmail: currentUser?.email,
+        keyword: keyword.trim(),
+        location: location.trim(),
+        scope: searchScope,
+        estimatedCostUsd,
+        remainingUsd,
+        requestedAmountUsd: details.requestedAmountUsd,
+        reason: details.reason,
+      });
+
+      if (result.ok) {
+        toast.success('Credit request submitted! Admin will review it shortly.');
+        setShowCreditModal(false);
+        setError(null);
+        navigate('/platform-usage');
+        return;
+      }
+
+      const errorMsg = result.error || 'Unknown error';
+      console.error('[SearchPanel] Credit request failed:', errorMsg);
+      toast.error(`Request failed: ${errorMsg}`);
+    } finally {
+      setCreditRequestLoading(false);
+    }
+  }, [
+    estimateMaxSearchCostUsd,
+    myCreditRemainingUsd,
+    currentUser?.uid,
+    currentUser?.email,
+    keyword,
+    location,
+    searchScope,
+    navigate,
+  ]);
+
   const saveCurrentSearch = () => {
     if (!keyword.trim() || !location.trim()) return;
     const entry = {
@@ -510,6 +630,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       keyword: keyword.trim(),
       location: location.trim(),
       scope: searchScope,
+      area: searchScope !== 'city' ? area.trim() : '',
       type,
       savedAt: new Date().toISOString(),
     };
@@ -528,6 +649,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     setKeyword(s.keyword);
     setLocation(s.location);
     setSearchScope(s.scope || 'city');
+    setArea(s.area || '');
     setType(s.type || '');
     setShowSavedDropdown(false);
   };
@@ -544,12 +666,28 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     e?.preventDefault();
     if (!keyword.trim() || !location.trim()) return;
     if (searching) return;
-
-    // ── Pre-flight credit warning ──────────────────────────────────────────────
-    // We show a warning if credits are low but do NOT hard-block here.
-    // Reason: the search might hit the cache (0 API calls = 0 cost = free).
-    // The atomic deductCredits transaction is the real guard — it aborts with a
-    // clear message if the user genuinely can't afford a live search.
+    if (!ensureSufficientCredits(false)) {
+      // Log credit exhaustion failure
+      try {
+        if (currentUser?.uid) {
+          const remainingUsd = Number(myCreditRemainingUsd ?? 0);
+          const estimatedCostUsd = estimateMaxSearchCostUsd();
+          await logActivity({
+            type: 'credit',
+            severity: 'error',
+            action: 'Search Blocked - Insufficient Credits',
+            user: currentUser.email,
+            userEmail: currentUser.email,
+            userId: currentUser.uid,
+            details: `User attempted search for "${keyword.trim()}" in ${location.trim()}. Required: $${estimatedCostUsd.toFixed(2)}, Available: $${Math.max(0, remainingUsd).toFixed(2)}`,
+          });
+        }
+      } catch (logErr) {
+        if (import.meta.env.DEV) console.warn('[SearchPanel] Failed to log credit error:', logErr);
+      }
+      return;
+    }
+    const searchStartTime = Date.now();
 
     abortRef.current = false;
     setSearching(true);
@@ -579,31 +717,61 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       // We deduct AFTER the search so we charge the real cost, not an estimate.
       // Cached results (res.apiCalls === 0) are free — deductCredits is a no-op.
       if (res.apiCalls > 0) {
-        try {
-          await deductCredits(res.apiCalls, {
-            keyword: keyword.trim(),
-            location: location.trim(),
-            scope: searchScope,
-          });
-        } catch (creditErr) {
-          // Credit deduction failed — show error but still show results
-          // (search already happened; don't penalise UX but log clearly)
-          console.error('[credits] deduction failed after search:', creditErr.message);
-          setError(`Search succeeded but credit deduction failed: ${creditErr.message}`);
-        }
+        await deductCredits(res.apiCalls, {
+          keyword: keyword.trim(),
+          location: location.trim(),
+          scope: searchScope,
+        });
       }
 
       setResults(res.results || []);
       setLastMeta(res);
+
+      // Log the search to systemLogs and searchLogs
+      try {
+        if (currentUser?.uid) {
+          await logSearch(currentUser.uid, currentUser.email, {
+            keyword: keyword.trim(),
+            query: `${keyword.trim()} in ${location.trim()}`,
+            location: location.trim(),
+            resultCount: res.results?.length ?? 0,
+            creditsUsed: res.apiCalls ?? 0,
+            responseTime: Date.now() - searchStartTime,
+            filters: { type, searchScope, area },
+            metadata: { cached: res.cached ?? false },
+          });
+        }
+      } catch (logErr) {
+        // Log failure is non-fatal — never block the search result
+        if (import.meta.env.DEV) console.warn('[Search] logSearch failed:', logErr);
+      }
     } catch (err) {
       if (!abortRef.current) {
-        setError(err.message || 'Search failed. Check your API key and try again.');
+        const errorMsg = err.message || 'Search failed. Check your API key and try again.';
+        setError(errorMsg);
         setProgress(null);
+
+        // Log credit-related and API errors to systemLogs
+        try {
+          if (currentUser?.uid && (errorMsg.toLowerCase().includes('credit') || errorMsg.toLowerCase().includes('insufficient'))) {
+            await logActivity({
+              type: 'credit',
+              severity: 'error',
+              action: 'Search Failed - Credit Error',
+              user: currentUser.email,
+              userEmail: currentUser.email,
+              userId: currentUser.uid,
+              details: `Search for "${keyword.trim()}" in ${location.trim()} failed: ${errorMsg}`,
+            });
+          }
+        } catch (logErr) {
+          if (import.meta.env.DEV) console.warn('[SearchPanel] Failed to log error:', logErr);
+        }
       }
     } finally {
       if (!abortRef.current) setSearching(false);
     }
-  }, [keyword, location, type, searchScope, area, searching, deductCredits]);
+  }, [keyword, location, type, searchScope, area, searching, deductCredits, currentUser, ensureSufficientCredits]);
 
   const handleCancel = () => {
     abortRef.current = true;
@@ -615,6 +783,28 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   // fresh entry.  Only active when results are showing as "Cached".
   const handleRefresh = useCallback(async () => {
     if (!keyword.trim() || !location.trim() || searching) return;
+    if (!ensureSufficientCredits(true)) {
+      // Log refresh credit exhaustion failure
+      try {
+        if (currentUser?.uid) {
+          const remainingUsd = Number(myCreditRemainingUsd ?? 0);
+          const estimatedCostUsd = estimateMaxSearchCostUsd();
+          await logActivity({
+            type: 'credit',
+            severity: 'error',
+            action: 'Search Refresh Blocked - Insufficient Credits',
+            user: currentUser.email,
+            userEmail: currentUser.email,
+            userId: currentUser.uid,
+            details: `User attempted refresh for "${keyword.trim()}" in ${location.trim()}. Required: $${estimatedCostUsd.toFixed(2)}, Available: $${Math.max(0, remainingUsd).toFixed(2)}`,
+          });
+        }
+      } catch (logErr) {
+        if (import.meta.env.DEV) console.warn('[SearchPanel] Failed to log refresh credit error:', logErr);
+      }
+      return;
+    }
+    const searchStartTime = Date.now();
 
     abortRef.current = false;
     setSearching(true);
@@ -638,29 +828,60 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       if (abortRef.current) return;
 
       if (res.apiCalls > 0) {
-        try {
-          await deductCredits(res.apiCalls, {
-            keyword: keyword.trim(),
-            location: location.trim(),
-            scope: searchScope,
-          });
-        } catch (creditErr) {
-          console.error('[credits] deduction failed after refresh:', creditErr.message);
-          setError(`Search succeeded but credit deduction failed: ${creditErr.message}`);
-        }
+        await deductCredits(res.apiCalls, {
+          keyword: keyword.trim(),
+          location: location.trim(),
+          scope: searchScope,
+        });
       }
 
       setResults(res.results || []);
       setLastMeta(res);
+
+      // Log the refreshed search to systemLogs and searchLogs
+      try {
+        if (currentUser?.uid) {
+          await logSearch(currentUser.uid, currentUser.email, {
+            keyword: keyword.trim(),
+            query: `${keyword.trim()} in ${location.trim()}`,
+            location: location.trim(),
+            resultCount: res.results?.length ?? 0,
+            creditsUsed: res.apiCalls ?? 0,
+            responseTime: Date.now() - searchStartTime,
+            filters: { type, searchScope, area },
+            metadata: { cached: res.cached ?? false, refreshed: true },
+          });
+        }
+      } catch (logErr) {
+        if (import.meta.env.DEV) console.warn('[Search] logSearch failed:', logErr);
+      }
     } catch (err) {
       if (!abortRef.current) {
-        setError(err.message || 'Refresh failed. Check your API key and try again.');
+        const errorMsg = err.message || 'Refresh failed. Check your API key and try again.';
+        setError(errorMsg);
         setProgress(null);
+
+        // Log credit-related and API errors to systemLogs
+        try {
+          if (currentUser?.uid && (errorMsg.toLowerCase().includes('credit') || errorMsg.toLowerCase().includes('insufficient'))) {
+            await logActivity({
+              type: 'credit',
+              severity: 'error',
+              action: 'Search Refresh Failed - Credit Error',
+              user: currentUser.email,
+              userEmail: currentUser.email,
+              userId: currentUser.uid,
+              details: `Refresh for "${keyword.trim()}" in ${location.trim()} failed: ${errorMsg}`,
+            });
+          }
+        } catch (logErr) {
+          if (import.meta.env.DEV) console.warn('[SearchPanel] Failed to log refresh error:', logErr);
+        }
       }
     } finally {
       if (!abortRef.current) setSearching(false);
     }
-  }, [keyword, location, type, searchScope, area, searching, deductCredits]);
+  }, [keyword, location, type, searchScope, area, searching, deductCredits, currentUser, ensureSufficientCredits]);
 
   const handleClear = () => {
     setResults([]);
@@ -705,7 +926,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className={hasResults
-      ? 'space-y-4 px-4 sm:px-6 py-6'
+      ? 'space-y-4 px-4 sm:px-6 py-6 overflow-x-hidden w-full'
       : 'flex flex-col items-center justify-center min-h-[50vh] md:min-h-[calc(100vh-5rem)] py-8 px-4'
     }>
 
@@ -719,14 +940,14 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             </span>
           </h1>
           <p className="text-sm sm:text-base md:text-lg text-slate-500 dark:text-gray-400">
-            Search across multiple keywords and cities in one click — powered by the Google Places API.
+            Search across multiple keywords and cities in one click.
           </p>
         </div>
       )}
 
       {/* ── Search Form ──────────────────────────────────────────────── */}
       <div className={`bg-white dark:bg-[#171717] rounded-2xl border border-slate-200 dark:border-white/10 shadow-sm w-full ${
-        hasResults ? 'p-3 md:p-6' : 'max-w-4xl p-4 md:p-8 shadow-xl shadow-slate-200/60 dark:shadow-black/50'
+        hasResults ? 'p-3 md:p-6' : 'max-w-4xl p-4 md:p-8 shadow-xl shadow-slate-200/60 dark:shadow-black/50 overflow-hidden'
       }`}>
         {hasResults && (
           <div className="flex items-center gap-2 mb-5">
@@ -745,14 +966,14 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
           {/* Row 0: Search scope selector */}
           <div>
-            <div className="flex flex-wrap gap-2 p-1 bg-slate-100 dark:bg-white/10 rounded-xl w-fit">
+            <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-white/10 rounded-xl w-full">
               {SEARCH_SCOPES.map((s) => (
                 <button
                   key={s.value}
                   type="button"
                   title={s.hint}
                   onClick={() => { setSearchScope(s.value); setArea(''); }}
-                  className={`flex-none px-3 py-1.5 text-xs font-semibold rounded-lg transition-all active:scale-[0.97] ${
+                  className={`w-full px-3 py-1.5 text-xs font-semibold rounded-lg transition-all active:scale-[0.97] ${
                     searchScope === s.value
                       ? 'bg-white dark:bg-[#171717] text-indigo-700 dark:text-indigo-400 shadow-sm border border-indigo-100 dark:border-indigo-500/30'
                       : 'text-slate-500 dark:text-gray-400 hover:text-slate-800 dark:hover:text-white'
@@ -822,18 +1043,24 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 onChange={(e) => setArea(e.target.value)}
                 placeholder={
                   searchScope === 'neighbourhood'
-                    ? 'Area / Neighbourhood (e.g. Maninagar, C.G. Road, Vastrapur…)'
-                    : 'Building / Market / Street (e.g. Lal Darwaja Market, Relief Road…)'
+                    ? 'e.g. Maninagar, C.G. Road…'
+                    : 'e.g. New Cloth Market, Relief Road…'
                 }
                 required
-              className="w-full pl-10 pr-36 py-2.5 md:py-3.5 text-sm
+              className="w-full pl-10 pr-28 sm:pr-36 py-2.5 md:py-3.5 text-sm
                   bg-transparent border-0 border-b-2 border-indigo-200 dark:border-indigo-500/30 rounded-none
                   focus:border-indigo-500 dark:focus:border-indigo-500
                   outline-none transition-all placeholder-indigo-300 dark:placeholder-indigo-700 text-slate-800 dark:text-white"
               />
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-semibold
-                text-indigo-400 pointer-events-none bg-indigo-50 pl-2">
-                {searchScope === 'neighbourhood' ? '🏘️ Neighbourhood' : '📍 Specific Area'}
+                text-indigo-400 dark:text-indigo-500 pointer-events-none
+                bg-indigo-50 dark:bg-indigo-500/10 pl-2 rounded-sm">
+                <span className="hidden sm:inline">
+                  {searchScope === 'neighbourhood' ? '🏘️ Neighbourhood' : '📍 Specific Area'}
+                </span>
+                <span className="sm:hidden">
+                  {searchScope === 'neighbourhood' ? '🏘️' : '📍'}
+                </span>
               </span>
             </div>
           )}
@@ -889,7 +1116,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             )}
 
             {savedSearches.length > 0 && (
-              <div className="relative">
+              <>
                 <button
                   type="button"
                   onClick={() => setShowSavedDropdown((o) => !o)}
@@ -908,11 +1135,11 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                 {showSavedDropdown && (
                   <>
                     <div
-                      className="fixed inset-0 z-10"
+                      className="fixed inset-0 z-30"
                       onClick={() => setShowSavedDropdown(false)}
                     />
-                    <div className="absolute top-full left-0 mt-1 w-72 bg-white dark:bg-[#1e1e1e]
-                      border border-slate-200 dark:border-white/10 rounded-xl shadow-xl z-20 overflow-hidden">
+                    <div className="fixed top-32 right-8 w-72 bg-white dark:bg-[#1e1e1e]
+                      border border-slate-200 dark:border-white/10 rounded-xl shadow-2xl z-40 overflow-hidden">
                       <div className="px-3 py-2 border-b border-slate-100 dark:border-white/5">
                         <p className="text-[10px] font-semibold uppercase tracking-widest
                           text-slate-400 dark:text-gray-600">
@@ -920,37 +1147,47 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
                         </p>
                       </div>
                       <div className="max-h-64 overflow-y-auto">
-                        {savedSearches.map((s) => (
-                          <button
-                            key={s.id}
-                            type="button"
-                            onClick={() => loadSavedSearch(s)}
-                            className="w-full flex items-center gap-2 px-3 py-2.5 text-left
-                              hover:bg-slate-50 dark:hover:bg-white/5 transition-colors group"
-                          >
-                            <div className="flex-1 min-w-0">
-                              <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
-                                {s.keyword}
-                              </p>
-                              <p className="text-[10px] text-slate-400 dark:text-gray-600 truncate">
-                                {s.location}
-                              </p>
-                            </div>
-                            <span
-                              onClick={(e) => deleteSavedSearch(s.id, e)}
-                              className="flex-none opacity-0 group-hover:opacity-100 text-slate-300
-                                dark:text-gray-700 hover:text-red-500 dark:hover:text-red-400
-                                transition-all cursor-pointer p-0.5"
+                        {savedSearches.length === 0 ? (
+                          <div className="px-3 py-4 text-center">
+                            <p className="text-xs text-slate-500">No saved searches</p>
+                          </div>
+                        ) : (
+                          savedSearches.map((s) => (
+                            <button
+                              key={s.id}
+                              type="button"
+                              onClick={() => loadSavedSearch(s)}
+                              className="w-full flex items-center gap-2 px-3 py-2.5 text-left
+                                hover:bg-slate-50 dark:hover:bg-white/5 transition-colors group"
                             >
-                              <X className="w-3 h-3" strokeWidth={1.5} />
-                            </span>
-                          </button>
-                        ))}
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                  {s.keyword}
+                                </p>
+                                <p className="text-[10px] text-slate-400 dark:text-gray-600 truncate">
+                                  {s.location}
+                                  {s.scope && s.scope !== 'city' && s.area ? ` • ${s.area}` : ''}
+                                </p>
+                                <p className="text-[10px] text-indigo-600 dark:text-indigo-300 font-medium mt-0.5 truncate">
+                                  {SEARCH_SCOPE_LABELS[s.scope || 'city']}
+                                </p>
+                              </div>
+                              <span
+                                onClick={(e) => deleteSavedSearch(s.id, e)}
+                                className="flex-none opacity-0 group-hover:opacity-100 text-slate-300
+                                  dark:text-gray-700 hover:text-red-500 dark:hover:text-red-400
+                                  transition-all cursor-pointer p-0.5"
+                              >
+                                <X className="w-3 h-3" strokeWidth={1.5} />
+                              </span>
+                            </button>
+                          ))
+                        )}
                       </div>
                     </div>
                   </>
                 )}
-              </div>
+              </>
             )}
           </div>
 
@@ -963,10 +1200,12 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
       {/* Skeleton grid — shown while search is running and no results yet */}
       {searching && results.length === 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 mt-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <LeadCardSkeleton key={i} />
-          ))}
+        <div className="w-full overflow-hidden">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 mt-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <LeadCardSkeleton key={i} />
+            ))}
+          </div>
         </div>
       )}
 
@@ -977,6 +1216,16 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-red-700">Search failed</p>
             <p className="text-xs text-red-500 mt-0.5 break-words">{error}</p>
+            {isCreditError && (
+              <button
+                type="button"
+                onClick={openCreditModal}
+                className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-lg
+                  bg-amber-500 text-white hover:bg-amber-600 transition-colors"
+              >
+                Request Credits
+              </button>
+            )}
           </div>
           <button onClick={() => setError(null)}
             className="flex-none text-red-400 hover:text-red-600">
@@ -984,6 +1233,18 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
           </button>
         </div>
       )}
+
+      {/* ── Credit Request Modal ─────────────────────────────────────── */}
+      <CreditRequestModal
+        isOpen={showCreditModal}
+        onClose={() => setShowCreditModal(false)}
+        userEmail={currentUser?.email}
+        estimatedCostUsd={estimateMaxSearchCostUsd()}
+        remainingUsd={Number(myCreditRemainingUsd ?? 0)}
+        currentLimitUsd={Number(myMonthlyLimitUsd ?? 50)}
+        onSubmit={handleCreditRequestSubmit}
+        isLoading={creditRequestLoading}
+      />
 
       {/* ── Results area ──────────────────────────────────────────────── */}
       {results.length > 0 && (

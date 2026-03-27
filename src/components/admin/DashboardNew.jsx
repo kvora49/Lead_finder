@@ -134,10 +134,10 @@ const DashboardNew = () => {
   };
 
   const StatCard = ({ icon: Icon, label, value, sub, accent = 'blue' }) => (
-    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-6 hover:bg-slate-800/70 transition-all">
-      <div className="mb-4">
-        <div className={`w-12 h-12 bg-gradient-to-br ${accentClasses[accent]} rounded-xl flex items-center justify-center`}>
-          <Icon className="w-6 h-6 text-white" />
+    <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-3 sm:p-4 hover:bg-slate-800/70 transition-all">
+      <div className="mb-3 sm:mb-4">
+        <div className={`w-8 h-8 sm:w-10 sm:h-10 bg-gradient-to-br ${accentClasses[accent]} rounded-xl flex items-center justify-center`}>
+          <Icon className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
         </div>
       </div>
       <p className="text-2xl font-bold text-white mb-1">
@@ -167,7 +167,7 @@ const DashboardNew = () => {
   }
 
   return (
-    <div className="p-4 md:p-6 lg:p-8 space-y-6">
+    <div className="p-3 sm:p-4 md:p-6 lg:p-8 space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -212,7 +212,7 @@ const DashboardNew = () => {
       )}
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <StatCard
           icon={Users}
           label="Total Users"

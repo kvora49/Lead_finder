@@ -9,9 +9,10 @@ import {
   signInWithPopup,
   GoogleAuthProvider,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { CREDIT_CONFIG } from '../config';
+import { triggerSystemEmail } from '../services/notificationService';
 
 const AuthContext = createContext(null);
 
@@ -38,12 +39,42 @@ const FIREBASE_ERRORS = {
 const friendlyError = (code) =>
   FIREBASE_ERRORS[code] || 'An unexpected error occurred. Please try again.';
 
+const loadRuntimeAccessSettings = async () => {
+  try {
+    const snap = await getDoc(doc(db, 'systemConfig', 'globalSettings'));
+    const data = snap.exists() ? snap.data() : {};
+
+    const rawDefaultLimit = data.defaultUserCreditLimit;
+    let defaultUserCreditLimit = CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD;
+    if (rawDefaultLimit === 'unlimited') {
+      defaultUserCreditLimit = 'unlimited';
+    } else {
+      const parsedDefault = Number.parseFloat(rawDefaultLimit);
+      if (Number.isFinite(parsedDefault) && parsedDefault >= 0) {
+        defaultUserCreditLimit = parsedDefault;
+      }
+    }
+
+    return {
+      autoApproveUsers: data.autoApproveUsers ?? true,
+      defaultUserCreditLimit,
+    };
+  } catch {
+    return {
+      autoApproveUsers: true,
+      defaultUserCreditLimit: CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD,
+    };
+  }
+};
+
 // ─── Create / merge Firestore user document ─────────────────────────────────
 const syncUserDoc = async (user, extra = {}) => {
   const ref  = doc(db, 'users', user.uid);
   const snap = await getDoc(ref);
 
   if (!snap.exists()) {
+    const accessSettings = await loadRuntimeAccessSettings();
+
     // Brand-new user — seed the document with safe defaults
     await setDoc(ref, {
       uid:         user.uid,
@@ -51,21 +82,26 @@ const syncUserDoc = async (user, extra = {}) => {
       displayName: user.displayName || extra.displayName || '',
       photoURL:    user.photoURL   || null,
       role:        'user',               // NEVER elevated from the client
-      isActive:    true,
+      isActive:    accessSettings.autoApproveUsers,
       credits:     CREDIT_CONFIG.DEFAULT_CREDITS,
-      creditLimit: CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD,
+      creditLimit: accessSettings.defaultUserCreditLimit,
       creditMonth: null,
       userMonthlyApiCost: 0,
       userMonthlyApiCalls: 0,
       creditsUsed: 0,
       searchCount: 0,
+      approvalStatus: accessSettings.autoApproveUsers ? 'approved' : 'pending',
       provider:    extra.provider || 'email',
+      lastActive:  serverTimestamp(),
       createdAt:   serverTimestamp(),
       updatedAt:   serverTimestamp(),
     });
   } else {
-    // Returning user — only refresh the timestamp
-    await setDoc(ref, { updatedAt: serverTimestamp() }, { merge: true });
+    // Returning user — refresh timestamps including lastActive for admin dashboard
+    await setDoc(ref, {
+      updatedAt:  serverTimestamp(),
+      lastActive: serverTimestamp(),
+    }, { merge: true });
   }
 
   const latest = await getDoc(ref);
@@ -103,6 +139,13 @@ export const AuthProvider = ({ children }) => {
     await updateProfile(user, { displayName });
     const profile = await syncUserDoc(user, { displayName, provider: 'email' });
     setUserProfile(profile);
+
+    // Non-blocking welcome email trigger controlled by admin email settings.
+    triggerSystemEmail('welcome', {
+      userEmail: user.email,
+      displayName: displayName || user.displayName || '',
+    });
+
     return user;
   }, []);
 

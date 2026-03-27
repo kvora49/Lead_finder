@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Lead Finder - Credit Service
  *
  * Model:
@@ -19,12 +19,12 @@ import {
 import { CREDIT_CONFIG } from '../config';
 
 const COST_PER_CALL   = CREDIT_CONFIG.COST_PER_REQUEST_USD; // $0.032
-const MONTHLY_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD || 195.00;
+const HARD_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD || 195.00;
 const DEFAULT_USER_BUDGET_USD = CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD || 50;
 const GLOBAL_DOC_PATH = ['system', 'global_usage'];
 
 /** Total free calls per month (for display) */
-export const MONTHLY_FREE_CALLS = Math.floor(MONTHLY_CAP_USD / COST_PER_CALL); // 6 093
+export const MONTHLY_FREE_CALLS = Math.floor(HARD_CAP_USD / COST_PER_CALL); // 6 093
 
 const currentMonth = () => {
   const d = new Date();
@@ -41,6 +41,45 @@ const parseUserLimit = (creditLimitRaw) => {
     if (Number.isFinite(n)) return { isUnlimited: false, limitUsd: Math.max(0, n) };
   }
   return { isUnlimited: false, limitUsd: DEFAULT_USER_BUDGET_USD };
+};
+
+const parseDefaultUserLimit = (raw) => {
+  if (raw === 'unlimited') return 'unlimited';
+  const n = Number.parseFloat(raw);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return DEFAULT_USER_BUDGET_USD;
+};
+
+export const getCreditRuntimeSettings = async () => {
+  try {
+    const snap = await getDoc(doc(db, 'systemConfig', 'globalSettings'));
+    if (!snap.exists()) {
+      return {
+        globalCreditLimitUsd: HARD_CAP_USD,
+        defaultUserCreditLimitUsd: DEFAULT_USER_BUDGET_USD,
+      };
+    }
+
+    const data = snap.data() || {};
+    const configuredGlobal = Number.parseFloat(data.globalCreditLimit);
+    const safeGlobal = Number.isFinite(configuredGlobal) && configuredGlobal > 0
+      ? configuredGlobal
+      : HARD_CAP_USD;
+
+    // Global setting can reduce spending below hard cap, but never exceed hard cap.
+    const effectiveGlobalLimit = Math.min(safeGlobal, HARD_CAP_USD);
+    const parsedDefaultUser = parseDefaultUserLimit(data.defaultUserCreditLimit);
+
+    return {
+      globalCreditLimitUsd: effectiveGlobalLimit,
+      defaultUserCreditLimitUsd: parsedDefaultUser,
+    };
+  } catch {
+    return {
+      globalCreditLimitUsd: HARD_CAP_USD,
+      defaultUserCreditLimitUsd: DEFAULT_USER_BUDGET_USD,
+    };
+  }
 };
 
 export const getEffectiveUserMonthMetrics = (userData = {}, month = currentMonth()) => {
@@ -82,6 +121,8 @@ export const deductCredits = async (userId, apiCalls, meta = {}) => {
   const month     = currentMonth();
   const userRef   = doc(db, 'users', userId);
   const globalRef = doc(db, ...GLOBAL_DOC_PATH);
+  const runtimeSettings = await getCreditRuntimeSettings();
+  const monthlyCapUsd = runtimeSettings.globalCreditLimitUsd;
 
   await runTransaction(db, async (tx) => {
     const [userSnap, globalSnap] = await Promise.all([
@@ -115,10 +156,10 @@ export const deductCredits = async (userId, apiCalls, meta = {}) => {
     const isNewMonth    = !globalSnap.exists() || globalData.month !== month;
     const currentCost   = isNewMonth ? 0 : (globalData.monthly_api_cost ?? 0);
 
-    if (currentCost + costUsd > MONTHLY_CAP_USD) {
+    if (currentCost + costUsd > monthlyCapUsd) {
       throw new Error(
         `Platform monthly search budget reached ` +
-        `($${currentCost.toFixed(2)} / $${MONTHLY_CAP_USD}). ` +
+        `($${currentCost.toFixed(2)} / $${monthlyCapUsd}). ` +
         `Resets on the 1st of next month. Cached results are still free.`
       );
     }
@@ -160,7 +201,7 @@ export const deductCredits = async (userId, apiCalls, meta = {}) => {
     console.log(
       `[credits] uid=${userId} +${apiCalls} calls ($${costUsd}) | ` +
       `user: $${userCurrentMonthCost.toFixed(2)} -> $${newUserMonthCost.toFixed(2)} | ` +
-      `platform: $${currentCost.toFixed(2)} -> $${(currentCost + costUsd).toFixed(2)}/$${MONTHLY_CAP_USD}`
+      `platform: $${currentCost.toFixed(2)} -> $${(currentCost + costUsd).toFixed(2)}/$${monthlyCapUsd}`
     );
   });
 };

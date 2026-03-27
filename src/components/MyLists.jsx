@@ -22,7 +22,7 @@ import {
   BookmarkCheck, Trash2, ArrowLeft,
   FileText, Table2, Upload, Loader2, Search,
   Phone, Globe, Star, MapPin, X, AlertCircle,
-  ChevronRight, FolderOpen, Plus, Download,
+  ChevronRight, ChevronLeft, FolderOpen, Plus, Download,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import {
@@ -191,12 +191,12 @@ const exportPdf = async (leads, listName) => {
     columnStyles: {
       0: { cellWidth: 18, halign: 'center', textColor: SLATE_500, cellPadding: { left: 1.5, right: 1.5, top: 3.5, bottom: 3.5 } },
       1: { cellWidth: 52, fontStyle: 'bold' },
-      2: { cellWidth: 58 },
+      2: { cellWidth: 52 },
       3: { cellWidth: 32 },
       4: { cellWidth: 54, textColor: [79, 70, 229] },
       5: { cellWidth: 20, halign: 'center', textColor: [16, 185, 129] },
       6: { cellWidth: 20, halign: 'right',  textColor: SLATE_500 },
-      7: { cellWidth: 22, halign: 'center' },
+      7: { cellWidth: 28, halign: 'center', overflow: 'hidden' },
     },
     didDrawPage: (data) => {
       const pg  = doc.internal.getCurrentPageInfo().pageNumber;
@@ -380,6 +380,7 @@ const MyLists = () => {
   const [noteText,       setNoteText]       = useState('');
   const [bulkMode,       setBulkMode]       = useState(false);
   const [bulkSelected,   setBulkSelected]   = useState(new Set());
+  const [mobileView,     setMobileView]     = useState('lists'); // 'lists' | 'detail'
 
   // ── Danger modal state (Safe Delete) ────────────────────────────────────
   const [dangerModal, setDangerModal] = useState({
@@ -408,6 +409,7 @@ const MyLists = () => {
 
   // ── Open a list ────────────────────────────────────────────────────────────
   const openList = async (list) => {
+    setMobileView('detail');
     setSelectedList(list);
     setLeads([]);
     setSearchFilter('');
@@ -432,7 +434,7 @@ const MyLists = () => {
     try {
       await deleteList(uid, listId);
       setLists((prev) => prev.filter((l) => l.id !== listId));
-      if (selectedList?.id === listId) setSelectedList(null);
+      if (selectedList?.id === listId) { setSelectedList(null); setMobileView('lists'); }
       toast.success('List deleted');
     } catch (err) {
       setError('Failed to delete list: ' + err.message);
@@ -618,10 +620,10 @@ const MyLists = () => {
       )}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        <div className="flex gap-6" style={{ minHeight: 'calc(100vh - 152px)' }}>
+        <div className="flex flex-col md:flex-row gap-6" style={{ minHeight: 'calc(100vh - 152px)' }}>
 
           {/* ── Left: list panel ─────────────────────────────────────── */}
-          <div className="w-72 flex-none flex flex-col gap-3">
+          <div className={`flex-none flex flex-col gap-3 w-full md:w-72 ${mobileView === 'detail' ? 'hidden md:flex' : 'flex'}`}>
             <h2 className="text-xs font-bold text-slate-500 dark:text-gray-400 uppercase tracking-wide px-1">
               Saved Lists
             </h2>
@@ -701,7 +703,7 @@ const MyLists = () => {
           </div>
 
           {/* ── Right: leads panel ───────────────────────────────────── */}
-          <div className="flex-1 min-w-0 flex flex-col gap-4">
+          <div className={`flex-1 min-w-0 flex flex-col gap-4 ${mobileView === 'lists' ? 'hidden md:flex' : 'flex'}`}>
             {!selectedList ? (
               <div className="flex-1 flex flex-col items-center justify-center text-slate-400 dark:text-gray-500 gap-3">
                 <BookmarkCheck className="w-14 h-14 opacity-20" />
@@ -709,6 +711,17 @@ const MyLists = () => {
               </div>
             ) : (
               <>
+                {/* Mobile back button — only visible on small screens */}
+                <button
+                  onClick={() => { setMobileView('lists'); setSelectedList(null); }}
+                  className="flex md:hidden items-center gap-2 text-sm font-medium
+                    text-indigo-600 dark:text-indigo-400 hover:text-indigo-800
+                    dark:hover:text-indigo-300 transition-colors mb-1"
+                >
+                  <ChevronLeft className="w-4 h-4" strokeWidth={1.5} />
+                  Back to lists
+                </button>
+
                 {/* Toolbar card */}
                 <div className="bg-white dark:bg-[#171717] rounded-2xl border border-slate-200 dark:border-white/10 shadow-sm p-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">

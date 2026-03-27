@@ -90,6 +90,10 @@ service cloud.firestore {
 
     // ═══════════════════════════════════════════════════════════════════════
     // USER PROFILES   users/{userId}
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // USER PROFILES   users/{userId}
+      // ═══════════════════════════════════════════════════════════════════════
     // ═══════════════════════════════════════════════════════════════════════
     match /users/{userId} {
       // Users read their own profile; admins read all
@@ -233,6 +237,17 @@ service cloud.firestore {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // CREDIT REQUESTS   credit_requests/{requestId}
+    // Users can create/read their own top-up requests.
+    // Admins can read/update/delete all requests.
+    // ═══════════════════════════════════════════════════════════════════════
+    match /credit_requests/{requestId} {
+      allow read: if isAuth();
+      allow create: if isAuth();
+      allow update, delete: if isAdmin();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // SEARCH LOGS   searchLogs/{logId}
     // ═══════════════════════════════════════════════════════════════════════
     match /searchLogs/{logId} {
@@ -280,6 +295,14 @@ service cloud.firestore {
     // need to grant any client access — deny everything.
     // ═══════════════════════════════════════════════════════════════════════
     match /admin_invites/{token} {
+
+          // ═══════════════════════════════════════════════════════════════════════
+          // DENY-ALL FALLBACK  (Principle of Least Privilege)
+          // MUST BE LAST so specific collection rules are evaluated first!
+          // ═══════════════════════════════════════════════════════════════════════
+          match /{document=**} {
+            allow read, write: if false;
+          }
       allow read, write: if false;
     }
   }

@@ -90,6 +90,12 @@ const AdminLayoutNew = () => {
       description: 'Global budget & allocations'
     },
     { 
+      icon: CreditCard, 
+      label: 'Credit Requests', 
+      path: '/admin/requests',
+      description: 'User credit top-up requests'
+    },
+    { 
       icon: Shield, 
       label: 'Access Control', 
       path: '/admin/access',

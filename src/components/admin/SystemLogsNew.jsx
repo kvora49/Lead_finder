@@ -19,21 +19,39 @@ import {
 import { collection, getDocs, query, orderBy, limit, startAfter, where, Timestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 
+/**
+ * Format a Date object as DD/MM/YYYY, HH:MM
+ * @param {Date} date
+ * @returns {string}
+ */
+const formatDate = (date) => {
+  if (!date || !(date instanceof Date) || isNaN(date)) return '—';
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy}, ${hh}:${min}`;
+};
+
 const SystemLogsNew = () => {
   const [logs, setLogs] = useState([]);
   const [filteredLogs, setFilteredLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState('all');
   const [filterSeverity, setFilterSeverity] = useState('all');
+  const [filterUserEmail, setFilterUserEmail] = useState('all');  // Filter by user email
   const [searchTerm, setSearchTerm] = useState('');
   const [dateRange, setDateRange] = useState('7days');
+  const [uniqueUsers, setUniqueUsers] = useState([]);  // Track unique users
   
   // ── Cursor-based server pagination ────────────────────────────────────────
   // Saves ~90% Firestore read costs vs. the old limit(500) approach:
   //   Before: every page load reads up to 500 documents
-  //   After:  each page load reads exactly 50 documents via startAfter cursor
-  const PAGE_SIZE    = 50;
-  const cursorRef    = useRef([null]); // cursorRef.current[i] = startAfter doc for page i
+  //   After:  each page load reads exactly 200 documents via startAfter cursor
+  const PAGE_SIZE = 200;
+  const sysCursorRef = useRef([null]);
+  const searchCursorRef = useRef([null]);
   const [pageIndex,   setPageIndex]   = useState(0);
   const [pageLoading, setPageLoading] = useState(false);
   const [hasNextPage, setHasNextPage] = useState(false);
@@ -48,14 +66,19 @@ const SystemLogsNew = () => {
 
   useEffect(() => {
     // Reset cursor history whenever the date range changes, then fetch page 0
-    cursorRef.current = [null];
+    sysCursorRef.current = [null];
+    searchCursorRef.current = [null];
     setPageIndex(0);
     loadSystemLogs(null, 0);
   }, [dateRange]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    loadAllUsers();
+  }, []);
+
+  useEffect(() => {
     filterLogs();
-  }, [logs, filterType, filterSeverity, searchTerm]);
+  }, [logs, filterType, filterSeverity, searchTerm, filterUserEmail]);
 
   /**
    * loadSystemLogs(cursor, pIdx)
@@ -73,40 +96,79 @@ const SystemLogsNew = () => {
       const now = new Date();
       let startDate = new Date();
       switch (dateRange) {
+        case 'all':     startDate = null;                        break;
         case '24hours': startDate.setHours(now.getHours() - 24); break;
         case '7days':   startDate.setDate(now.getDate() - 7);    break;
         case '30days':  startDate.setDate(now.getDate() - 30);   break;
         default:        startDate.setDate(now.getDate() - 7);
       }
 
-      const adminLogsRef = collection(db, 'systemLogs');
-      const constraints = [
-        where('timestamp', '>=', Timestamp.fromDate(startDate)),
-        orderBy('timestamp', 'desc'),
-        limit(PAGE_SIZE),
-      ];
-      if (cursor) constraints.push(startAfter(cursor));
+      const tsStart = startDate ? Timestamp.fromDate(startDate) : null;
+      const cursorState = cursor || { sys: null, search: null };
 
-      const snapshot = await getDocs(query(adminLogsRef, ...constraints));
-      const logsData = snapshot.docs.map(d => ({
-        id: d.id,
-        ...d.data(),
-        timestamp: d.data().timestamp?.toDate() || new Date(),
-        type:      determineLogType(d.data().action),
-        severity:  determineSeverity(d.data().action),
-      }));
+      const sysConstraints = [];
+      if (tsStart) sysConstraints.push(where('timestamp', '>=', tsStart));
+      sysConstraints.push(orderBy('timestamp', 'desc'));
+      if (cursorState.sys) sysConstraints.push(startAfter(cursorState.sys));
+      sysConstraints.push(limit(PAGE_SIZE));
+      const sysQuery = query(collection(db, 'systemLogs'), ...sysConstraints);
 
-      setLogs(logsData);
-      calculateStats(logsData);
+      const searchConstraints = [];
+      if (tsStart) searchConstraints.push(where('timestamp', '>=', tsStart));
+      searchConstraints.push(orderBy('timestamp', 'desc'));
+      if (cursorState.search) searchConstraints.push(startAfter(cursorState.search));
+      searchConstraints.push(limit(PAGE_SIZE));
+      const searchQuery = query(collection(db, 'searchLogs'), ...searchConstraints);
 
-      // Cursor bookkeeping — store the last doc so Next Page can use startAfter it
-      if (snapshot.docs.length === PAGE_SIZE) {
-        const lastDoc = snapshot.docs[snapshot.docs.length - 1];
-        if (!cursorRef.current[pIdx + 1]) cursorRef.current[pIdx + 1] = lastDoc;
-        setHasNextPage(true);
-      } else {
-        setHasNextPage(false);
-      }
+      const [sysSnap, searchSnap] = await Promise.all([
+        getDocs(sysQuery),
+        getDocs(searchQuery),
+      ]);
+
+      // Normalise systemLogs entries
+      const sysLogs = sysSnap.docs.map(d => {
+        const data = d.data();
+        const targetInfo = data.targetUserEmail ? ` → ${data.targetUserEmail}` : '';
+        return {
+          id: d.id,
+          ...data,
+          timestamp: data.timestamp?.toDate() || new Date(),
+          type: determineLogType(data.action),
+          severity: determineSeverity(data.action),
+          adminEmail: data.adminEmail || data.userEmail || data.user || 'System',
+          targetUserEmail: data.targetUserEmail || '',
+          action: data.action || 'System Event',
+          // Include target user in admin actions
+          details: `${data.details || ''}${targetInfo}`.trim(),
+        };
+      });
+
+      // Normalise searchLogs entries into the same shape
+      const searchLogs = searchSnap.docs.map(d => {
+        const data = d.data();
+        return {
+          id: `search_${d.id}`,
+          timestamp: data.timestamp?.toDate() || new Date(),
+          type: 'search',
+          severity: 'info',
+          adminEmail: data.userEmail || 'User',
+          action: 'Search Performed',
+          details: `"${data.keyword || data.searchQuery || '—'}" in ${data.location || '—'} — ${data.resultCount ?? 0} results${data.cached ? ' (cached)' : ''}`,
+        };
+      });
+
+      // Merge and sort by timestamp descending
+      const allLogs = [...sysLogs, ...searchLogs].sort((a, b) => b.timestamp - a.timestamp);
+
+      setLogs(allLogs);
+      calculateStats(allLogs);
+
+      const nextSysCursor = sysSnap.docs.length ? sysSnap.docs[sysSnap.docs.length - 1] : null;
+      const nextSearchCursor = searchSnap.docs.length ? searchSnap.docs[searchSnap.docs.length - 1] : null;
+      sysCursorRef.current[pIdx + 1] = nextSysCursor;
+      searchCursorRef.current[pIdx + 1] = nextSearchCursor;
+
+      setHasNextPage(sysSnap.docs.length === PAGE_SIZE || searchSnap.docs.length === PAGE_SIZE);
     } catch (error) {
       console.error('Error loading system logs:', error);
     } finally {
@@ -115,7 +177,23 @@ const SystemLogsNew = () => {
     }
   };
 
+  const loadAllUsers = async () => {
+    try {
+      const usersSnap = await getDocs(collection(db, 'users'));
+      const emails = usersSnap.docs
+        .map((docSnap) => docSnap.data()?.email)
+        .filter((email) => typeof email === 'string' && email.trim().length > 0);
+      setUniqueUsers((prev) => {
+        const merged = new Set([...prev, ...emails]);
+        return Array.from(merged).sort();
+      });
+    } catch (error) {
+      console.error('Error loading user emails for logs filter:', error);
+    }
+  };
+
   const determineLogType = (action) => {
+    if (action?.toLowerCase().includes('search')) return 'search';
     if (action?.toLowerCase().includes('login') || action?.toLowerCase().includes('logout')) return 'auth';
     if (action?.toLowerCase().includes('credit')) return 'credit';
     if (action?.toLowerCase().includes('user')) return 'user';
@@ -139,6 +217,16 @@ const SystemLogsNew = () => {
       error: logsData.filter(l => l.severity === 'error').length
     };
     setStats(stats);
+     // Collect unique user emails (both admins and target users)
+     const users = new Set();
+     logsData.forEach(log => {
+       if (log.adminEmail) users.add(log.adminEmail);
+       if (log.targetUserEmail) users.add(log.targetUserEmail);
+     });
+     setUniqueUsers((prev) => {
+       const merged = new Set([...prev, ...Array.from(users)]);
+       return Array.from(merged).sort();
+     });
   };
 
   const filterLogs = () => {
@@ -152,6 +240,13 @@ const SystemLogsNew = () => {
     // Severity filter
     if (filterSeverity !== 'all') {
       filtered = filtered.filter(log => log.severity === filterSeverity);
+    }
+
+    // User email filter - show logs where user is admin OR target user
+    if (filterUserEmail !== 'all') {
+      filtered = filtered.filter(log => 
+        log.adminEmail === filterUserEmail || log.targetUserEmail === filterUserEmail
+      );
     }
 
     // Search filter
@@ -169,12 +264,12 @@ const SystemLogsNew = () => {
 
   const exportLogs = () => {
     const csvContent = [
-      ['System Logs Report', `Generated: ${new Date().toLocaleString()}`].join(','),
+      ['System Logs Report', `Generated: ${formatDate(new Date())}`].join(','),
       ['Date Range', dateRange].join(','),
       [],
       ['Timestamp', 'Admin', 'Action', 'Type', 'Severity', 'Details'].join(','),
       ...filteredLogs.map(log => [
-        log.timestamp.toLocaleString(),
+        formatDate(log.timestamp),
         log.adminEmail || 'System',
         log.action || 'N/A',
         log.type,
@@ -197,13 +292,13 @@ const SystemLogsNew = () => {
   const goNextPage = () => {
     const nextIdx = pageIndex + 1;
     setPageIndex(nextIdx);
-    loadSystemLogs(cursorRef.current[nextIdx], nextIdx);
+    loadSystemLogs({ sys: sysCursorRef.current[nextIdx], search: searchCursorRef.current[nextIdx] }, nextIdx);
   };
 
   const goPrevPage = () => {
     const prevIdx = pageIndex - 1;
     setPageIndex(prevIdx);
-    loadSystemLogs(cursorRef.current[prevIdx], prevIdx);
+    loadSystemLogs({ sys: sysCursorRef.current[prevIdx], search: searchCursorRef.current[prevIdx] }, prevIdx);
   };
 
   const StatCard = ({ icon: Icon, label, value, color }) => (
@@ -244,10 +339,11 @@ const SystemLogsNew = () => {
   const getTypeBadge = (type) => {
     const colors = {
       auth: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-      credit: 'bg-green-500/20 text-green-400 border-green-500/30',
-      user: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+      credit: 'bg-green-500/20  text-green-400  border-green-500/30',
+      user: 'bg-blue-500/20   text-blue-400   border-blue-500/30',
       api: 'bg-orange-500/20 text-orange-400 border-orange-500/30',
-      system: 'bg-gray-500/20 text-gray-400 border-gray-500/30'
+      system: 'bg-gray-500/20   text-gray-400   border-gray-500/30',
+      search: 'bg-indigo-500/20 text-indigo-400 border-indigo-500/30',
     };
     
     return (
@@ -285,6 +381,7 @@ const SystemLogsNew = () => {
             <option value="24hours">Last 24 Hours</option>
             <option value="7days">Last 7 Days</option>
             <option value="30days">Last 30 Days</option>
+            <option value="all">All Time</option>
           </select>
           <button
             onClick={exportLogs}
@@ -298,7 +395,7 @@ const SystemLogsNew = () => {
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
-        <StatCard icon={FileText} label="Total Logs" value={stats.total} color="blue" />
+        <StatCard icon={FileText} label="Total (this page)" value={stats.total} color="blue" />
         <StatCard icon={Info} label="Info" value={stats.info} color="blue" />
         <StatCard icon={CheckCircle} label="Success" value={stats.success} color="green" />
         <StatCard icon={AlertTriangle} label="Warning" value={stats.warning} color="yellow" />
@@ -307,7 +404,7 @@ const SystemLogsNew = () => {
 
       {/* Filters */}
       <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           {/* Search */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
@@ -332,6 +429,7 @@ const SystemLogsNew = () => {
             <option value="user">User</option>
             <option value="api">API</option>
             <option value="system">System</option>
+            <option value="search">Search</option>
           </select>
 
           {/* Severity Filter */}
@@ -345,6 +443,18 @@ const SystemLogsNew = () => {
             <option value="success">Success</option>
             <option value="warning">Warning</option>
             <option value="error">Error</option>
+          </select>
+
+          {/* User Email Filter */}
+          <select
+            value={filterUserEmail}
+            onChange={(e) => setFilterUserEmail(e.target.value)}
+            className="px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-lg text-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="all">All Users</option>
+            {uniqueUsers.map((email) => (
+              <option key={email} value={email}>{email}</option>
+            ))}
           </select>
         </div>
       </div>
@@ -380,8 +490,8 @@ const SystemLogsNew = () => {
                     <div className="flex items-center gap-2 text-sm text-gray-300">
                       <Clock className="w-4 h-4 text-gray-400" />
                       <div>
-                        <div>{log.timestamp.toLocaleDateString()}</div>
-                        <div className="text-xs text-gray-500">{log.timestamp.toLocaleTimeString()}</div>
+                        <div>{formatDate(log.timestamp).split(', ')[0]}</div>
+                        <div className="text-xs text-gray-500">{formatDate(log.timestamp).split(', ')[1]}</div>
                       </div>
                     </div>
                   </td>
@@ -397,7 +507,16 @@ const SystemLogsNew = () => {
                   <td className="px-4 py-4">{getTypeBadge(log.type)}</td>
                   <td className="px-4 py-4">{getSeverityBadge(log.severity)}</td>
                   <td className="px-4 py-4">
-                    <p className="text-sm text-gray-400 max-w-md truncate">{log.details || 'No details'}</p>
+                    <div className="text-sm text-gray-300 max-w-2xl">
+                      {/* Show target user if present */}
+                      {log.targetUserEmail && (
+                        <p className="font-medium text-blue-300 mb-1">
+                          Target: <span className="text-yellow-400">{log.targetUserEmail}</span>
+                        </p>
+                      )}
+                      {/* Show details with word break for long text */}
+                      <p className="break-words whitespace-pre-wrap">{log.details || 'No details'}</p>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -405,12 +524,12 @@ const SystemLogsNew = () => {
           </table>
         </div>
 
-        {/* Cursor-based Pagination — reads exactly 50 docs per page */}
+        {/* Cursor-based Pagination — reads up to 200 docs per collection per page */}
         <div className="flex items-center justify-between px-6 py-4 border-t border-slate-700">
           <p className="text-sm text-gray-400">
             Page&nbsp;{pageIndex + 1}&nbsp;·&nbsp;
-            {currentLogs.length}&nbsp;log{currentLogs.length !== 1 ? 's' : ''}
-            {currentLogs.length === PAGE_SIZE ? ' (50 / page)' : ''}
+            Showing {currentLogs.length}&nbsp;log{currentLogs.length !== 1 ? 's' : ''}
+            &nbsp;(max 400 per page — use Next to see more)
           </p>
           <div className="flex items-center gap-2">
             <button

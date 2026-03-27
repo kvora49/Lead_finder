@@ -12,6 +12,7 @@ import {
   deductCredits as deductCreditsService,
   ensureGlobalUsageDoc,
   getEffectiveUserMonthMetrics,
+  getCreditRuntimeSettings,
   MONTHLY_FREE_CALLS,
 } from '../services/creditService';
 import { CREDIT_CONFIG } from '../config';
@@ -46,6 +47,7 @@ export const CreditProvider = ({ children }) => {
   const [monthlyApiCost,  setMonthlyApiCost]  = useState(0);
   const [totalApiCalls,   setTotalApiCalls]   = useState(0);
   const [loadingGlobal,   setLoadingGlobal]   = useState(true);
+  const [effectivePlatformCapUsd, setEffectivePlatformCapUsd] = useState(MONTHLY_CAP_USD);
 
   // Per-user analytics state (no balance, just counters)
   const [mySearchCount,  setMySearchCount]  = useState(0);
@@ -65,6 +67,9 @@ export const CreditProvider = ({ children }) => {
     }
 
     ensureGlobalUsageDoc().catch(() => {});
+    getCreditRuntimeSettings()
+      .then((cfg) => setEffectivePlatformCapUsd(cfg.globalCreditLimitUsd || MONTHLY_CAP_USD))
+      .catch(() => setEffectivePlatformCapUsd(MONTHLY_CAP_USD));
 
     const globalRef = doc(db, 'system', 'global_usage');
     const unsub     = onSnapshot(
@@ -167,7 +172,7 @@ export const CreditProvider = ({ children }) => {
     ? 0
     : Math.min(+((myMonthlyUsdUsed / Math.max(myMonthlyLimitUsd, 0.0001)) * 100).toFixed(1), 100);
   const platformPctUsed = Math.min(
-    +((monthlyApiCost / MONTHLY_CAP_USD) * 100).toFixed(1),
+    +((monthlyApiCost / Math.max(effectivePlatformCapUsd, 0.0001)) * 100).toFixed(1),
     100
   );
 
@@ -175,7 +180,7 @@ export const CreditProvider = ({ children }) => {
     // Global platform stats
     totalApiCalls,
     monthlyApiCost,
-    monthlyCapUsd:  MONTHLY_CAP_USD,
+    monthlyCapUsd:  effectivePlatformCapUsd,
     remainingCalls,
     platformPctUsed,
     // Per-user analytics

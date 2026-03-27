@@ -79,7 +79,6 @@ const CreditAnalyticsNew = () => {
         const usersSnapshot = await getDocs(collection(db, 'users'));
         const users = usersSnapshot.docs
           .map((d) => ({ id: d.id, ...d.data() }))
-          .filter((u) => (u.role || 'user') === 'user')
           .map((u) => {
             const effectiveMetrics = getEffectiveUserMonthMetrics(u, month);
             return {
