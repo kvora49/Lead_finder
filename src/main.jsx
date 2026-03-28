@@ -111,6 +111,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             <Route path="/login"           element={<Login />} />
             <Route path="/register"        element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/verify-otp"      element={<CheckEmail />} />
             <Route path="/check-email"     element={<CheckEmail />} />
 
             {/* ── Protected user area (nested inside AppLayout sidebar shell) ── */}

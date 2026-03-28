@@ -9,10 +9,9 @@ import {
   signInWithPopup,
   GoogleAuthProvider,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { CREDIT_CONFIG } from '../config';
-import { triggerSystemEmail } from '../services/notificationService';
 
 const AuthContext = createContext(null);
 
@@ -116,21 +115,31 @@ export const AuthProvider = ({ children }) => {
 
   // Sync Firebase Auth state → Firestore profile
   useEffect(() => {
+    let profileUnsub = null;
+
     const unsub = onAuthStateChanged(auth, async (user) => {
+      if (profileUnsub) {
+        profileUnsub();
+        profileUnsub = null;
+      }
+
       if (user) {
-        try {
-          const snap = await getDoc(doc(db, 'users', user.uid));
-          setUserProfile(snap.exists() ? snap.data() : null);
-        } catch {
-          setUserProfile(null);
-        }
+        profileUnsub = onSnapshot(
+          doc(db, 'users', user.uid),
+          (snap) => setUserProfile(snap.exists() ? snap.data() : null),
+          () => setUserProfile(null)
+        );
       } else {
         setUserProfile(null);
       }
       setCurrentUser(user);
       setLoading(false);
     });
-    return unsub;
+
+    return () => {
+      if (profileUnsub) profileUnsub();
+      unsub();
+    };
   }, []);
 
   // ── Register (email / password) ───────────────────────────────────────
@@ -139,12 +148,6 @@ export const AuthProvider = ({ children }) => {
     await updateProfile(user, { displayName });
     const profile = await syncUserDoc(user, { displayName, provider: 'email' });
     setUserProfile(profile);
-
-    // Non-blocking welcome email trigger controlled by admin email settings.
-    triggerSystemEmail('welcome', {
-      userEmail: user.email,
-      displayName: displayName || user.displayName || '',
-    });
 
     return user;
   }, []);
@@ -155,6 +158,10 @@ export const AuthProvider = ({ children }) => {
       const { user } = await signInWithEmailAndPassword(auth, email, password);
       const profile  = await syncUserDoc(user);
       setUserProfile(profile);
+      if (profile?.accountStatus === 'deleted') {
+        await firebaseSignOut(auth);
+        throw new Error('This account has been deleted. Please contact support.');
+      }
       if (profile?.isActive === false) {
         await firebaseSignOut(auth);
         throw new Error('Your account has been suspended. Please contact support.');
@@ -171,6 +178,10 @@ export const AuthProvider = ({ children }) => {
       const { user } = await signInWithPopup(auth, new GoogleAuthProvider());
       const profile  = await syncUserDoc(user, { provider: 'google' });
       setUserProfile(profile);
+      if (profile?.accountStatus === 'deleted') {
+        await firebaseSignOut(auth);
+        throw new Error('This account has been deleted. Please contact support.');
+      }
       if (profile?.isActive === false) {
         await firebaseSignOut(auth);
         throw new Error('Your account has been suspended. Please contact support.');

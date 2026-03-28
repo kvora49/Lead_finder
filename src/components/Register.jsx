@@ -1,8 +1,8 @@
 ﻿import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, User, Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react';
-import { getAuth, sendEmailVerification } from 'firebase/auth';
 import { useAuth } from '../contexts/AuthContext';
+import { sendEmailOtp } from '../services/emailVerificationService';
 
 // Password strength scorer
 const getStrength = (pw) => {
@@ -51,18 +51,15 @@ const Register = () => {
       // Step 1: Create Firebase Auth account.
       await register(form.email, form.password, form.name.trim());
 
-      // Step 2: Send verification email (Firebase built-in, free).
-      const auth = getAuth();
-      if (auth.currentUser) {
-        try {
-          await sendEmailVerification(auth.currentUser);
-        } catch (verifyErr) {
-          if (import.meta.env.DEV) console.warn('[Register] sendEmailVerification failed:', verifyErr.message);
-        }
+      // Step 2: Send verification OTP via SMTP Cloud Function.
+      try {
+        await sendEmailOtp();
+      } catch (otpErr) {
+        if (import.meta.env.DEV) console.warn('[Register] sendEmailOtp failed:', otpErr?.message || otpErr);
       }
 
       // Step 3: Redirect to check-email page.
-      navigate('/check-email', {
+      navigate('/verify-otp', {
         replace: true,
         state: { email: form.email },
       });

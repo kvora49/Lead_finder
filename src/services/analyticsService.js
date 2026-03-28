@@ -75,6 +75,10 @@ export const logAuthEvent = async (userId, userEmail, eventType, details = {}) =
 // Log search activity
 export const logSearch = async (userId, userEmail, searchData) => {
   try {
+    const isSuccess = typeof searchData.success === 'boolean'
+      ? searchData.success
+      : (searchData.resultCount > 0);
+
     const searchLog = {
       timestamp: serverTimestamp(),
       userId,
@@ -84,7 +88,8 @@ export const logSearch = async (userId, userEmail, searchData) => {
       location: searchData.location,
       resultCount: searchData.resultCount || 0,
       responseTime: searchData.responseTime, // in milliseconds
-      success: searchData.resultCount > 0,
+      success: isSuccess,
+      errorMessage: searchData.errorMessage || '',
       filters: searchData.filters || {},
       metadata: searchData.metadata || {}
     };
@@ -94,12 +99,14 @@ export const logSearch = async (userId, userEmail, searchData) => {
     // Log general activity
     await logActivity({
       type: 'search',
-      severity: 'info',
-      action: 'Search Performed',
+      severity: isSuccess ? 'info' : 'error',
+      action: isSuccess ? 'Search Performed' : 'Search Failed',
       user: userEmail,
       userEmail,
       userId,
-      details: `Search: "${searchData.keyword}" in ${searchData.location || 'all locations'} - ${searchData.resultCount} results`,
+      details: isSuccess
+        ? `Search: "${searchData.keyword}" in ${searchData.location || 'all locations'} - ${searchData.resultCount} results`
+        : `Search failed: "${searchData.keyword}" in ${searchData.location || 'all locations'}${searchData.errorMessage ? ` - ${searchData.errorMessage}` : ''}`,
       creditsUsed: searchData.creditsUsed || 0
     });
 

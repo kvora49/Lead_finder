@@ -735,6 +735,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             query: `${keyword.trim()} in ${location.trim()}`,
             location: location.trim(),
             resultCount: res.results?.length ?? 0,
+            success: true,
             creditsUsed: res.apiCalls ?? 0,
             responseTime: Date.now() - searchStartTime,
             filters: { type, searchScope, area },
@@ -753,6 +754,21 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
         // Log credit-related and API errors to systemLogs
         try {
+          if (currentUser?.uid) {
+            await logSearch(currentUser.uid, currentUser.email, {
+              keyword: keyword.trim(),
+              query: `${keyword.trim()} in ${location.trim()}`,
+              location: location.trim(),
+              resultCount: 0,
+              success: false,
+              errorMessage: errorMsg,
+              creditsUsed: 0,
+              responseTime: Date.now() - searchStartTime,
+              filters: { type, searchScope, area },
+              metadata: { failed: true },
+            });
+          }
+
           if (currentUser?.uid && (errorMsg.toLowerCase().includes('credit') || errorMsg.toLowerCase().includes('insufficient'))) {
             await logActivity({
               type: 'credit',
@@ -846,6 +862,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             query: `${keyword.trim()} in ${location.trim()}`,
             location: location.trim(),
             resultCount: res.results?.length ?? 0,
+            success: true,
             creditsUsed: res.apiCalls ?? 0,
             responseTime: Date.now() - searchStartTime,
             filters: { type, searchScope, area },
@@ -863,6 +880,21 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
         // Log credit-related and API errors to systemLogs
         try {
+          if (currentUser?.uid) {
+            await logSearch(currentUser.uid, currentUser.email, {
+              keyword: keyword.trim(),
+              query: `${keyword.trim()} in ${location.trim()}`,
+              location: location.trim(),
+              resultCount: 0,
+              success: false,
+              errorMessage: errorMsg,
+              creditsUsed: 0,
+              responseTime: Date.now() - searchStartTime,
+              filters: { type, searchScope, area },
+              metadata: { failed: true, refreshed: true },
+            });
+          }
+
           if (currentUser?.uid && (errorMsg.toLowerCase().includes('credit') || errorMsg.toLowerCase().includes('insufficient'))) {
             await logActivity({
               type: 'credit',

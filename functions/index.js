@@ -3,6 +3,7 @@
  */
 
 const { onRequest, onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const logger  = require("firebase-functions/logger");
 const admin   = require("firebase-admin");
 const nodemailer = require("nodemailer");
@@ -39,16 +40,314 @@ const parseAdminEmails = (raw) => {
   return [...new Set(normalized)].filter((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
 };
 
+const getFormattedFrom = () => {
+  const fallbackEmail = String(process.env.SMTP_USER || "").trim().replace(/[<>\s]/g, "");
+  const rawFrom = String(process.env.SMTP_FROM || "").trim();
+
+  if (!rawFrom) {
+    return `"Lead Finder" <${fallbackEmail}>`;
+  }
+
+  const emailMatch = rawFrom.match(/<([^>]+)>/);
+  const parsedEmail = String(emailMatch?.[1] || rawFrom).trim().replace(/[<>\s]/g, "");
+
+  let displayName = "Lead Finder";
+  if (emailMatch) {
+    displayName = rawFrom.slice(0, emailMatch.index).trim();
+  } else if (!rawFrom.includes("@")) {
+    displayName = rawFrom;
+  }
+
+  displayName = displayName
+    .replace(/^"+|"+$/g, "")
+    .replace(/[<>]/g, "")
+    .replace(/>+$/g, "")
+    .trim();
+
+  if (!displayName) displayName = "Lead Finder";
+
+  return `"${displayName}" <${parsedEmail || fallbackEmail}>`;
+};
+
+const formatAlertTimestamp = (date = new Date()) => {
+  const datePart = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date).replace(/\//g, "-");
+
+  const timePart = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+
+  return `${datePart} & Time-${timePart}`;
+};
+
 const APP_URL    = "https://lead-finder-6b009.web.app";
 const INVITE_TTL = 24 * 60 * 60 * 1000; // 24 hours in ms
+const OTP_TTL_MS = 15 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const EMAIL_SECRETS = [
   "SMTP_HOST",
   "SMTP_PORT",
   "SMTP_SECURE",
   "SMTP_USER",
   "SMTP_PASS",
-  "SMTP_FROM",
 ];
+const CREDIT_ALERT_TRACKING_COLLECTION = "credit_alert_dispatches";
+
+const currentMonthKey = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim().toLowerCase());
+
+const parseUserLimit = (creditLimitRaw) => {
+  if (creditLimitRaw === "unlimited") return { isUnlimited: true, limitUsd: Infinity };
+
+  if (typeof creditLimitRaw === "number") {
+    return { isUnlimited: false, limitUsd: Math.max(0, creditLimitRaw) };
+  }
+
+  if (typeof creditLimitRaw === "string" && creditLimitRaw.trim() !== "") {
+    const parsed = Number.parseFloat(creditLimitRaw);
+    return {
+      isUnlimited: false,
+      limitUsd: Number.isFinite(parsed) ? Math.max(0, parsed) : 0,
+    };
+  }
+
+  return { isUnlimited: false, limitUsd: 0 };
+};
+
+const getMonthlyCostForCurrentMonth = (userData, monthKey) => {
+  if (!userData || userData.creditMonth !== monthKey) return 0;
+  const n = Number.parseFloat(userData.userMonthlyApiCost ?? 0);
+  return Number.isFinite(n) ? Math.max(0, n) : 0;
+};
+
+const hashOtp = (uid, code) =>
+  crypto.createHash("sha256").update(`${uid}:${String(code || "")}`).digest("hex");
+
+exports.sendCreditAlertOnUsageThreshold = onDocumentUpdated(
+  {
+    document: "users/{userId}",
+    timeoutSeconds: 30,
+    secrets: EMAIL_SECRETS,
+  },
+  async (event) => {
+    const userId = event.params.userId;
+    const beforeData = event.data?.before?.data() || {};
+    const afterData = event.data?.after?.data() || {};
+
+    if (!userId || !afterData?.email) return;
+
+    const monthKey = currentMonthKey();
+    const prevCost = getMonthlyCostForCurrentMonth(beforeData, monthKey);
+    const nextCost = getMonthlyCostForCurrentMonth(afterData, monthKey);
+
+    // Skip non-usage updates and month reset transitions.
+    if (nextCost <= prevCost) return;
+
+    const { isUnlimited, limitUsd } = parseUserLimit(afterData.creditLimit);
+    if (isUnlimited || !Number.isFinite(limitUsd) || limitUsd <= 0) return;
+
+    const settingsSnap = await db.collection("systemConfig").doc("globalSettings").get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : {};
+
+    const emailNotificationsEnabled = settings.emailNotificationsEnabled ?? true;
+    const sendCreditAlerts = settings.sendCreditAlerts ?? true;
+    if (!emailNotificationsEnabled || !sendCreditAlerts) return;
+
+    const parsedThreshold = Number.parseInt(settings.creditAlertThreshold, 10);
+    const thresholdPct = Number.isFinite(parsedThreshold)
+      ? Math.min(Math.max(parsedThreshold, 1), 100)
+      : 80;
+
+    const prevPct = (prevCost / Math.max(limitUsd, 0.0001)) * 100;
+    const nextPct = (nextCost / Math.max(limitUsd, 0.0001)) * 100;
+
+    // Fire only once on threshold crossing from below → above.
+    if (nextPct < thresholdPct || prevPct >= thresholdPct) return;
+
+    const smtpReady = process.env.SMTP_USER && process.env.SMTP_PASS;
+    if (!smtpReady) {
+      logger.warn("sendCreditAlertOnUsageThreshold skipped: SMTP not configured", { userId });
+      return;
+    }
+
+    const userEmail = String(afterData.email || "").trim().toLowerCase();
+    const adminEmails = parseAdminEmails(settings.adminNotificationEmail || "");
+    const recipients = [...new Set([...adminEmails, userEmail])].filter(isValidEmail);
+    if (recipients.length === 0) return;
+
+    const trackingId = `${userId}_${monthKey}_${thresholdPct}`;
+    const trackingRef = db.collection(CREDIT_ALERT_TRACKING_COLLECTION).doc(trackingId);
+    const trackingSnap = await trackingRef.get();
+    if (trackingSnap.exists) return;
+
+    const remainingUsd = Math.max(0, +(limitUsd - nextCost).toFixed(2));
+    const roundedPct = +Math.min(nextPct, 100).toFixed(1);
+
+    const transporter = createTransporter();
+    const from = getFormattedFrom();
+    const sentAt = formatAlertTimestamp();
+
+    await transporter.sendMail({
+      from,
+      to: recipients.join(", "),
+      subject: `Credit Alert: ${userEmail || "User"}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#0f172a;">
+          <h2 style="margin-bottom:8px;">Credit Usage Alert</h2>
+          <p><strong>User:</strong> ${userEmail || "Unknown"}</p>
+          <p><strong>Usage (%):</strong> ${roundedPct}</p>
+          <p><strong>Remaining (USD):</strong> ${remainingUsd.toFixed(2)}</p>
+          <p><strong>Monthly Used (USD):</strong> ${nextCost.toFixed(2)}</p>
+          <p><strong>Monthly Limit (USD):</strong> ${limitUsd.toFixed(2)}</p>
+          <p><strong>Reason:</strong> Low credits</p>
+          <p><strong>Timestamp:</strong> ${sentAt}</p>
+        </div>
+      `,
+    });
+
+    await trackingRef.set({
+      userId,
+      userEmail,
+      monthKey,
+      thresholdPct,
+      usagePct: roundedPct,
+      recipients,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      source: "firestore-trigger",
+    });
+
+    logger.info("Automatic credit alert email sent", {
+      userId,
+      monthKey,
+      usagePct: roundedPct,
+      thresholdPct,
+      recipients,
+    });
+  }
+);
+
+exports.sendEmailOtp = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Must be signed in.");
+
+  const uid = request.auth.uid;
+  const email = String(request.auth.token.email || "").trim().toLowerCase();
+  if (!email) throw new HttpsError("failed-precondition", "Signed-in account has no email.");
+
+  const smtpReady = process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS;
+  if (!smtpReady) {
+    logger.warn("sendEmailOtp skipped: SMTP credentials are missing.");
+    return { ok: false, skipped: true, reason: "smtp-not-configured" };
+  }
+
+  const otpRef = db.collection("email_verification_otps").doc(uid);
+  const existingSnap = await otpRef.get();
+  if (existingSnap.exists) {
+    const existing = existingSnap.data() || {};
+    const lastSentMs = existing.lastSentAt?.toMillis?.() || 0;
+    const waitMs = OTP_RESEND_COOLDOWN_MS - (Date.now() - lastSentMs);
+    if (waitMs > 0) {
+      throw new HttpsError(
+        "resource-exhausted",
+        `Please wait ${Math.ceil(waitMs / 1000)}s before requesting another OTP.`
+      );
+    }
+  }
+
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const expiresAt = admin.firestore.Timestamp.fromMillis(Date.now() + OTP_TTL_MS);
+
+  await otpRef.set({
+    uid,
+    email,
+    codeHash: hashOtp(uid, code),
+    attempts: 0,
+    expiresAt,
+    lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  const transporter = createTransporter();
+  const from = getFormattedFrom();
+
+  await transporter.sendMail({
+    from,
+    to: email,
+    subject: "Your Lead Finder verification code",
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#0f172a;">
+        <h2 style="margin-bottom:8px;">Verify Your Email</h2>
+        <p style="line-height:1.6;">Use this one-time code to complete your registration:</p>
+        <div style="font-size:34px;letter-spacing:6px;font-weight:700;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:10px;padding:16px 20px;text-align:center;color:#1e293b;">
+          ${code}
+        </div>
+        <p style="line-height:1.6;">This code will expire in 15 minutes.</p>
+        <p style="line-height:1.6;color:#64748b;">If you did not create this account, you can ignore this email.</p>
+      </div>
+    `,
+  });
+
+  logger.info("SMTP OTP sent", { uid, email });
+  return { ok: true, expiresInSeconds: Math.floor(OTP_TTL_MS / 1000) };
+});
+
+exports.verifyEmailOtp = onCall({ timeoutSeconds: 20 }, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Must be signed in.");
+
+  const uid = request.auth.uid;
+  const code = String(request.data?.code || "").trim();
+  if (!/^\d{6}$/.test(code)) {
+    throw new HttpsError("invalid-argument", "Enter a valid 6-digit code.");
+  }
+
+  const otpRef = db.collection("email_verification_otps").doc(uid);
+  const otpSnap = await otpRef.get();
+  if (!otpSnap.exists) {
+    throw new HttpsError("not-found", "No OTP found. Please request a new code.");
+  }
+
+  const otpData = otpSnap.data() || {};
+  const expiresAtMs = otpData.expiresAt?.toMillis?.() || 0;
+
+  if (!expiresAtMs || Date.now() > expiresAtMs) {
+    await otpRef.delete();
+    throw new HttpsError("deadline-exceeded", "OTP expired. Please request a new code.");
+  }
+
+  const attempts = Number(otpData.attempts || 0);
+  if (attempts >= OTP_MAX_ATTEMPTS) {
+    throw new HttpsError("resource-exhausted", "Too many failed attempts. Request a new OTP.");
+  }
+
+  if (otpData.codeHash !== hashOtp(uid, code)) {
+    await otpRef.update({
+      attempts: admin.firestore.FieldValue.increment(1),
+      lastFailedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    throw new HttpsError("permission-denied", "Incorrect OTP code.");
+  }
+
+  await db.collection("users").doc(uid).set({
+    emailVerified: true,
+    emailVerifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  await otpRef.delete();
+  logger.info("SMTP OTP verified", { uid, email: request.auth.token.email || "" });
+  return { ok: true, verified: true };
+});
 
 exports.sendSystemEmail = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS }, async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Must be signed in.');
@@ -75,7 +374,7 @@ exports.sendSystemEmail = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS },
   }
 
   const transporter = createTransporter();
-  const from = `"Lead Finder" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`;
+  const from = getFormattedFrom();
 
   if (type === 'welcome') {
     if (!sendWelcomeEmail) {
@@ -112,33 +411,51 @@ exports.sendSystemEmail = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS },
       return { ok: true, skipped: true, reason: 'credit-alert-emails-disabled' };
     }
 
-    if (adminEmails.length === 0) {
-      return { ok: true, skipped: true, reason: 'no-admin-notification-emails' };
+    const isRequest = type === 'credit_request';
+    const authEmail = String(request.auth.token.email || '').trim().toLowerCase();
+    const payloadEmail = String(payload.userEmail || '').trim().toLowerCase();
+    const effectiveUserEmail = payloadEmail || authEmail;
+
+    // Prevent client-side spoofing of who crossed threshold.
+    if (payloadEmail && authEmail && payloadEmail !== authEmail) {
+      throw new HttpsError('permission-denied', 'You can only submit alerts for your own account.');
     }
 
-    const isRequest = type === 'credit_request';
+    const recipientSet = new Set(adminEmails);
+    // credit_alert should also notify the impacted user directly.
+    if (!isRequest && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(effectiveUserEmail)) {
+      recipientSet.add(effectiveUserEmail);
+    }
+
+    const recipients = [...recipientSet];
+    if (recipients.length === 0) {
+      return { ok: true, skipped: true, reason: 'no-email-recipients-configured' };
+    }
+
     const subject = isRequest
-      ? `Credit Request: ${payload.userEmail || request.auth.token.email || 'User'}`
-      : `Credit Alert: ${payload.userEmail || request.auth.token.email || 'User'}`;
+      ? `Credit Request: ${effectiveUserEmail || 'User'}`
+      : `Credit Alert: ${effectiveUserEmail || 'User'}`;
+
+    const sentAt = formatAlertTimestamp();
 
     await transporter.sendMail({
       from,
-      to: adminEmails.join(', '),
+      to: recipients.join(', '),
       subject,
       html: `
         <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#0f172a;">
           <h2 style="margin-bottom:8px;">${isRequest ? 'Credit Top-up Request' : 'Credit Usage Alert'}</h2>
-          <p><strong>User:</strong> ${payload.userEmail || request.auth.token.email || 'Unknown'}</p>
+          <p><strong>User:</strong> ${effectiveUserEmail || 'Unknown'}</p>
           <p><strong>Requested Amount (USD):</strong> ${Number(payload.requestedAmountUsd || 0).toFixed(2)}</p>
           <p><strong>Remaining (USD):</strong> ${Number(payload.remainingUsd || 0).toFixed(2)}</p>
           <p><strong>Usage (%):</strong> ${Number(payload.usagePct || 0).toFixed(1)}</p>
-          <p><strong>Reason:</strong> ${payload.reason || 'N/A'}</p>
-          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
+          <p><strong>Reason:</strong> ${isRequest ? (payload.reason || 'N/A') : 'Low credits'}</p>
+          <p><strong>Timestamp:</strong> ${sentAt}</p>
         </div>
       `,
     });
 
-    return { ok: true, sentTo: adminEmails, type };
+    return { ok: true, sentTo: recipients, type };
   }
 
   throw new HttpsError('invalid-argument', `Unsupported email type: ${type}`);
@@ -209,9 +526,10 @@ exports.sendAdminInvite = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS },
   }
 
   const transporter = createTransporter();
+  const from = getFormattedFrom();
 
   await transporter.sendMail({
-    from:    `"Lead Finder" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+    from,
     to:      email,
     subject: `You're invited as ${roleLabel} on Lead Finder`,
     html: `

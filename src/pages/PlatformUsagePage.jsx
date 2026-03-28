@@ -2,10 +2,9 @@
 import { useAuth }   from '../contexts/AuthContext';
 import { useCredit } from '../contexts/CreditContext';
 import { useEffect, useState } from 'react';
-import { collection, query, where, onSnapshot, doc, getDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
 import { createCreditRequest } from '../services/analyticsService';
-import { triggerSystemEmail } from '../services/notificationService';
 import CreditRequestModal from '../components/CreditRequestModal';
 import { toast } from 'sonner';
 import { Database, Zap, Search, ShieldCheck, Activity, TrendingUp, Clock, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
@@ -44,8 +43,6 @@ const PlatformUsagePage = () => {
   const [monthlySearches, setMonthlySearches] = useState(0);
   const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
   const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
-  const [alertThresholdPct, setAlertThresholdPct] = useState(80);
-  const [alertsEnabled, setAlertsEnabled] = useState(true);
 
   useEffect(() => {
     if (!currentUser?.uid) return;
@@ -91,33 +88,6 @@ const PlatformUsagePage = () => {
     return () => unsub();
   }, [currentUser?.uid]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadAlertSettings = async () => {
-      try {
-        const snap = await getDoc(doc(db, 'systemConfig', 'globalSettings'));
-        if (!snap.exists() || cancelled) return;
-
-        const data = snap.data() || {};
-        const parsedThreshold = Number.parseInt(data.creditAlertThreshold, 10);
-
-        setAlertThresholdPct(Number.isFinite(parsedThreshold) ? Math.min(Math.max(parsedThreshold, 1), 100) : 80);
-        setAlertsEnabled((data.emailNotificationsEnabled ?? true) && (data.sendCreditAlerts ?? true));
-      } catch {
-        if (!cancelled) {
-          setAlertThresholdPct(80);
-          setAlertsEnabled(true);
-        }
-      }
-    };
-
-    loadAlertSettings();
-    return () => {
-      cancelled = true;
-    };
-  }, [currentUser?.uid]);
-
   const pct     = myCreditIsUnlimited ? 0 : (myCreditPctUsed ?? 0);
   const REQUEST_CTA_THRESHOLD = 80;
   const requestEligible = !myCreditIsUnlimited && pct >= REQUEST_CTA_THRESHOLD;
@@ -128,37 +98,6 @@ const PlatformUsagePage = () => {
   const remainingLabel = myCreditIsUnlimited
     ? 'Unlimited'
     : `$${(myCreditRemainingUsd ?? 0).toFixed(2)}`;
-
-  useEffect(() => {
-    if (!currentUser?.uid || !currentUser?.email) return;
-    if (myCreditIsUnlimited || !alertsEnabled) return;
-    if (pct < alertThresholdPct) return;
-
-    const now = new Date();
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const dedupeKey = `credit-alert-email:${currentUser.uid}:${monthKey}`;
-    if (window.localStorage.getItem(dedupeKey) === 'sent') return;
-
-    triggerSystemEmail('credit_alert', {
-      userEmail: currentUser.email,
-      usagePct: pct,
-      remainingUsd: Number((myCreditRemainingUsd ?? 0).toFixed(2)),
-      requestedAmountUsd: 0,
-      reason: `Usage crossed configured threshold (${alertThresholdPct}%)`,
-    }).then((result) => {
-      if (result?.ok) {
-        window.localStorage.setItem(dedupeKey, 'sent');
-      }
-    });
-  }, [
-    currentUser?.uid,
-    currentUser?.email,
-    pct,
-    myCreditIsUnlimited,
-    alertsEnabled,
-    alertThresholdPct,
-    myCreditRemainingUsd,
-  ]);
 
   const stats = [
     {

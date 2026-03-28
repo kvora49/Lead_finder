@@ -5,7 +5,7 @@
  */
 
 import { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from './AuthContext';
 import {
@@ -16,6 +16,7 @@ import {
   MONTHLY_FREE_CALLS,
 } from '../services/creditService';
 import { CREDIT_CONFIG } from '../config';
+import { triggerSystemEmail } from '../services/notificationService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -55,6 +56,8 @@ export const CreditProvider = ({ children }) => {
   const [myMonthlyUsdUsed, setMyMonthlyUsdUsed] = useState(0);
   const [myMonthlyLimitUsd, setMyMonthlyLimitUsd] = useState(DEFAULT_USER_BUDGET_USD);
   const [myUnlimited, setMyUnlimited] = useState(false);
+  const [creditAlertThresholdPct, setCreditAlertThresholdPct] = useState(80);
+  const [creditAlertsEnabled, setCreditAlertsEnabled] = useState(true);
   const [loadingUser,    setLoadingUser]    = useState(true);
 
   // ── Real-time listener: system/global_usage ───────────────────────────────
@@ -154,6 +157,43 @@ export const CreditProvider = ({ children }) => {
     return unsub;
   }, [currentUser?.uid]);
 
+  // ── Runtime email-alert settings ──────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadAlertSettings = async () => {
+      if (!currentUser?.uid) {
+        setCreditAlertThresholdPct(80);
+        setCreditAlertsEnabled(true);
+        return;
+      }
+
+      try {
+        const snap = await getDoc(doc(db, 'systemConfig', 'globalSettings'));
+        if (!snap.exists() || cancelled) return;
+
+        const data = snap.data() || {};
+        const parsedThreshold = Number.parseInt(data.creditAlertThreshold, 10);
+        setCreditAlertThresholdPct(
+          Number.isFinite(parsedThreshold)
+            ? Math.min(Math.max(parsedThreshold, 1), 100)
+            : 80
+        );
+        setCreditAlertsEnabled((data.emailNotificationsEnabled ?? true) && (data.sendCreditAlerts ?? true));
+      } catch {
+        if (!cancelled) {
+          setCreditAlertThresholdPct(80);
+          setCreditAlertsEnabled(true);
+        }
+      }
+    };
+
+    loadAlertSettings();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.uid]);
+
   // ── deductCredits wrapper (stable reference) ─────────────────────────────
   const deductCredits = useCallback(
     (apiCalls, meta = {}) => {
@@ -175,6 +215,38 @@ export const CreditProvider = ({ children }) => {
     +((monthlyApiCost / Math.max(effectivePlatformCapUsd, 0.0001)) * 100).toFixed(1),
     100
   );
+
+  // ── Auto-send credit alert when threshold is crossed (global, not page-specific)
+  useEffect(() => {
+    if (!currentUser?.uid || !currentUser?.email) return;
+    if (myUnlimited || !creditAlertsEnabled) return;
+    if (myCreditPctUsed < creditAlertThresholdPct) return;
+
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const dedupeKey = `credit-alert-email:${currentUser.uid}:${monthKey}:${creditAlertThresholdPct}`;
+    if (window.localStorage.getItem(dedupeKey) === 'sent') return;
+
+    triggerSystemEmail('credit_alert', {
+      userEmail: currentUser.email,
+      usagePct: myCreditPctUsed,
+      remainingUsd: Number((myCreditRemainingUsd ?? 0).toFixed(2)),
+      requestedAmountUsd: 0,
+      reason: `Usage crossed configured threshold (${creditAlertThresholdPct}%)`,
+    }).then((result) => {
+      if (result?.ok) {
+        window.localStorage.setItem(dedupeKey, 'sent');
+      }
+    });
+  }, [
+    currentUser?.uid,
+    currentUser?.email,
+    myUnlimited,
+    myCreditPctUsed,
+    myCreditRemainingUsd,
+    creditAlertsEnabled,
+    creditAlertThresholdPct,
+  ]);
 
   const value = {
     // Global platform stats

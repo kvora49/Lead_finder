@@ -5,13 +5,10 @@
  *   owner       → full control, can edit other owners
  *   super_admin → full control, CANNOT edit 'owner' rows (Ghost Protection)
  *   admin       → read-only; no suspend / delete / role-change
- *
- * Tabs:
- *   All Users         → always visible
- *   Pending Requests  → only for super_admin / owner
  */
 import { useState, useEffect } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { useNavigate } from 'react-router-dom';
 import {
   Search,
   Eye,
@@ -29,10 +26,8 @@ import {
   RefreshCw,
   BarChart3,
   Users,
-  UserCheck,
   AlertTriangle,
   Lock,
-  Inbox,
   MoreVertical,
   Mail,
   Loader2,
@@ -47,8 +42,8 @@ import {
   query,
   limit,
   startAfter,
-  where,
   getDoc,
+  onSnapshot,
 } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { useAdminAuth } from '../../contexts/AdminAuthContext';
@@ -101,8 +96,15 @@ const StatusBadge = ({ status }) => {
     active:    'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
     pending:   'bg-amber-500/15 text-amber-400 border-amber-500/30',
     suspended: 'bg-red-500/15 text-red-400 border-red-500/30',
+    deleted:   'bg-slate-500/20 text-slate-300 border-slate-500/30',
   };
-  const Icon = status === 'active' ? CheckCircle : status === 'pending' ? Clock : Ban;
+  const Icon = status === 'active'
+    ? CheckCircle
+    : status === 'pending'
+      ? Clock
+      : status === 'deleted'
+        ? XCircle
+        : Ban;
   return (
     <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border ${map[status] || map.active}`}>
       <Icon className="w-3 h-3" />
@@ -404,13 +406,11 @@ const UserManagementNew = () => {
     canApprovePending,
     isOwner: viewerIsOwner,
   } = useAdminAuth();
+  const navigate = useNavigate();
 
   /* ── State ────────────────────────────────────────────────────────────── */
-  const [activeTab,       setActiveTab]       = useState('all');
   const [users,           setUsers]           = useState([]);
   const [filteredUsers,   setFilteredUsers]   = useState([]);
-  const [pendingRequests, setPendingRequests] = useState([]);
-  const [pendingLoading,  setPendingLoading]  = useState(false);
   const [loading,         setLoading]         = useState(true);
   const [error,           setError]           = useState(null);
   const [searchTerm,      setSearchTerm]      = useState('');
@@ -429,6 +429,34 @@ const UserManagementNew = () => {
   const [bulkGranting, setBulkGranting] = useState(false);
   const usersPerPage = 20;
   const [userStats, setUserStats] = useState({ total: 0, active: 0, suspended: 0, unlimited: 0 });
+
+  const calcStats = (data) => setUserStats({
+    total:     data.length,
+    active:    data.filter(u => u.status === 'active').length,
+    suspended: data.filter(u => u.status === 'suspended').length,
+    unlimited: data.filter(u => u.creditLimit === 'unlimited').length,
+  });
+
+  const mapUserDoc = (d) => {
+    const u = d.data();
+    const effectiveMetrics = getEffectiveUserMonthMetrics(u, currentMonthStr());
+    const resolvedStatus = u.accountStatus
+      || (u.approvalStatus === 'pending' ? 'pending' : (u.isActive === false ? 'suspended' : 'active'));
+    return {
+      id:          d.id,
+      email:       u.email        || 'N/A',
+      displayName: u.displayName  || u.email?.split('@')[0] || 'N/A',
+      createdAt:   u.createdAt?.toDate?.()  ?? new Date(0),
+      lastActive:  u.lastActive?.toDate?.() ?? null,
+      credits:     u.credits      ?? 0,
+      creditsUsed: effectiveMetrics.monthlyApiCalls,
+      monthlyCreditUsdUsed: effectiveMetrics.monthlyApiCost,
+      searchCount: u.searchCount  ?? 0,
+      status:      resolvedStatus,
+      creditLimit: u.creditLimit   ?? 50,
+      role:        u.role          ?? 'user',
+    };
+  };
 
   /* ── Danger modal (Safe-Delete / Safe-Suspend) ────────────────────── */
   const [dangerModal, setDangerModal] = useState({
@@ -458,33 +486,15 @@ const UserManagementNew = () => {
       if (afterDoc) constraints.push(startAfter(afterDoc));
       const snap = await getDocs(query(collection(db, 'users'), ...constraints));
 
-      const data = snap.docs.map(d => {
-        const u = d.data();
-        const effectiveMetrics = getEffectiveUserMonthMetrics(u, currentMonthStr());
-        return {
-          id:          d.id,
-          email:       u.email        || 'N/A',
-          displayName: u.displayName  || u.email?.split('@')[0] || 'N/A',
-          createdAt:   u.createdAt?.toDate?.()  ?? new Date(0),
-          lastActive:  u.lastActive?.toDate?.() ?? null,
-          credits:     u.credits      ?? 0,
-          creditsUsed: effectiveMetrics.monthlyApiCalls,
-          monthlyCreditUsdUsed: effectiveMetrics.monthlyApiCost,
-          searchCount: u.searchCount  ?? 0,
-          status:      u.accountStatus || (u.isActive === false ? 'suspended' : 'active'),
-          creditLimit: u.creditLimit   ?? 50,
-          role:        u.role          ?? 'user',
-        };
-      });
+      const data = snap.docs.map(mapUserDoc);
 
       // Sort client-side: newest first (handles missing createdAt safely)
       data.sort((a, b) => b.createdAt - a.createdAt);
 
       if (afterDoc) {
-        setUsers(prev => { const m = [...prev, ...data]; calcStats(m); return m; });
+        setUsers(prev => [...prev, ...data]);
       } else {
         setUsers(data);
-        calcStats(data);
       }
       setHasMore(snap.docs.length === PAGE_SIZE);
       if (snap.docs.length > 0) setLastDoc(snap.docs[snap.docs.length - 1]);
@@ -497,31 +507,35 @@ const UserManagementNew = () => {
     }
   };
 
-  /* ── Fetch pending admin requests ──────────────────────────────────────── */
-  const fetchPending = async () => {
-    setPendingLoading(true);
-    try {
-      const snap = await getDocs(
-        query(collection(db, 'users'), where('admin_request_status', '==', 'pending'))
-      );
-      setPendingRequests(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    } catch (err) {
-      console.error('[UserMgmt] pending fetch error:', err);
-    } finally {
-      setPendingLoading(false);
-    }
-  };
+  useEffect(() => {
+    if (!adminUser) return;
 
-  useEffect(() => { if (adminUser) fetchUsers(); }, [adminUser]); // eslint-disable-line
-  useEffect(() => { if (canManageUsers && activeTab === 'pending') fetchPending(); }, [activeTab, canManageUsers]); // eslint-disable-line
+    setLoading(true);
+    const usersQuery = query(collection(db, 'users'));
+
+    const unsubscribe = onSnapshot(
+      usersQuery,
+      (snap) => {
+        const data = snap.docs.map(mapUserDoc);
+        data.sort((a, b) => b.createdAt - a.createdAt);
+        setUsers(data);
+        setHasMore(false);
+        setLastDoc(null);
+        setError(null);
+        setLoading(false);
+      },
+      (err) => {
+        console.error('[UserMgmt] realtime users error:', err);
+        setError(err.message);
+        setLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [adminUser]);
+
   useEffect(() => { applyFilters(); }, [users, searchTerm, filterStatus]); // eslint-disable-line
-
-  const calcStats = (data) => setUserStats({
-    total:     data.length,
-    active:    data.filter(u => u.status === 'active').length,
-    suspended: data.filter(u => u.status === 'suspended').length,
-    unlimited: data.filter(u => u.creditLimit === 'unlimited').length,
-  });
+  useEffect(() => { calcStats(users); }, [users]);
 
   const applyFilters = () => {
     let f = users;
@@ -536,11 +550,33 @@ const UserManagementNew = () => {
 
   /* ── Mutation actions ─────────────────────────────────────────────────── */
   const updateStatus = async (userId, newStatus) => {
-      const userDoc = await getDoc(doc(db, 'users', userId));
-      const oldStatus = userDoc.data()?.status || 'active';
-      const user = users.find(u => u.id === userId);
     try {
-      await updateDoc(doc(db, 'users', userId), { accountStatus: newStatus, lastModified: new Date() });
+      const userDoc = await getDoc(doc(db, 'users', userId));
+      const oldStatus = userDoc.data()?.accountStatus || (userDoc.data()?.isActive === false ? 'suspended' : 'active');
+      const user = users.find(u => u.id === userId);
+
+      const statusPayload = {
+        accountStatus: newStatus,
+        lastModified: new Date(),
+      };
+
+      if (newStatus === 'active') {
+        statusPayload.isActive = true;
+        statusPayload.approvalStatus = 'approved';
+      }
+
+      if (newStatus === 'suspended') {
+        statusPayload.isActive = false;
+      }
+
+      if (newStatus === 'deleted') {
+        statusPayload.isActive = false;
+        statusPayload.approvalStatus = 'deleted';
+        statusPayload.deletedAt = new Date();
+        statusPayload.deletedBy = adminUser?.email || '';
+      }
+
+      await updateDoc(doc(db, 'users', userId), statusPayload);
        await logAdminAction(
          adminUser?.uid,
          adminUser?.email,
@@ -554,10 +590,11 @@ const UserManagementNew = () => {
   };
 
   const updateCreditLimit = async (userId, newLimit) => {
+    try {
       const userDoc = await getDoc(doc(db, 'users', userId));
       const oldLimit = userDoc.data()?.creditLimit || 'unknown';
       const user = users.find(u => u.id === userId);
-    try {
+
       await updateDoc(doc(db, 'users', userId), { creditLimit: newLimit, lastModified: new Date() });
        await logAdminAction(
          adminUser?.uid,
@@ -572,10 +609,11 @@ const UserManagementNew = () => {
   };
 
   const updateRole = async (userId, newRole) => {
+    try {
       const userDoc = await getDoc(doc(db, 'users', userId));
       const oldRole = userDoc.data()?.role || 'unknown';
       const user = users.find(u => u.id === userId);
-    try {
+
       await updateDoc(doc(db, 'users', userId), { role: newRole, lastModified: new Date() });
        await logAdminAction(
          adminUser?.uid,
@@ -586,24 +624,6 @@ const UserManagementNew = () => {
        );
       setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u));
       showToast('Role updated');
-    } catch (e) { showToast(e.message, 'error'); }
-  };
-
-  const approveRequest = async (reqUserId) => {
-    try {
-      await updateDoc(doc(db, 'users', reqUserId), { role: 'admin', admin_request_status: 'approved' });
-      await logAdminAction(adminUser?.uid, adminUser?.email, 'Admin Request Approved', reqUserId, '');
-      setPendingRequests(prev => prev.filter(u => u.id !== reqUserId));
-      showToast('Admin access approved');
-    } catch (e) { showToast(e.message, 'error'); }
-  };
-
-  const rejectRequest = async (reqUserId) => {
-    try {
-      await updateDoc(doc(db, 'users', reqUserId), { admin_request_status: 'rejected' });
-      await logAdminAction(adminUser?.uid, adminUser?.email, 'Admin Request Rejected', reqUserId, '');
-      setPendingRequests(prev => prev.filter(u => u.id !== reqUserId));
-      showToast('Request rejected', 'info');
     } catch (e) { showToast(e.message, 'error'); }
   };
 
@@ -737,6 +757,14 @@ const UserManagementNew = () => {
           </button>
           {canManageUsers && (
             <>
+              {canApprovePending && (
+                <button
+                  onClick={() => navigate('/admin/access')}
+                  className="flex items-center gap-2 px-4 py-2 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/30 rounded-xl text-sm font-medium transition-colors"
+                >
+                  Access Control
+                </button>
+              )}
               <button
                 onClick={() => setShowBulkGrantModal(true)}
                 className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg
@@ -792,102 +820,10 @@ const UserManagementNew = () => {
         ))}
       </div>
 
-      {/* ── Tab toggle — super_admin / owner only (admin cannot approve admin requests) ── */}
-      {canApprovePending && (
-        <div className="flex items-center gap-1 bg-slate-800/60 border border-slate-700/50 rounded-xl p-1 w-fit">
-          <button
-            onClick={() => setActiveTab('all')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-              activeTab === 'all'
-                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
-            }`}
-          >
-            <Users className="w-4 h-4" />All Users
-          </button>
-          <button
-            onClick={() => setActiveTab('pending')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-              activeTab === 'pending'
-                ? 'bg-amber-600 text-white shadow-lg shadow-amber-900/30'
-                : 'text-slate-400 hover:text-white hover:bg-slate-700/50'
-            }`}
-          >
-            <Inbox className="w-4 h-4" />
-            Pending Requests
-            {pendingRequests.length > 0 && (
-              <span className="inline-flex items-center justify-center w-5 h-5 bg-amber-500 text-white text-xs rounded-full font-bold">
-                {pendingRequests.length}
-              </span>
-            )}
-          </button>
-        </div>
-      )}
-
       {/* ══════════════════════════════════════════════════════════════════
-          PENDING REQUESTS TAB
+          ALL USERS
          ══════════════════════════════════════════════════════════════════ */}
-      {activeTab === 'pending' && canApprovePending && (
-        <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-700/50 flex items-center gap-3">
-            <Inbox className="w-5 h-5 text-amber-400" />
-            <h3 className="text-white font-semibold">Admin Access Requests</h3>
-            <span className="ml-auto text-xs text-slate-400">{pendingRequests.length} pending</span>
-            <button onClick={fetchPending} disabled={pendingLoading} className="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-400 hover:text-white transition-colors">
-              <RefreshCw className={`w-3.5 h-3.5 ${pendingLoading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-
-          {pendingLoading ? (
-            <div className="p-8 text-center text-slate-400 text-sm">Loading requests…</div>
-          ) : pendingRequests.length === 0 ? (
-            <div className="p-12 text-center space-y-2">
-              <UserCheck className="w-10 h-10 text-slate-600 mx-auto" />
-              <p className="text-slate-400 text-sm font-medium">No pending requests</p>
-              <p className="text-slate-500 text-xs">All admin requests have been reviewed.</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-slate-700/40">
-              {pendingRequests.map(req => (
-                <div key={req.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-6 py-4 hover:bg-slate-800/30 transition-colors">
-                  <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center flex-shrink-0">
-                      <span className="text-white text-sm font-bold">
-                        {((req.displayName || req.email || '?')[0]).toUpperCase()}
-                      </span>
-                    </div>
-                    <div>
-                      <p className="text-white font-medium">{req.displayName || req.email?.split('@')[0]}</p>
-                      <p className="text-slate-400 text-sm">{req.email}</p>
-                      <p className="text-slate-500 text-xs mt-0.5">ID: {req.id?.slice(0, 12)}…</p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 ml-14 sm:ml-0">
-                    <button
-                      onClick={() => approveRequest(req.id)}
-                      className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-600/30 rounded-xl text-xs font-semibold transition-all active:scale-[0.97]"
-                    >
-                      <CheckCircle className="w-3.5 h-3.5" />Approve
-                    </button>
-                    <button
-                      onClick={() => rejectRequest(req.id)}
-                      className="flex items-center gap-1.5 px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-600/30 rounded-xl text-xs font-semibold transition-all active:scale-[0.97]"
-                    >
-                      <XCircle className="w-3.5 h-3.5" />Reject
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ══════════════════════════════════════════════════════════════════
-          ALL USERS TAB
-         ══════════════════════════════════════════════════════════════════ */}
-      {activeTab === 'all' && (
-        <>
+      <>
           {/* Filters */}
           <div className="bg-slate-800/50 border border-slate-700/50 rounded-xl p-4 space-y-3">
             <div className="flex flex-col sm:flex-row gap-3">
@@ -909,6 +845,7 @@ const UserManagementNew = () => {
                 <option value="all">All Status</option>
                 <option value="active">Active</option>
                 <option value="suspended">Suspended</option>
+                <option value="deleted">Deleted</option>
               </select>
             </div>
 
@@ -1141,8 +1078,7 @@ const UserManagementNew = () => {
               You have read-only access. Role changes, suspension, and credit management require Super Admin or above.
             </div>
           )}
-        </>
-      )}
+      </>
 
       {/* Modals */}
       {showDetails && selectedUser && (

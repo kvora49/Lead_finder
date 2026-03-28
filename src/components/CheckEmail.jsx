@@ -1,8 +1,12 @@
 import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { getAuth, sendEmailVerification, reload } from 'firebase/auth';
+import { getAuth } from 'firebase/auth';
+import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { Mail, RefreshCw, ArrowLeft, CheckCircle } from 'lucide-react';
 import { toast } from 'sonner';
+import { db } from '../firebase';
+import { sendEmailOtp, verifyEmailOtp } from '../services/emailVerificationService';
+import { triggerSystemEmail } from '../services/notificationService';
 
 const CheckEmail = () => {
   const navigate = useNavigate();
@@ -10,7 +14,8 @@ const CheckEmail = () => {
   const email = location.state?.email || '';
 
   const [resending, setResending] = useState(false);
-  const [checking, setChecking] = useState(false);
+  const [otpCode, setOtpCode] = useState('');
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
   const [countdown, setCountdown] = useState(0);
 
   const startCountdown = () => {
@@ -31,44 +36,66 @@ const CheckEmail = () => {
     setResending(true);
     try {
       const auth = getAuth();
-      if (auth.currentUser) {
-        await sendEmailVerification(auth.currentUser);
-        toast.success('Verification email resent!');
-        startCountdown();
-      } else {
+      if (!auth.currentUser) {
         toast.error('Please log in again to resend.');
         navigate('/login');
+        return;
       }
-    } catch (err) {
-      if (err.code === 'auth/too-many-requests') {
-        toast.error('Too many requests. Please wait a few minutes.');
+
+      const result = await sendEmailOtp();
+      if (result?.ok) {
+        toast.success('OTP sent to your email.');
       } else {
-        toast.error('Failed to resend. Please try again.');
+        toast.error('Could not send OTP right now. Please try again.');
+        return;
       }
+
+      startCountdown();
+    } catch (err) {
+      toast.error(err?.message || 'Failed to resend OTP. Please try again.');
     } finally {
       setResending(false);
     }
   };
 
-  const handleCheckVerified = async () => {
-    setChecking(true);
+  const handleVerifyOtp = async () => {
+    const code = otpCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      toast.error('Please enter a valid 6-digit OTP.');
+      return;
+    }
+
+    setVerifyingOtp(true);
     try {
       const auth = getAuth();
       if (!auth.currentUser) {
         navigate('/login');
         return;
       }
-      await reload(auth.currentUser);
-      if (auth.currentUser.emailVerified) {
-        toast.success('Email verified! Welcome to Lead Finder.');
-        navigate('/app', { replace: true });
-      } else {
-        toast.error("Email not verified yet. Check your inbox and click the link.");
+
+      const result = await verifyEmailOtp(code);
+      if (!result?.ok) {
+        toast.error('Invalid or expired OTP. Please try again.');
+        return;
       }
+
+      await setDoc(doc(db, 'users', auth.currentUser.uid), {
+        emailVerified: true,
+        emailVerifiedAt: serverTimestamp(),
+      }, { merge: true });
+
+      // Welcome email is sent only after OTP verification is successful.
+      await triggerSystemEmail('welcome', {
+        userEmail: auth.currentUser.email,
+        displayName: auth.currentUser.displayName || '',
+      });
+
+      toast.success('Email verified successfully.');
+      navigate('/app', { replace: true });
     } catch (err) {
-      toast.error('Could not check verification status. Please try again.');
+      toast.error(err?.message || 'Could not verify OTP. Please try again.');
     } finally {
-      setChecking(false);
+      setVerifyingOtp(false);
     }
   };
 
@@ -92,10 +119,10 @@ const CheckEmail = () => {
         </div>
 
         <h1 className="text-2xl font-bold text-slate-900 dark:text-white mb-2">
-          Check your email
+          Verify your email with OTP
         </h1>
         <p className="text-sm text-slate-500 dark:text-gray-400 mb-2 leading-relaxed">
-          We sent a verification link to{' '}
+          We sent a verification code to{' '}
           {email && (
             <span className="font-semibold text-slate-700 dark:text-gray-300">
               {email}
@@ -103,32 +130,46 @@ const CheckEmail = () => {
           )}
         </p>
         <p className="text-sm text-slate-500 dark:text-gray-400 mb-8 leading-relaxed">
-          Click the link in that email to verify your account, then come back here.
+          Enter the 6-digit OTP sent to your email to complete account setup.
         </p>
 
+        <div className="mb-4">
+          <input
+            type="text"
+            inputMode="numeric"
+            maxLength={6}
+            value={otpCode}
+            onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            placeholder="Enter 6-digit OTP"
+            className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-white/10
+              bg-white dark:bg-white/5 text-slate-900 dark:text-white text-center tracking-[0.35em]
+              text-lg font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+        </div>
+
         <button
-          onClick={handleCheckVerified}
-          disabled={checking}
-          className="w-full flex items-center justify-center gap-2 py-3 mb-4
+          onClick={handleVerifyOtp}
+          disabled={verifyingOtp}
+          className="w-full flex items-center justify-center gap-2 py-3 mb-3
             rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 text-white
             text-sm font-semibold hover:shadow-md transition-all
             disabled:opacity-60 disabled:cursor-not-allowed active:scale-[0.98]"
         >
-          {checking ? (
+          {verifyingOtp ? (
             <>
               <RefreshCw className="w-4 h-4 animate-spin" strokeWidth={1.5} />
-              Checking...
+              Verifying OTP...
             </>
           ) : (
             <>
               <CheckCircle className="w-4 h-4" strokeWidth={1.5} />
-              I've verified my email
+              Verify OTP
             </>
           )}
         </button>
 
-        <p className="text-center text-sm text-slate-500 dark:text-gray-400">
-          Didn't receive the email?{' '}
+        <p className="text-center text-sm text-slate-500 dark:text-gray-400 mt-4">
+          Didn't receive the OTP?{' '}
           <button
             onClick={handleResend}
             disabled={countdown > 0 || resending}

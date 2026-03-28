@@ -278,6 +278,13 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    // Global runtime settings required by authenticated clients (e.g. maintenance mode).
+    // Keep writes admin-only, but allow signed-in users to read this single document.
+    match /systemConfig/globalSettings {
+      allow read: if isAuth();
+      allow write: if isAdmin();
+    }
+
     match /systemConfig/{configId} {
       allow read, write: if isAdmin();
     }

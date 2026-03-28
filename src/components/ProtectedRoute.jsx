@@ -52,6 +52,27 @@ const ProtectedRoute = ({ children }) => {
   if (loading || settingsLoading) return <FullPageSkeleton />;
   if (!currentUser) return <Navigate to="/login" replace />;
 
+  if (userProfile?.accountStatus === 'deleted') {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] flex items-center justify-center px-4">
+        <div className="max-w-md w-full text-center">
+          <div className="w-20 h-20 bg-red-100 dark:bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-6">
+            <svg className="w-10 h-10 text-red-600 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                d="M12 9v3.75m0 3.75h.008v.008H12v-.008zm9-4.5a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white mb-3">
+            Account Deleted
+          </h1>
+          <p className="text-slate-500 dark:text-gray-400 text-sm leading-relaxed">
+            This account has been deleted. Please contact support if this was a mistake.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (userProfile?.isActive === false) {
     return (
       <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] flex items-center justify-center px-4">
@@ -96,12 +117,6 @@ const ProtectedRoute = ({ children }) => {
           <p className="text-slate-500 dark:text-gray-400 text-sm leading-relaxed">
             {maintenanceMessage}
           </p>
-          <p className="text-xs text-slate-400 dark:text-gray-600 mt-6">
-            Are you an admin?{' '}
-            <a href="/admin" className="text-indigo-600 dark:text-indigo-400 font-medium hover:underline">
-              Go to admin dashboard
-            </a>
-          </p>
         </div>
       </div>
     );
@@ -117,11 +132,12 @@ const ProtectedRoute = ({ children }) => {
     : Date.now();
   const verificationRolloutAt = new Date('2026-03-15T00:00:00Z').getTime();
   const isLegacyAccount = createdAt < verificationRolloutAt;
+  const isEmailVerified = currentUser.emailVerified || userProfile?.emailVerified === true;
 
-  if (requireEmailVerification && !currentUser.emailVerified && !isGoogleUser && !isLegacyAccount) {
+  if (requireEmailVerification && !isEmailVerified && !isGoogleUser && !isLegacyAccount) {
     return (
       <Navigate
-        to="/check-email"
+        to="/verify-otp"
         state={{ email: currentUser.email }}
         replace
       />

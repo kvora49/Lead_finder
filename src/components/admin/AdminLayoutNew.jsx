@@ -135,7 +135,7 @@ const AdminLayoutNew = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 overflow-x-hidden">
       {/* Top Navigation Bar */}
-      <header className="bg-slate-900/80 backdrop-blur-xl border-b border-slate-700/50 sticky top-0 z-50">
+      <header className="fixed inset-x-0 top-0 bg-slate-900/80 backdrop-blur-xl border-b border-slate-700/50 z-50">
         <div className="px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             {/* Logo & Menu Toggle */}
@@ -293,7 +293,7 @@ const AdminLayoutNew = () => {
         </div>
       </header>
 
-      <div className="flex w-full max-w-full overflow-x-hidden">
+      <div className="flex w-full max-w-full overflow-x-hidden pt-16">
         {/* Desktop Sidebar */}
         <aside className={`hidden lg:block fixed left-0 top-16 h-[calc(100vh-4rem)] bg-slate-900/50 backdrop-blur-xl border-r border-slate-700/50 transition-all duration-300 z-40 ${
           sidebarOpen ? 'w-64' : 'w-20'

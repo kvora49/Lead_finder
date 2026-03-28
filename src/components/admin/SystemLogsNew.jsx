@@ -40,7 +40,7 @@ const SystemLogsNew = () => {
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState('all');
   const [filterSeverity, setFilterSeverity] = useState('all');
-  const [filterUserEmail, setFilterUserEmail] = useState('all');  // Filter by user email
+  const [filterUserEmail, setFilterUserEmail] = useState('all');  // Filter by actor email
   const [searchTerm, setSearchTerm] = useState('');
   const [dateRange, setDateRange] = useState('7days');
   const [uniqueUsers, setUniqueUsers] = useState([]);  // Track unique users
@@ -143,22 +143,38 @@ const SystemLogsNew = () => {
         };
       });
 
+      // logSearch writes both searchLogs and a mirrored systemLogs entry.
+      // We keep the richer searchLogs row and drop mirrored systemLogs rows
+      // so one search appears once in this combined table.
+      const filteredSysLogs = sysLogs.filter((log) => {
+        if (log.type !== 'search') return true;
+        const action = String(log.action || '').toLowerCase();
+        return action !== 'search performed' && action !== 'search failed';
+      });
+
       // Normalise searchLogs entries into the same shape
       const searchLogs = searchSnap.docs.map(d => {
         const data = d.data();
+        const resultCount = Number(data.resultCount ?? 0);
+        const isFailure = data.success === false || !!data.errorMessage;
+        const severity = isFailure ? 'error' : (resultCount === 0 ? 'warning' : 'info');
+        const action = isFailure ? 'Search Failed' : 'Search Performed';
+
         return {
           id: `search_${d.id}`,
           timestamp: data.timestamp?.toDate() || new Date(),
           type: 'search',
-          severity: 'info',
-          adminEmail: data.userEmail || 'User',
-          action: 'Search Performed',
-          details: `"${data.keyword || data.searchQuery || '—'}" in ${data.location || '—'} — ${data.resultCount ?? 0} results${data.cached ? ' (cached)' : ''}`,
+          severity,
+          adminEmail: data.userEmail || data.user || 'User',
+          action,
+          details: isFailure
+            ? `"${data.keyword || data.searchQuery || '—'}" in ${data.location || '—'} failed${data.errorMessage ? ` — ${data.errorMessage}` : ''}`
+            : `"${data.keyword || data.searchQuery || '—'}" in ${data.location || '—'} — ${resultCount} results${data.cached ? ' (cached)' : ''}`,
         };
       });
 
       // Merge and sort by timestamp descending
-      const allLogs = [...sysLogs, ...searchLogs].sort((a, b) => b.timestamp - a.timestamp);
+      const allLogs = [...filteredSysLogs, ...searchLogs].sort((a, b) => b.timestamp - a.timestamp);
 
       setLogs(allLogs);
       calculateStats(allLogs);
@@ -242,11 +258,9 @@ const SystemLogsNew = () => {
       filtered = filtered.filter(log => log.severity === filterSeverity);
     }
 
-    // User email filter - show logs where user is admin OR target user
+    // User email filter - show logs by actor only
     if (filterUserEmail !== 'all') {
-      filtered = filtered.filter(log => 
-        log.adminEmail === filterUserEmail || log.targetUserEmail === filterUserEmail
-      );
+      filtered = filtered.filter(log => log.adminEmail === filterUserEmail);
     }
 
     // Search filter
@@ -301,8 +315,24 @@ const SystemLogsNew = () => {
     loadSystemLogs({ sys: sysCursorRef.current[prevIdx], search: searchCursorRef.current[prevIdx] }, prevIdx);
   };
 
-  const StatCard = ({ icon: Icon, label, value, color }) => (
-    <div className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-4 hover:bg-slate-800/70 transition-all">
+  const handleSeverityCardClick = (severity) => {
+    if (severity === 'all') {
+      setFilterSeverity('all');
+      return;
+    }
+    setFilterSeverity((prev) => (prev === severity ? 'all' : severity));
+  };
+
+  const StatCard = ({ icon: Icon, label, value, color, active = false, onClick }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full text-left bg-slate-800/50 border rounded-lg p-4 transition-all ${
+        active
+          ? 'border-blue-500/60 ring-2 ring-blue-500/25'
+          : 'border-slate-700/50 hover:bg-slate-800/70'
+      }`}
+    >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className={`w-10 h-10 bg-${color}-500/20 rounded-lg flex items-center justify-center`}>
@@ -314,7 +344,7 @@ const SystemLogsNew = () => {
           </div>
         </div>
       </div>
-    </div>
+    </button>
   );
 
   const getSeverityBadge = (severity) => {
@@ -395,11 +425,46 @@ const SystemLogsNew = () => {
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
-        <StatCard icon={FileText} label="Total (this page)" value={stats.total} color="blue" />
-        <StatCard icon={Info} label="Info" value={stats.info} color="blue" />
-        <StatCard icon={CheckCircle} label="Success" value={stats.success} color="green" />
-        <StatCard icon={AlertTriangle} label="Warning" value={stats.warning} color="yellow" />
-        <StatCard icon={XCircle} label="Error" value={stats.error} color="red" />
+        <StatCard
+          icon={FileText}
+          label="Total (this page)"
+          value={stats.total}
+          color="blue"
+          active={filterSeverity === 'all'}
+          onClick={() => handleSeverityCardClick('all')}
+        />
+        <StatCard
+          icon={Info}
+          label="Info"
+          value={stats.info}
+          color="blue"
+          active={filterSeverity === 'info'}
+          onClick={() => handleSeverityCardClick('info')}
+        />
+        <StatCard
+          icon={CheckCircle}
+          label="Success"
+          value={stats.success}
+          color="green"
+          active={filterSeverity === 'success'}
+          onClick={() => handleSeverityCardClick('success')}
+        />
+        <StatCard
+          icon={AlertTriangle}
+          label="Warning"
+          value={stats.warning}
+          color="yellow"
+          active={filterSeverity === 'warning'}
+          onClick={() => handleSeverityCardClick('warning')}
+        />
+        <StatCard
+          icon={XCircle}
+          label="Error"
+          value={stats.error}
+          color="red"
+          active={filterSeverity === 'error'}
+          onClick={() => handleSeverityCardClick('error')}
+        />
       </div>
 
       {/* Filters */}
@@ -445,13 +510,13 @@ const SystemLogsNew = () => {
             <option value="error">Error</option>
           </select>
 
-          {/* User Email Filter */}
+          {/* User Filter (actor only) */}
           <select
             value={filterUserEmail}
             onChange={(e) => setFilterUserEmail(e.target.value)}
             className="px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-lg text-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
-            <option value="all">All Users</option>
+            <option value="all">All Actors</option>
             {uniqueUsers.map((email) => (
               <option key={email} value={email}>{email}</option>
             ))}
@@ -466,7 +531,7 @@ const SystemLogsNew = () => {
             <thead className="bg-slate-900/50 border-b border-slate-700">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Timestamp</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Admin</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">User</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Action</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Type</th>
                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Severity</th>
