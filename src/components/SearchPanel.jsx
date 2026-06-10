@@ -13,7 +13,7 @@
  * Does NOT touch credits — Phase 3 owns that layer.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 import {
   Search, MapPin, Phone, Globe, Star, RefreshCw,
   Zap, Database, AlertCircle, ChevronDown, X, Bookmark,
@@ -78,7 +78,6 @@ const MAX_API_CALLS_PER_PAIR = {
   specific: 9,
 };
 
-const COST_PER_CALL_USD = CREDIT_CONFIG.COST_PER_REQUEST_USD || 0.032;
 
 // ─── Export helpers (work on raw Places API result objects) ──────────────────
 const leadLabel = (lead) => lead.displayName?.text || 'Unknown';
@@ -475,9 +474,10 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   const navigate = useNavigate();
   const {
     deductCredits,
-    myCreditRemainingUsd,
+    myCreditsRemaining,
+    myCreditsUsed,
+    myCreditsLimit,
     myCreditIsUnlimited,
-    myMonthlyLimitUsd,
     loading: loadingCredits,
   } = useCredit();
   // ── Form state ──────────────────────────────────────────────────────────────
@@ -491,6 +491,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   const [results,   setResults]   = useState([]);
   const [progress,  setProgress]  = useState(null);
   const [searching, setSearching] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [error,     setError]     = useState(null);
   const [lastMeta,  setLastMeta]  = useState(null);
 
@@ -517,14 +518,27 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   const [showCreditModal, setShowCreditModal] = useState(false);
   const [creditRequestLoading, setCreditRequestLoading] = useState(false);
 
-  const abortRef = useRef(false);
+  const abortControllerRef = useRef(null);
+  const searchRunRef = useRef(0);
 
-  const estimateMaxSearchCostUsd = useCallback(() => {
+  const isRunActive = useCallback((runId) => searchRunRef.current === runId, []);
+
+  const cancelActiveSearch = useCallback((showToast = false) => {
+    const controller = abortControllerRef.current;
+    if (controller) {
+      if (controller.signal.aborted) return;
+      setIsCancelling(true);
+      controller.abort();
+    }
+    if (showToast) toast.info('Search cancelled');
+  }, []);
+
+  const estimateMaxSearchCredits = useCallback(() => {
     const keywordCount = keyword.split(',').map((k) => k.trim()).filter(Boolean).length || 1;
     const locationCount = location.split(',').map((l) => l.trim()).filter(Boolean).length || 1;
     const pairCount = keywordCount * locationCount;
     const callsPerPair = MAX_API_CALLS_PER_PAIR[searchScope] ?? MAX_API_CALLS_PER_PAIR.city;
-    return +(pairCount * callsPerPair * COST_PER_CALL_USD).toFixed(4);
+    return pairCount * callsPerPair * 10; // 10 credits per Enterprise call
   }, [keyword, location, searchScope]);
 
   const ensureSufficientCredits = useCallback((forRefresh = false) => {
@@ -534,15 +548,13 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     }
 
     if (myCreditIsUnlimited) return true;
+    const estimatedCredits = estimateMaxSearchCredits();
 
-    const remainingUsd = Number(myCreditRemainingUsd ?? 0);
-    const estimatedCostUsd = estimateMaxSearchCostUsd();
-
-    if (remainingUsd + 0.0001 < estimatedCostUsd) {
+    if (remainingCredits < estimatedCredits) {
       const actionLabel = forRefresh ? 'refresh search' : 'search';
       const message =
         `Not enough credits to ${actionLabel}. ` +
-        `Estimated cost is $${estimatedCostUsd.toFixed(2)}, but only $${Math.max(0, remainingUsd).toFixed(2)} remains. ` +
+        `Estimated cost is ${estimatedCredits} credits, but only ${Math.max(0, myCreditsRemaining ?? 0)} remain. ` +
         'Please ask admin for more credits or use a smaller search scope.';
       setError(message);
       toast.error('Insufficient credits for this search');
@@ -550,17 +562,17 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     }
 
     return true;
-  }, [loadingCredits, myCreditIsUnlimited, myCreditRemainingUsd, estimateMaxSearchCostUsd]);
+  }, [loadingCredits, myCreditIsUnlimited, myCreditsRemaining, estimateMaxSearchCredits]);
 
   // ── Derived filtered list — dedup is always on ────────────────────────────
-  const visible = (() => {
+  const visible = useMemo(() => {
     let out = deduplicateResults(results);   // always deduplicate
     if (filterPhone)   out = filterByPhoneNumber(out, true);
-    if (filterWebsite) out = filterByAddress(out, false).filter((l) => l.websiteUri);
+    if (filterWebsite) out = out.filter((l) => !!l.websiteUri);
     if (subtype)       out = filterBySubtype(out, type, subtype);
     if (filterRating > 0) out = out.filter((l) => (l.rating ?? 0) >= filterRating);
     return out;
-  })();
+  }, [results, filterPhone, filterWebsite, subtype, type, filterRating]);
 
   const isCreditError = !!error && /not enough credits|insufficient user credits|credit allocation|monthly allocation/i.test(error);
 
@@ -576,13 +588,12 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         return;
       }
 
-      const estimatedCostUsd = estimateMaxSearchCostUsd();
-      const remainingUsd = Number(myCreditRemainingUsd ?? 0);
+      const estimatedCredits = estimateMaxSearchCredits();
       
       console.log('[SearchPanel] Submitting credit request:', {
         userId: currentUser?.uid,
         userEmail: currentUser?.email,
-        estimatedCostUsd,
+        estimatedCredits,
         requestedAmountUsd: details.requestedAmountUsd,
       });
 
@@ -592,8 +603,8 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         keyword: keyword.trim(),
         location: location.trim(),
         scope: searchScope,
-        estimatedCostUsd,
-        remainingUsd,
+        estimatedCredits,
+        creditsRemaining: myCreditsRemaining ?? 0,
         requestedAmountUsd: details.requestedAmountUsd,
         reason: details.reason,
       });
@@ -613,8 +624,8 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       setCreditRequestLoading(false);
     }
   }, [
-    estimateMaxSearchCostUsd,
-    myCreditRemainingUsd,
+    estimateMaxSearchCredits,
+    myCreditsRemaining,
     currentUser?.uid,
     currentUser?.email,
     keyword,
@@ -670,8 +681,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       // Log credit exhaustion failure
       try {
         if (currentUser?.uid) {
-          const remainingUsd = Number(myCreditRemainingUsd ?? 0);
-          const estimatedCostUsd = estimateMaxSearchCostUsd();
+          const estimatedCredits = estimateMaxSearchCredits();
           await logActivity({
             type: 'credit',
             severity: 'error',
@@ -679,7 +689,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             user: currentUser.email,
             userEmail: currentUser.email,
             userId: currentUser.uid,
-            details: `User attempted search for "${keyword.trim()}" in ${location.trim()}. Required: $${estimatedCostUsd.toFixed(2)}, Available: $${Math.max(0, remainingUsd).toFixed(2)}`,
+            details: `Search for "${keyword.trim()}" in ${location.trim()} blocked. Required: ${estimatedCredits} credits, Available: ${Math.max(0, myCreditsRemaining ?? 0)} credits`,
           });
         }
       } catch (logErr) {
@@ -689,8 +699,16 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     }
     const searchStartTime = Date.now();
 
-    abortRef.current = false;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const runId = searchRunRef.current + 1;
+    searchRunRef.current = runId;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setSearching(true);
+    setIsCancelling(false);
     setError(null);
     setResults([]);
     setLastMeta(null);
@@ -706,12 +724,13 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         type,
         searchScope,
         area: searchScope !== 'city' ? area.trim() : '',
+        signal: controller.signal,
         onProgress: (p) => {
-          if (!abortRef.current) setProgress(p);
+          if (isRunActive(runId) && !controller.signal.aborted) setProgress(p);
         },
       });
 
-      if (abortRef.current) return;
+      if (!isRunActive(runId) || controller.signal.aborted) return;
 
       // ── Deduct actual API calls consumed (0 if cached) ──────────────────
       // We deduct AFTER the search so we charge the real cost, not an estimate.
@@ -723,6 +742,8 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
           scope: searchScope,
         });
       }
+
+      if (!isRunActive(runId) || controller.signal.aborted) return;
 
       setResults(res.results || []);
       setLastMeta(res);
@@ -747,7 +768,31 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         if (import.meta.env.DEV) console.warn('[Search] logSearch failed:', logErr);
       }
     } catch (err) {
-      if (!abortRef.current) {
+      const isCancelled = err?.name === 'AbortError';
+      if (isCancelled) {
+        const consumedApiCalls = Number(err?.partialApiCalls ?? 0);
+
+        if (consumedApiCalls > 0) {
+          try {
+            await deductCredits(consumedApiCalls, {
+              keyword: keyword.trim(),
+              location: location.trim(),
+              scope: searchScope,
+              cancelled: true,
+            });
+          } catch (creditErr) {
+            if (import.meta.env.DEV) console.warn('[SearchPanel] Failed to deduct cancelled search credits:', creditErr);
+          }
+        }
+
+        if (isRunActive(runId)) {
+          setProgress(null);
+        }
+
+        return;
+      }
+
+      if (isRunActive(runId)) {
         const errorMsg = err.message || 'Search failed. Check your API key and try again.';
         setError(errorMsg);
         setProgress(null);
@@ -785,14 +830,29 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         }
       }
     } finally {
-      if (!abortRef.current) setSearching(false);
+      if (isRunActive(runId)) {
+        abortControllerRef.current = null;
+        setSearching(false);
+        setIsCancelling(false);
+      }
     }
-  }, [keyword, location, type, searchScope, area, searching, deductCredits, currentUser, ensureSufficientCredits]);
+  }, [
+    keyword,
+    location,
+    type,
+    searchScope,
+    area,
+    searching,
+    deductCredits,
+    currentUser,
+    ensureSufficientCredits,
+    estimateMaxSearchCredits,
+    isRunActive,
+    myCreditsRemaining,
+  ]);
 
   const handleCancel = () => {
-    abortRef.current = true;
-    setSearching(false);
-    setProgress(null);
+    cancelActiveSearch(true);
   };
 
   // Re-runs the current search bypassing the Firestore cache and writes a
@@ -803,8 +863,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
       // Log refresh credit exhaustion failure
       try {
         if (currentUser?.uid) {
-          const remainingUsd = Number(myCreditRemainingUsd ?? 0);
-          const estimatedCostUsd = estimateMaxSearchCostUsd();
+          const estimatedCredits = estimateMaxSearchCredits();
           await logActivity({
             type: 'credit',
             severity: 'error',
@@ -812,7 +871,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             user: currentUser.email,
             userEmail: currentUser.email,
             userId: currentUser.uid,
-            details: `User attempted refresh for "${keyword.trim()}" in ${location.trim()}. Required: $${estimatedCostUsd.toFixed(2)}, Available: $${Math.max(0, remainingUsd).toFixed(2)}`,
+            details: `Search for "${keyword.trim()}" in ${location.trim()} blocked. Required: ${estimatedCredits} credits, Available: ${Math.max(0, myCreditsRemaining ?? 0)} credits`,
           });
         }
       } catch (logErr) {
@@ -822,8 +881,16 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     }
     const searchStartTime = Date.now();
 
-    abortRef.current = false;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const runId = searchRunRef.current + 1;
+    searchRunRef.current = runId;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setSearching(true);
+    setIsCancelling(false);
     setError(null);
     setResults([]);
     setLastMeta(null);
@@ -836,12 +903,13 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         searchScope,
         area: searchScope !== 'city' ? area.trim() : '',
         forceRefresh: true,          // ← skip cache read, run live sweep
+        signal: controller.signal,
         onProgress: (p) => {
-          if (!abortRef.current) setProgress(p);
+          if (isRunActive(runId) && !controller.signal.aborted) setProgress(p);
         },
       });
 
-      if (abortRef.current) return;
+      if (!isRunActive(runId) || controller.signal.aborted) return;
 
       if (res.apiCalls > 0) {
         await deductCredits(res.apiCalls, {
@@ -850,6 +918,8 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
           scope: searchScope,
         });
       }
+
+      if (!isRunActive(runId) || controller.signal.aborted) return;
 
       setResults(res.results || []);
       setLastMeta(res);
@@ -873,7 +943,32 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         if (import.meta.env.DEV) console.warn('[Search] logSearch failed:', logErr);
       }
     } catch (err) {
-      if (!abortRef.current) {
+      const isCancelled = err?.name === 'AbortError';
+      if (isCancelled) {
+        const consumedApiCalls = Number(err?.partialApiCalls ?? 0);
+
+        if (consumedApiCalls > 0) {
+          try {
+            await deductCredits(consumedApiCalls, {
+              keyword: keyword.trim(),
+              location: location.trim(),
+              scope: searchScope,
+              cancelled: true,
+              refresh: true,
+            });
+          } catch (creditErr) {
+            if (import.meta.env.DEV) console.warn('[SearchPanel] Failed to deduct cancelled refresh credits:', creditErr);
+          }
+        }
+
+        if (isRunActive(runId)) {
+          setProgress(null);
+        }
+
+        return;
+      }
+
+      if (isRunActive(runId)) {
         const errorMsg = err.message || 'Refresh failed. Check your API key and try again.';
         setError(errorMsg);
         setProgress(null);
@@ -911,9 +1006,26 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         }
       }
     } finally {
-      if (!abortRef.current) setSearching(false);
+      if (isRunActive(runId)) {
+        abortControllerRef.current = null;
+        setSearching(false);
+        setIsCancelling(false);
+      }
     }
-  }, [keyword, location, type, searchScope, area, searching, deductCredits, currentUser, ensureSufficientCredits]);
+  }, [
+    keyword,
+    location,
+    type,
+    searchScope,
+    area,
+    searching,
+    deductCredits,
+    currentUser,
+    ensureSufficientCredits,
+    estimateMaxSearchCredits,
+    isRunActive,
+    myCreditsRemaining,
+  ]);
 
   const handleClear = () => {
     setResults([]);
@@ -1118,9 +1230,10 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
             {/* Submit / Cancel */}
             {searching ? (
               <button type="button" onClick={handleCancel}
+                disabled={isCancelling}
                 className="flex items-center gap-2 px-5 py-3.5 text-sm font-semibold rounded-xl
-                  bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition-colors">
-                <X className="w-4 h-4" /> Cancel
+                  bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+                <X className="w-4 h-4" /> {isCancelling ? 'Cancelling...' : 'Cancel'}
               </button>
             ) : (
               <button type="submit"
@@ -1271,9 +1384,9 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
         isOpen={showCreditModal}
         onClose={() => setShowCreditModal(false)}
         userEmail={currentUser?.email}
-        estimatedCostUsd={estimateMaxSearchCostUsd()}
-        remainingUsd={Number(myCreditRemainingUsd ?? 0)}
-        currentLimitUsd={Number(myMonthlyLimitUsd ?? 50)}
+        estimatedCredits={estimateMaxSearchCredits()}
+        creditsRemaining={myCreditsRemaining ?? 0}
+        currentLimitCredits={myCreditsLimit ?? 0}
         onSubmit={handleCreditRequestSubmit}
         isLoading={creditRequestLoading}
       />
@@ -1305,7 +1418,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
               </div>
               <button
                 type="submit"
-                disabled={!keyword.trim() || !location.trim()}
+                disabled={!keyword.trim() || !location.trim() || searching || isCancelling}
                 className="flex-none flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg
                   bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50
                   transition-all active:scale-[0.97] btn-ripple">

@@ -1,8 +1,8 @@
 /**
- * Lead Finder — Places API Service  (v4 — Precision Edition)
+ * Lead Finder — Places API Service  (v7 — AI Intent Engine Edition)
  *
- * PURPOSE: Product search engine. User types a product keyword ("ball", "watch",
- * "hardware") and the engine finds every place that SELLS that product.
+ * PURPOSE: Universal business search engine. User types a keyword and selects
+ * a business type filter. The engine finds every relevant place.
  *
  * API CALL BUDGET (exact — never changes):
  *   city:          4×4 = 16 cells × 2 variants × 1 page  = 32 calls exact
@@ -15,33 +15,68 @@
  *   → deduplicate results by place.id across all cells
  *   This bypasses Google Places API's 20-results-per-query limit.
  *
- * RELEVANCE FILTER (three-pass, applied after sweep):
- *   Pass 1 — Strong retail types (sporting_goods_store, hardware_store, toy_store etc.)
- *            → always keep. These are dedicated product sellers.
- *   Pass 2 — Hard food/drink types (bakery, restaurant, cafe, bar etc.)
- *            → always remove, even if Google also tagged them as 'store'.
- *            Fixes: TGB Bakery, Dangee Dums appearing in "ball" search.
- *   Pass 3 — Standard unrelated check (bank, hospital, temple, school etc.)
- *            → remove if ALL specific types are unrelated.
- *   Jewellery detection: jewelry_store kept only for jewellery keywords
- *            (watch, ring, gold, chain etc.). Removed for all others.
+ * RELEVANCE FILTER (whitelist-based, type-aware):
+ *   Product searches (Store/Any/Manufacturer/Wholesaler):
+ *     → WHITELIST approach: keep only places with product-selling types
+ *     → Completely eliminates restaurants, banks, temples etc.
+ *     → Food keywords auto-detected and routed to food-type search
+ *   Service searches (Restaurant/Hospital/Bank/etc.):
+ *     → Google's includedType restriction does the filtering at API level
  *
- * GEO FENCE: neighbourhood/specific use geo.bounds (tight admin boundary),
- *   not geo.viewport (padded display box). Prevents Maninagar results
- *   including Isanpur, Saraspur, Gomtipur.
+ * GEO FENCE (two-layer):
+ *   Layer 1: geo.bounds bbox filter (tight admin boundary)
+ *   Layer 2: Address-string verification — formattedAddress must contain area name
+ *   Prevents Maninagar results including Isanpur, Saraspur, Gomtipur.
  *
  * CACHE: Firestore public_search_cache, TTL 24h, 0 API calls on cache hit.
  */
 
 import { db } from '../firebase';
 import {
-  doc, getDoc, setDoc, serverTimestamp,
+  doc, getDoc, setDoc, serverTimestamp, increment,
 } from 'firebase/firestore';
-import { GOOGLE_API_KEY, CACHE_CONFIG } from '../config';
+import { GOOGLE_API_KEY, GEMINI_API_KEY, GEMINI_CONFIG, CACHE_CONFIG } from '../config';
 
 // Gate all debug logs behind DEV flag — zero console output in production builds
 const log  = import.meta.env.DEV ? console.log.bind(console)  : () => {};
 const warn = import.meta.env.DEV ? console.warn.bind(console) : () => {};
+
+const makeAbortError = (message = 'Search cancelled') => {
+  const err = new Error(message);
+  err.name = 'AbortError';
+  return err;
+};
+
+const isAbortError = (err) => err?.name === 'AbortError';
+
+const throwIfAborted = (signal) => {
+  if (signal?.aborted) throw makeAbortError();
+};
+
+const delay = (ms, signal) => new Promise((resolve, reject) => {
+  if (!signal) {
+    setTimeout(resolve, ms);
+    return;
+  }
+
+  if (signal.aborted) {
+    reject(makeAbortError());
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    signal.removeEventListener('abort', onAbort);
+    resolve();
+  }, ms);
+
+  const onAbort = () => {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+    reject(makeAbortError());
+  };
+
+  signal.addEventListener('abort', onAbort);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -66,6 +101,7 @@ const FIELD_MASK = [
   'places.businessStatus',
   'places.types',
   'places.location',
+  'places.reviews',
 ].join(',');
 
 // ── Grid dimensions per searchScope ──────────────────────────────────────────
@@ -74,12 +110,8 @@ const FIELD_MASK = [
 // returns different top-20 businesses.  More variants on the same cell
 // returns the same businesses (deduplicated → wasted calls).
 //
-// Target: 25 calls → 200+ unique
-//   5×5 = 25 cells × 1 variant × 1 page = EXACTLY 25 API calls
-//   25 × 20 raw = 500 raw → ~200–250 unique (different zone each cell)
-//
 // pagesPerCell = 1 for city locks the call count to exactly n_cells.
-// Neighbourhood uses 2 pages (smaller area, want depth not breadth).
+// Neighbourhood uses 1 page (smaller area, cells do breadth work).
 // ── Double-Lock Viewport Architecture ───────────────────────────────────────
 // Lock 1 (Geo):  locationRestriction.rectangle = geocoder viewport grid cell.
 //                Viewport is the exact bounding box Google keeps for each
@@ -88,18 +120,10 @@ const FIELD_MASK = [
 //                Google's NLP sees an address in an adjacent locality and
 //                ranks it below Maninagar results → bleed eliminated.
 //
-// Grid budgets — actual calls are EXACT for city (no paging variability):
-//   city:          4×4 = 16 cells × 2 queries × 1 page  = EXACTLY 32 calls
-//   neighbourhood: 4×3 = 12 cells × 2 queries × ≤3 pages = ≤72  max (~24-32 actual)
-//   specific:      1×1 =  1 cell  × 3 queries × ≤3 pages = ≤9   max (~3-6  actual)
-//
-// City uses pagesPerCell=1 so every (cell, query) pair fires ONCE and stops.
-// 16 cells × 2 variants = 32 calls exactly, regardless of result count.
-// 32 calls × up to 20 raw = 640 raw → ~250-280 unique after dedup.
-//
-// Neighbourhood: 12 cells × 2 variants with seenIds exits → ~24-32 actual calls.
-// More cells = smaller micro-zones = less overlap on dedup → 100+ unique results.
-// Specific: 3 variants for maximum depth on a single point.
+// Grid budgets (exact for city — no paging variability):
+//   city:          4×4 = 16 cells × 2 variants × 1 page = 32 calls
+//   neighbourhood: 4×3 = 12 cells × 2 variants × 1 page = 24 calls
+//   specific:      1×1 =  1 cell  × 3 variants × ≤3 pages = ≤9 calls
 const GRID_CONFIG = {
   city:          { cols: 4, rows: 4, pagesPerCell: 1 },  // 16 cells × 2 variants × 1 page = 32 calls exact
   neighbourhood: { cols: 4, rows: 3, pagesPerCell: 1 },  // 12 cells × 2 variants × 1 page = 24 calls exact
@@ -120,15 +144,10 @@ const CALL_STAGGER_MS = 400;
 //                   making Google restrict results to that category at source.
 //                   null for types with no direct Google Places type (M/W).
 //
-// "Any type" uses 4 orthogonal variants for maximum yield:
-//   bare kw + shop + wholesaler + dealer  (36 base calls → 250–300+ unique)
-//
-// Specific types use 2–3 targeted variants + includedType API restriction,
-// which is both more accurate and more efficient (18–27 base calls).
-//
-// KEY FIX: previously `type` only affected the cache key; the API never
-// saw it.  Now `includedType` is sent in the POST body for native types,
-// so "Store / Shop" actually excludes pure manufacturers/wholesalers.
+// KEY DESIGN: Query variants are TYPE-AWARE. Product searches use
+// selling-intent suffixes ("shop", "store", "dealer"). Service searches
+// use the keyword as a specialisation ("italian restaurant").
+// This eliminates bias toward any single keyword.
 // ── includedType map ─────────────────────────────────────────────────────────
 // Controls the `includedType` field sent to the Places API to restrict
 // results to a native Google Places category at the source level.
@@ -147,18 +166,85 @@ const INCLUDED_TYPE_MAP = {
   'wholesaler':         null,
 };
 
+// ── Food / service keyword detection ─────────────────────────────────────────
+// When type is '' (Any type) and the keyword is food-related, we should NOT
+// apply the product-seller whitelist — we should show restaurants/cafes/etc.
+// This prevents "pizza" or "biryani" searches from returning zero results
+// because restaurants get filtered out by the product-seller whitelist.
+const FOOD_KEYWORDS = /\b(food|restaurant|cafe|bakery|sweet|mithai|pizza|burger|biryani|thali|dosa|idli|paratha|naan|roti|tandoori|momos|chaat|pav\s*bhaji|samosa|paneer|dal|curry|cake|pastry|chocolate|ice\s*cream|juice|tea|coffee|snack|fast\s*food|dhaba|tiffin|catering|canteen|mess|kitchen|eat|dine|dinner|lunch|breakfast|brunch|meal|cuisine)\b/i;
+
+// Service keywords that should NOT be filtered as product searches
+const SERVICE_KEYWORDS = /\b(hotel|lodge|guest\s*house|hostel|resort|hospital|clinic|doctor|dentist|pharmacy|chemist|pathology|diagnostic|medicine|medical|drug\s*store|pharma|school|college|university|coaching|tuition|training|gym|fitness|yoga|spa|salon|bank|finance|loan|insurance|real\s*estate|property|broker|builder|rent|pg|paying\s*guest)\b/i;
+
+const AREA_TOKEN_STOPWORDS = new Set([
+  'road', 'rd', 'street', 'st', 'lane', 'ln', 'nagar', 'area', 'market',
+  'society', 'colony', 'phase', 'sector', 'block', 'circle', 'chowk', 'cross',
+  'main', 'near', 'opp', 'opposite', 'city', 'district',
+]);
+
+const normalizeForMatch = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const includesNormalized = (haystack, needle) => {
+  const h = normalizeForMatch(haystack);
+  const n = normalizeForMatch(needle);
+  return !!n && h.includes(n);
+};
+
+const getAreaTokens = (areaValue) => String(areaValue || '')
+  .toLowerCase()
+  .split(/[^a-z0-9]+/)
+  .map((t) => t.trim())
+  .filter((t) => t.length >= 4 && !AREA_TOKEN_STOPWORDS.has(t));
+
+const addressMatchesLocation = (address, city, area) => {
+  const addr = String(address || '');
+  const cityOk = city ? includesNormalized(addr, city) : true;
+  if (!cityOk) return false;
+
+  if (!area) return true;
+  if (includesNormalized(addr, area)) return true;
+
+  const areaTokens = getAreaTokens(area);
+  if (!areaTokens.length) return false;
+
+  const normalizedAddr = normalizeForMatch(addr);
+  return areaTokens.some((token) => normalizedAddr.includes(token));
+};
+
+// ── Type suffixes for product-intent queries ─────────────────────────────────
+// Maps each filter type to the query suffixes that express seller-intent.
+// These are appended to the keyword to guide Google toward the right results.
+const TYPE_QUERY_SUFFIXES = {
+  '':            ['shop', 'store'],                    // Any type → generic seller intent
+  'store':       ['shop', 'store'],                    // Store → retail seller intent
+  'manufacturer':['manufacturer', 'factory'],          // Manufacturer → production intent
+  'wholesaler':  ['wholesaler', 'distributor'],        // Wholesaler → bulk intent
+  'restaurant':  ['restaurant', 'food'],               // Restaurant → food intent
+  'lodging':     ['hotel', 'lodge'],                   // Hotel → accommodation intent
+  'hospital':    ['hospital', 'clinic'],               // Hospital → medical intent
+  'school':      ['school', 'college'],                // School → education intent
+  'gym':         ['gym', 'fitness'],                   // Gym → fitness intent
+  'bank':        ['bank', 'finance'],                  // Bank → finance intent
+  'real_estate_agency': ['real estate', 'property'],   // Real estate → property intent
+};
+
 /**
  * Build NLP-locked query variants for a given search.
  *
  * Lock 2: every variant ends with "in [location]".
  * Google's ranking then biases toward businesses actually IN that location.
  *
- * Variant count per scope:
- *   city:                    2  (bare, shop)          — geographic cells do the work
- *   neighbourhood/specific:  3  (bare, shop, wholesaler / type suffix)
+ * TYPE-AWARE DESIGN:
+ *   Product types → selling-intent suffixes ("shop", "store", "dealer")
+ *   Service types → category suffixes ("restaurant", "hospital")
+ *   Never sends bare keyword alone — always has intent context.
  *
- * @param {string} keyword      — e.g. "kurti"
- * @param {string} location     — the geocoded location string, e.g. "maninagar, ahmedabad"
+ * Variant count per scope:
+ *   city/neighbourhood: 2 variants — cells do the yield work
+ *   specific:           3 variants — maximum depth on single point
+ *
+ * @param {string} keyword      — e.g. "ball"
+ * @param {string} location     — the geocoded location string
  * @param {string} searchScope  — 'city' | 'neighbourhood' | 'specific'
  * @param {string} type         — business type key (from INCLUDED_TYPE_MAP)
  * @returns {string[]} array of textQuery strings
@@ -166,107 +252,308 @@ const INCLUDED_TYPE_MAP = {
 const buildQueries = (keyword, location, searchScope, type) => {
   const kw  = keyword.trim();
   const loc = location.trim();
+  const kwLower = kw.toLowerCase();
 
-  let all;
-  if (type === 'manufacturer') {
-    all = [
-      `${kw} manufacturer in ${loc}`,
-      `${kw} factory in ${loc}`,
-      `${kw} production in ${loc}`,
-    ];
-  } else if (type === 'wholesaler') {
-    all = [
-      `${kw} wholesaler in ${loc}`,
-      `${kw} wholesale in ${loc}`,
-      `${kw} distributor in ${loc}`,
-    ];
+  // For "Any type" with food keywords, route to food-intent queries
+  const isFoodKw    = FOOD_KEYWORDS.test(kwLower);
+  const isServiceKw = SERVICE_KEYWORDS.test(kwLower);
+
+  let suffixes;
+  if (type === '' && isFoodKw) {
+    // Food keyword + Any type → use restaurant/food suffixes
+    suffixes = ['restaurant', 'food'];
+  } else if (type === '' && isServiceKw) {
+    // Service keyword + Any type → use keyword as-is (it IS the category)
+    suffixes = ['', 'near me'];
   } else {
-    // Any type or native-typed (store, restaurant, etc.)
-    // NLP Lock: always append "in [location]" so Google biases toward
-    // businesses whose address / name / reviews mention that location.
-    all = [
-      `${kw} in ${loc}`,
-      `${kw} shop in ${loc}`,
-      `${kw} wholesaler in ${loc}`,
-    ];
+    suffixes = TYPE_QUERY_SUFFIXES[type] || ['shop', 'store'];
   }
 
-  // City/Neighbourhood: 2 variants (more cells do the yield work, not more queries).
-  // Specific: all 3 variants with adaptive paging for maximum depth on single point.
+  // Build query variants: "{keyword} {suffix} in {location}"
+  // The suffix provides seller/category intent so Google understands
+  // we want businesses that DEAL IN the keyword, not just mention it.
+  const all = suffixes.map(suffix =>
+    suffix ? `${kw} ${suffix} in ${loc}` : `${kw} in ${loc}`
+  );
+
+  // For specific scope, add a third variant for extra depth
+  if (searchScope === 'specific' && all.length < 3) {
+    if (type === '' || type === 'store') {
+      all.push(`${kw} dealer in ${loc}`);
+    } else if (type === 'manufacturer') {
+      all.push(`${kw} production in ${loc}`);
+    } else if (type === 'wholesaler') {
+      all.push(`${kw} wholesale market in ${loc}`);
+    } else {
+      all.push(`${kw} in ${loc}`);
+    }
+  }
+
+  // City/Neighbourhood: 2 variants (cells do the yield work).
+  // Specific: all variants (up to 3) for maximum depth.
   return searchScope === 'specific' ? all : all.slice(0, 2);
 };
 
-// ── Types that are clearly unrelated to any general business search ──────────
-// Used by the post-fetch relevance filter (step 7) to remove results whose
-// only specific Google category is obviously wrong (e.g. a jewellery shop
-// inside a kurti market complex that matched via address proximity).
-// Strategy: Google gives each place a `types` array.  We ignore generic
-// types (establishment, store, point_of_interest) and check the specific
-// ones.  If EVERY specific type is in this set → the place is unrelated.
-// Conservative by design: places with no types or all-generic types are kept.
-// ── GENERIC: types that carry zero information.
-// Only truly generic tags — everything else is treated as a specific signal.
+// ── GENERIC: types that carry zero category information.
+// These are ignored when determining what kind of place it is.
+// CRITICAL: 'store' is treated as generic because Google tags nearly EVERY
+// business as 'store'. If we treated it as specific, the whitelist would
+// pass everything through — defeating the entire filter.
 const GENERIC_PLACE_TYPES = new Set([
   'point_of_interest',
   'establishment',
+  'store',             // Almost every business is tagged 'store' — treat as generic
 ]);
 
-// ── UNRELATED: place categories that can NEVER sell any physical product.
+// ── PRODUCT SELLER WHITELIST ─────────────────────────────────────────────────
+// DESIGN PRINCIPLE (WHITELIST, not blacklist):
+// For product searches, a place is KEPT only if it has ≥1 type in this set.
+// This is far more accurate than a blacklist because it ONLY passes places
+// that are categorically capable of selling products — any new unknown type
+// from Google is excluded by default (safe), whereas a blacklist would let
+// unknown types through (unsafe).
 //
-// DESIGN PRINCIPLE:
-// This is a product search app. The filter removes places that are
-// categorically impossible product sellers — regardless of keyword.
-// A restaurant cannot sell balls OR watches OR hardware OR kurti.
-// A temple cannot sell anything. A bank cannot sell anything.
-//
-// We do NOT remove retail store types (electronics_store, clothing_store,
-// jewelry_store, shoe_store etc.) because:
-//   1. Google only returns them for a keyword if they actually relate to it.
-//      e.g. Google returns an electronics store for "ball" only if that
-//      store sells something called "ball" or is in a ball market area.
-//   2. Our job is to remove CLEARLY WRONG CATEGORIES (restaurants, temples)
-//      not to second-guess Google's relevance ranking for retail stores.
-//
-// jewelry_store specifically: handled separately below via keyword detection.
-// For "ball" → jewelry_store removed. For "watch"/"ring" → kept.
-const UNRELATED_PLACE_TYPES = new Set([
-  // ── Food & drink (cannot sell physical products) ──
+// This set covers all Google Places types that represent businesses which
+// sell, manufacture, distribute, or deal in physical products.
+const PRODUCT_SELLER_TYPES = new Set([
+  // ── Multi-product retail (sell diverse goods → relevant for any keyword) ──
+  'shopping_mall', 'supermarket', 'department_store',
+  'convenience_store', 'wholesale_store', 'warehouse_store',
+  'grocery_or_supermarket', 'market',
+
+  // ── Specialised retail (Google returns these when they match the keyword) ──
+  'clothing_store', 'electronics_store', 'hardware_store',
+  'book_store', 'toy_store', 'sporting_goods_store',
+  'home_goods_store', 'furniture_store', 'shoe_store',
+  'pet_store', 'bicycle_store', 'auto_parts_store',
+  'car_dealer', 'gift_shop', 'stationery_store',
+  'mobile_phone_store', 'computer_store',
+
+  // ── Florist / garden / home improvement ──
+  'florist', 'home_improvement_store', 'garden_center',
+
+  // ── Liquor / wine ──
+  'liquor_store', 'wine_store',
+
+  // NOTE: 'store' is intentionally EXCLUDED — treated as generic (see above).
+  // NOTE: 'pharmacy', 'drugstore', 'gas_station' excluded — niche sellers.
+  //       Pharmacies still appear for 'medicine'/'medical' via SERVICE_KEYWORDS.
+]);
+
+// ── FOOD/DRINK TYPES ─────────────────────────────────────────────────────────
+// Used when the search is food-related (keyword or type = restaurant).
+// These types are KEPT for food searches and EXCLUDED for product searches.
+const FOOD_DRINK_TYPES = new Set([
   'restaurant', 'cafe', 'bar', 'food', 'bakery', 'meal_delivery',
   'meal_takeaway', 'fast_food_restaurant', 'ice_cream_shop',
-  'coffee_shop', 'night_club', 'liquor_store',
-
-  // ── Finance (cannot sell products) ──
-  'bank', 'atm', 'accounting', 'insurance_agency',
-
-  // ── Medical services (cannot sell general products) ──
-  'hospital', 'doctor', 'dentist', 'physiotherapist', 'veterinary_care',
-
-  // ── Accommodation (cannot sell products) ──
-  'lodging', 'hotel', 'motel',
-
-  // ── Entertainment & tourism (never a product seller) ──
-  'movie_theater', 'amusement_park', 'casino', 'stadium',
-  'zoo', 'aquarium', 'art_gallery', 'museum',
-  'tourist_attraction', 'event_venue', 'banquet_hall', 'wedding_venue',
-
-  // ── Personal care (cannot sell products) ──
-  'beauty_salon', 'hair_care', 'spa', 'nail_salon',
-
-  // ── Education ──
-  'school', 'university', 'library',
-
-  // ── Travel & transit ──
-  'airport', 'bus_station', 'train_station', 'transit_station', 'subway_station',
-
-  // ── Religious & civic (never a business lead) ──
-  'church', 'mosque', 'hindu_temple', 'place_of_worship', 'cemetery',
-  'local_government_office', 'courthouse', 'embassy', 'fire_station', 'police',
-
-  // ── Automotive services only (not dealers/parts) ──
-  // car_dealer and auto_parts_store are intentionally excluded —
-  // they sell physical products (cars, parts) relevant to some keywords.
-  'car_rental', 'car_repair', 'car_wash', 'parking', 'gas_station',
+  'coffee_shop', 'night_club', 'caterer',
 ]);
+
+// ── SERVICE CATEGORY TYPES ───────────────────────────────────────────────────
+// Maps each service filter type to the Google Place types that are relevant.
+// Used for service searches where includedType at API level may not be enough.
+const SERVICE_TYPE_WHITELIST = {
+  'restaurant': FOOD_DRINK_TYPES,
+  'lodging':    new Set(['lodging', 'hotel', 'motel', 'guest_house', 'hostel', 'resort']),
+  'hospital':   new Set(['hospital', 'doctor', 'dentist', 'physiotherapist', 'veterinary_care', 'pharmacy', 'drugstore', 'health']),
+  'school':     new Set(['school', 'university', 'library', 'primary_school', 'secondary_school']),
+  'gym':        new Set(['gym', 'fitness_center', 'stadium', 'sports_club', 'yoga_studio']),
+  'bank':       new Set(['bank', 'atm', 'accounting', 'insurance_agency', 'finance']),
+  'real_estate_agency': new Set(['real_estate_agency', 'real_estate_agent']),
+};
+
+// ── JEWELLERY KEYWORDS — used for jewelry_store handling ─────────────────────
+const JEWELLERY_KEYWORDS = /\b(watch|ring|chain|necklace|bracelet|bangle|earring|gold|silver|diamond|jewel|jewellery|jewelry|pendant|locket|bead|haar|kangan|mangalsutra|payal|anklet)\b/i;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTENT ENGINE (Gemini 2.5 Flash-Lite)
+// ─────────────────────────────────────────────────────────────────────────────
+// Called ONCE per unique keyword ever. Result cached permanently in Firestore.
+// Returns AI-generated search_queries, exclude_name_words, anti_stock_keywords,
+// review_keywords, synonyms, store_name_keywords, is_food, is_service.
+
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+/** Fallback intent when Gemini is unavailable or rate-limited */
+const _fallbackIntent = (keyword) => {
+  const kw = keyword.toLowerCase().trim();
+  return {
+    search_queries:      [`${kw} shop`, `${kw} store`],
+    store_name_keywords: [kw],
+    review_keywords:     [kw],
+    synonyms:            [],
+    exclude_name_words:  [],
+    anti_stock_keywords: [],
+    is_food:  FOOD_KEYWORDS.test(kw),
+    is_service: SERVICE_KEYWORDS.test(kw),
+  };
+};
+
+/** Make Firestore-safe cache key for intent */
+const _intentCacheKey = (keyword) => {
+  const encoded = encodeURIComponent(keyword.toLowerCase().trim());
+  return btoa(unescape(encoded)).replace(/[^a-zA-Z0-9]/g, '').slice(0, 60);
+};
+
+/**
+ * Get keyword intent — checks permanent Firestore cache first, then calls Gemini.
+ * Returns structured intent object for any product keyword.
+ */
+const getKeywordIntent = async (keyword, options = {}) => {
+  const { signal } = options;
+  throwIfAborted(signal);
+  const kw = keyword.toLowerCase().trim();
+  const cacheKey = _intentCacheKey(kw);
+
+  // ── 1. Check permanent intent cache ────────────────────────────────────────
+  const CURRENT_INTENT_SCHEMA = 3;   // bump when Gemini prompt schema changes
+  try {
+    const cacheRef = doc(db, GEMINI_CONFIG.INTENT_CACHE_COLLECTION, cacheKey);
+    const cacheSnap = await getDoc(cacheRef);
+    if (cacheSnap.exists()) {
+      const cached = cacheSnap.data();
+      if ((cached.schemaVersion || 0) < CURRENT_INTENT_SCHEMA) {
+        log('[intent] cache schema outdated — re-fetching:', kw);
+        // Fall through to Gemini call (don't return cached)
+      } else {
+        log('[intent] cache HIT →', kw, cached);
+        return cached.intent || cached;
+      }
+    }
+  } catch (err) {
+    warn('[intent] cache read error:', err.message);
+  }
+
+  // ── 2. Rate limit check ────────────────────────────────────────────────────
+  if (!GEMINI_API_KEY) {
+    warn('[intent] No GEMINI_API_KEY — using fallback');
+    return _fallbackIntent(kw);
+  }
+
+  try {
+    const usageRef = doc(db, GEMINI_CONFIG.USAGE_COLLECTION, GEMINI_CONFIG.USAGE_DOC);
+    const usageSnap = await getDoc(usageRef);
+    const usage = usageSnap.exists() ? usageSnap.data() : { calls_made: 0, calls_limit: 1000 };
+    const pct = usage.calls_made / (usage.calls_limit || 1000);
+
+    if (pct >= GEMINI_CONFIG.BLOCK_AT_PERCENT) {
+      warn('[intent] HARD LIMIT reached — using fallback (no Gemini call)');
+      return _fallbackIntent(kw);
+    }
+
+    if (pct >= GEMINI_CONFIG.WARN_AT_PERCENT && !usage.warned) {
+      await setDoc(usageRef, { warned: true }, { merge: true });
+      log('[intent] Usage at', (pct * 100).toFixed(0) + '% — warning flag set');
+    }
+  } catch (err) {
+    warn('[intent] usage check error (proceeding):', err.message);
+  }
+
+  // ── 3. Call Gemini ─────────────────────────────────────────────────────────
+  const prompt = `You are a product-to-shop classifier for Indian local business search.
+
+Given the keyword "${kw}", return a JSON object with these fields:
+- search_queries: array of 3-5 India-specific Google Maps search phrases that a person would type to find shops SELLING this product. Include shop/store/dealer/market variants. Examples: for "kurti" → ["ladies kurti shop", "ethnic wear store", "women clothing boutique"]. For "cement" → ["cement dealer", "building material shop", "construction material supplier"]. For "bat" → ["cricket bat shop", "sports goods store", "sporting equipment dealer"].
+- store_name_keywords: array of words likely in the NAME of relevant shops. For "kurti" → ["fashion", "ladies", "women", "ethnic", "boutique", "garment"]. For "bat" → ["sports", "cricket", "games", "toy"].
+- review_keywords: array of words customers write in Google reviews when they bought this product. For "kurti" → ["kurti", "kurta", "ethnic wear"]. For "bat" → ["bat", "cricket", "sports"].
+- synonyms: alternate Indian names for this product. For "kurti" → ["kurta", "kurtee"]. For "cement" → ["concrete", "mortar"].
+- exclude_name_words: words in business names that DISQUALIFY them (wrong category entirely). For "bat" → ["motor", "car", "sanitary", "computer", "electronics"]. For "kurti" → ["motor", "hardware", "electrical", "computer", "plywood"].
+- anti_stock_keywords: words meaning the shop sells something DIFFERENT within same broad category. For "kurti" → ["jeans", "denim", "raymond", "suit", "nike", "adidas", "shoe", "footwear"]. For "bat" → ["shoe", "jewellery", "furniture"].
+- is_food: boolean, true ONLY if "${kw}" is a food/beverage item (biryani, pizza, cake, juice, etc.)
+- is_service: boolean, true ONLY if "${kw}" is a service (plumber, carpenter, AC repair, gym, salon, etc.)
+
+Return ONLY valid JSON. No markdown, no explanation, no code fences.`;
+
+  const url = `${GEMINI_API_BASE}/${GEMINI_CONFIG.MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: GEMINI_CONFIG.TEMPERATURE,
+      maxOutputTokens: GEMINI_CONFIG.MAX_OUTPUT_TOKENS,
+    },
+  };
+
+  let intent = null;
+  const maxRetries = 3;
+  const baseDelay = 2000;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      throwIfAborted(signal);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal,
+      });
+
+      if (res.status === 429) {
+        const waitMs = baseDelay * Math.pow(2, attempt);
+        warn(`[intent] 429 rate limit — retry ${attempt + 1}/${maxRetries} in ${waitMs}ms`);
+        await delay(waitMs, signal);
+        continue;
+      }
+
+      if (!res.ok) {
+        warn(`[intent] Gemini API error ${res.status}`);
+        break;
+      }
+
+      const data = await res.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      // Strip markdown code fences if present
+      const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+      intent = JSON.parse(cleaned);
+      break;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      warn(`[intent] Gemini call error (attempt ${attempt + 1}):`, err.message);
+      if (attempt === maxRetries - 1) break;
+      await delay(baseDelay * Math.pow(2, attempt), signal);
+    }
+  }
+
+  if (!intent) {
+    warn('[intent] All retries failed — using fallback');
+    return _fallbackIntent(kw);
+  }
+
+  // ── 4. Validate & normalize ────────────────────────────────────────────────
+  intent.search_queries      = Array.isArray(intent.search_queries) ? intent.search_queries : [`${kw} shop`, `${kw} store`];
+  intent.store_name_keywords = Array.isArray(intent.store_name_keywords) ? intent.store_name_keywords : [kw];
+  intent.review_keywords     = Array.isArray(intent.review_keywords) ? intent.review_keywords : [kw];
+  intent.synonyms            = Array.isArray(intent.synonyms) ? intent.synonyms : [];
+  intent.exclude_name_words  = Array.isArray(intent.exclude_name_words) ? intent.exclude_name_words : [];
+  intent.anti_stock_keywords = Array.isArray(intent.anti_stock_keywords) ? intent.anti_stock_keywords : [];
+  intent.is_food    = !!intent.is_food;
+  intent.is_service = !!intent.is_service;
+
+  log('[intent] Gemini result for "' + kw + '":', intent);
+
+  // ── 5. Write to permanent cache ────────────────────────────────────────────
+  try {
+    const cacheRef = doc(db, GEMINI_CONFIG.INTENT_CACHE_COLLECTION, _intentCacheKey(kw));
+    await setDoc(cacheRef, {
+      keyword: kw,
+      intent,
+      schemaVersion: CURRENT_INTENT_SCHEMA,
+      createdAt: serverTimestamp(),
+    });
+    log('[intent] cached permanently →', kw);
+  } catch (err) {
+    warn('[intent] cache write error (non-fatal):', err.message);
+  }
+
+  // ── 6. Increment usage counter ─────────────────────────────────────────────
+  try {
+    const usageRef = doc(db, GEMINI_CONFIG.USAGE_COLLECTION, GEMINI_CONFIG.USAGE_DOC);
+    await setDoc(usageRef, { calls_made: increment(1) }, { merge: true });
+  } catch (err) {
+    warn('[intent] usage increment error (non-fatal):', err.message);
+  }
+
+  return intent;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TASK 1 — SPATIAL GRID MATH
@@ -400,9 +687,11 @@ const writeCache = async (cacheKey, keyword, location, results) => {
  * boundaries (e.g. keep only Maninagar, exclude Isanpur that falls within
  * the wider viewport box).
  */
-const geocodeLocation = async (location) => {
+const geocodeLocation = async (location, options = {}) => {
+  const { signal } = options;
+  throwIfAborted(signal);
   const url  = `${GEO_BASE}?address=${encodeURIComponent(location)}&key=${GOOGLE_API_KEY}`;
-  const res  = await fetch(url);
+  const res  = await fetch(url, { signal });
   const data = await res.json();
 
   if (data.status !== 'OK' || !data.results.length) {
@@ -456,7 +745,8 @@ const geocodeLocation = async (location) => {
  * @param {string|null} includedType — Google Place type restriction (e.g. 'store'), or null
  * @returns {{ places: Array, nextPageToken: string|null }}
  */
-const searchQueryPage = async (textQuery, rectangle, pageToken = null, includedType = null) => {
+const searchQueryPage = async (textQuery, rectangle, pageToken = null, includedType = null, signal = null) => {
+  throwIfAborted(signal);
   const body = {
     textQuery,
     maxResultCount: 20,
@@ -478,8 +768,10 @@ const searchQueryPage = async (textQuery, rectangle, pageToken = null, includedT
         'X-Goog-FieldMask': FIELD_MASK,
       },
       body: JSON.stringify(body),
+      signal,
     });
   } catch (networkErr) {
+    if (isAbortError(networkErr)) throw networkErr;
     throw new Error(`Network error — check internet connection: ${networkErr.message}`);
   }
 
@@ -521,17 +813,25 @@ const searchQueryPage = async (textQuery, rectangle, pageToken = null, includedT
 // seenIds — the live Set of place IDs already collected from prior cells/queries.
 // Passed by reference so this function can detect zero-yield pages and exit early,
 // saving API calls when an area is already saturated by previous sweeps.
-const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_DEFAULT, includedType = null, seenIds = null) => {
+const searchQueryPaged = async (
+  textQuery,
+  rectangle,
+  maxPages = PAGES_PER_CELL_DEFAULT,
+  includedType = null,
+  seenIds = null,
+  signal = null,
+) => {
   const allPlaces = [];
   let pageToken   = null;
   let callCount   = 0;
 
   for (let p = 0; p < maxPages; p++) {
+    throwIfAborted(signal);
     // 400 ms stagger before every page except the first of the first cell
     // (outer stagger handles the first call; inner handles subsequent pages).
-    if (p > 0) await new Promise((r) => setTimeout(r, CALL_STAGGER_MS));
+    if (p > 0) await delay(CALL_STAGGER_MS, signal);
 
-    const { places, nextPageToken } = await searchQueryPage(textQuery, rectangle, pageToken, includedType);
+    const { places, nextPageToken } = await searchQueryPage(textQuery, rectangle, pageToken, includedType, signal);
     callCount++;
     allPlaces.push(...places);
 
@@ -560,21 +860,30 @@ const searchQueryPaged = async (textQuery, rectangle, maxPages = PAGES_PER_CELL_
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Normalise a Places API v1 result object into a consistent lead shape */
-const formatPlace = (p) => ({
-  id:                  p.id,
-  placeId:             p.id,
-  displayName:         p.displayName || { text: 'Unknown Business' },
-  formattedAddress:    p.formattedAddress || 'Address not available',
-  nationalPhoneNumber: p.internationalPhoneNumber || null,
-  websiteUri:          p.websiteUri || null,
-  rating:              p.rating     || null,
-  userRatingCount:     p.userRatingCount || 0,
-  businessStatus:      p.businessStatus  || 'OPERATIONAL',
-  types:               p.types || [],
-  lat:                 p.location?.latitude  || null,
-  lng:                 p.location?.longitude || null,
-  source:              'places-v1-grid',   // marks Phase 3 grid results
-});
+const formatPlace = (p) => {
+  // Concatenate review texts for scoring (stripped before cache write)
+  const reviewTexts = (p.reviews || [])
+    .map(r => r.text?.text || r.originalText?.text || '')
+    .filter(Boolean)
+    .join(' ');
+
+  return {
+    id:                  p.id,
+    placeId:             p.id,
+    displayName:         p.displayName || { text: 'Unknown Business' },
+    formattedAddress:    p.formattedAddress || 'Address not available',
+    nationalPhoneNumber: p.internationalPhoneNumber || null,
+    websiteUri:          p.websiteUri || null,
+    rating:              p.rating     || null,
+    userRatingCount:     p.userRatingCount || 0,
+    businessStatus:      p.businessStatus  || 'OPERATIONAL',
+    types:               p.types || [],
+    lat:                 p.location?.latitude  || null,
+    lng:                 p.location?.longitude || null,
+    source:              'places-v1-grid',
+    _reviewText:         reviewTexts,  // internal — stripped before cache/return
+  };
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TASK 2 + 3 — CORE GRID SWEEP ENGINE
@@ -599,25 +908,57 @@ const _searchSingle = async (keyword, location, options = {}) => {
     searchScope = 'city',
     area        = '',
     onProgress  = null,
+    signal      = null,
   } = options;
 
-  if (!keyword?.trim() || !location?.trim()) {
-    throw new Error('keyword and location are required');
-  }
+  let totalApiCalls = 0;
+
+  try {
+    throwIfAborted(signal);
+
+    if (!keyword?.trim() || !location?.trim()) {
+      throw new Error('keyword and location are required');
+    }
 
   const areaStr      = area.trim();
   const cityStr      = location.trim();
   const fullLocation = areaStr ? `${areaStr}, ${cityStr}` : cityStr;
 
-  // NLP Fix: query strings are semantic variants — the locationRestriction
-  // rectangle is the geographic anchor.  Each type gets its own optimised
-  // variant set via TYPE_SEARCH_CONFIG; the includedType (when non-null) is
-  // passed through to the Places API to restrict results at source.
-  // Lock 2 (NLP): buildQueries appends "in [location]" to every variant.
-  // For neighbourhood/specific the location is "area, city"; for city it's just city.
-  // This ensures Google's NLP biases toward businesses IN that exact place.
-  const queries      = buildQueries(keyword.trim(), fullLocation, searchScope, type);
+  // ── Intent Engine (product searches only) ──────────────────────────────────
+  // Call getKeywordIntent for product-type searches. Routes food/service
+  // keywords based on AI classification. Provides search_queries, exclude_name_words,
+  // anti_stock_keywords, review_keywords, synonyms, store_name_keywords.
+  const isProductType = (type === '' || type === 'store' || type === 'manufacturer' || type === 'wholesaler');
+  let intent = null;
+
+    if (isProductType) {
+      if (onProgress) onProgress({ phase: 'intent', message: 'Analysing keyword…', current: 0, total: 1 });
+      intent = await getKeywordIntent(keyword.trim(), { signal });
+      log('[search] intent for "' + keyword.trim() + '":', intent);
+    }
+
+  // Determine routing based on intent (AI) or type dropdown
+  const isFoodSearch    = intent ? intent.is_food    : FOOD_KEYWORDS.test(keyword.trim().toLowerCase());
+  const isServiceSearch = intent ? intent.is_service : SERVICE_KEYWORDS.test(keyword.trim().toLowerCase());
+
+  // ── Build queries ──────────────────────────────────────────────────────────
+  // For product searches with AI intent: use intent.search_queries + location
+  // For food/service/category: use existing buildQueries with TYPE_QUERY_SUFFIXES
+  let queries;
   const includedType = INCLUDED_TYPE_MAP[type] ?? null;
+
+  if (isProductType && intent && !isFoodSearch && !isServiceSearch && intent.search_queries?.length) {
+    // AI-generated queries — append location
+    const loc = fullLocation;
+    const aiQueries = intent.search_queries.map(q => `${q} in ${loc}`);
+    // Trim to 2 for city/neighbourhood, 3 for specific
+    queries = searchScope === 'specific' ? aiQueries.slice(0, 3) : aiQueries.slice(0, 2);
+    log('[search] using AI queries:', queries);
+  } else {
+    // Fallback to static query builder (food, service, category types)
+    queries = buildQueries(keyword.trim(), fullLocation, searchScope, type);
+    log('[search] using static queries:', queries);
+  }
 
   const { cols, rows, pagesPerCell = PAGES_PER_CELL_DEFAULT } = GRID_CONFIG[searchScope] ?? GRID_CONFIG.city;
   const totalCalls = queries.length * (cols * rows) * pagesPerCell;   // theoretical max
@@ -628,25 +969,23 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-  // v9: 5×5=25 cells × 1 variant × 1 page = exactly 25 API calls → 200+ unique.
-  //     pagesPerCell now per-scope in GRID_CONFIG (city=1, nbhd=2, specific=3).
-  const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:matrixv21`);
+    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v10`);
 
-  if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
+    if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
   // forceRefresh=true skips reading the cache so a live sweep always runs.
-  if (!options.forceRefresh) {
-    const cached = await readCache(cacheKey);
-    if (cached?.results) {
-      if (onProgress) onProgress({ phase: 'done', message: 'Loaded from cache', found: cached.results.length, cached: true });
-      return { results: cached.results, apiCalls: 0, cached: true, totalResults: cached.results.length };
+    if (!options.forceRefresh) {
+      const cached = await readCache(cacheKey);
+      if (cached?.results) {
+        if (onProgress) onProgress({ phase: 'done', message: 'Loaded from cache', found: cached.results.length, cached: true });
+        return { results: cached.results, apiCalls: 0, cached: true, totalResults: cached.results.length };
+      }
     }
-  }
 
   // ── 2. Geocode ──────────────────────────────────────────────────────────────
-  if (onProgress) onProgress({ phase: 'geocoding', message: `Locating "${fullLocation}"…`, current: 0, total: 1 });
+    if (onProgress) onProgress({ phase: 'geocoding', message: `Locating "${fullLocation}"…`, current: 0, total: 1 });
 
-  const geo = await geocodeLocation(fullLocation);
+    const geo = await geocodeLocation(fullLocation, { signal });
 
   // ── 3. Sweep viewport ─────────────────────────────────────────────────────────
   // For city scope we pad the geocoder viewport by +15% in all directions.
@@ -668,7 +1007,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   // geo.bounds matches the real administrative boundary of e.g. "Maninagar"
   // so results from adjacent areas (Isanpur, Saraspur) are excluded correctly.
   // Falls back to geo.viewport if bounds is absent (rare — point locations).
-  const geoFenceBounds = searchScope !== 'city' ? geo.bounds : null;
+  const geoFenceBounds = geo.bounds;
   log(
     `[grid] ${searchScope} sweep = geocoder viewport (exact)`,
     `| sw=(${sweepViewport.sw.lat.toFixed(5)},${sweepViewport.sw.lng.toFixed(5)})`,
@@ -676,91 +1015,89 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 4. Generate grid rectangles ────────────────────────────────────────────
-  const gridBoxes = generateGridBoxes(sweepViewport, searchScope);
+    const gridBoxes = generateGridBoxes(sweepViewport, searchScope);
 
-  const matrixTotal = gridBoxes.length * queries.length;   // total (cell, variant) pairs
+    const matrixTotal = gridBoxes.length * queries.length;   // total (cell, variant) pairs
 
-  if (onProgress) {
-    onProgress({
-      phase:    'searching',
-      message:  `Matrix sweep: ${gridBoxes.length} cells × ${queries.length} variants…`,
-      current:  0,
-      total:    matrixTotal,
-      found:    0,
-      apiCalls: 0,
-    });
-  }
+    if (onProgress) {
+      onProgress({
+        phase:    'searching',
+        message:  `Matrix sweep: ${gridBoxes.length} cells × ${queries.length} variants…`,
+        current:  0,
+        total:    matrixTotal,
+        found:    0,
+        apiCalls: 0,
+      });
+    }
 
   // ── 5. Matrix sweep: staggered for...of (cell × variant) ──────────────────
   // 400 ms stagger between EVERY searchQueryPaged call — both across cells
   // and across variants — to prevent OVER_QUERY_LIMIT (429).
-  const seen        = new Set();
-  const allLeads    = [];
-  let totalApiCalls = 0;
-  let callIdx       = 0;   // counts (cell, variant) pairs dispatched
+    const seen        = new Set();
+    const allLeads    = [];
+    let callIdx       = 0;   // counts (cell, variant) pairs dispatched
 
-  for (const rectangle of gridBoxes) {
-    for (const query of queries) {
+    for (const rectangle of gridBoxes) {
+      for (const query of queries) {
+        throwIfAborted(signal);
       // 400 ms stagger before every call except the very first
-      if (callIdx > 0) await new Promise((r) => setTimeout(r, CALL_STAGGER_MS));
+        if (callIdx > 0) await delay(CALL_STAGGER_MS, signal);
 
       // Pass `seen` so searchQueryPaged can exit pages early when all results
       // on a page are already collected (zero-yield page exit, saves pages 2-3).
-      const { places, callCount } = await searchQueryPaged(query, rectangle, pagesPerCell, includedType, seen);
-      totalApiCalls += callCount;
-      callIdx++;
+        const { places, callCount } = await searchQueryPaged(query, rectangle, pagesPerCell, includedType, seen, signal);
+        totalApiCalls += callCount;
+        callIdx++;
 
       // Deduplicate by place.id across ALL cells and variants.
-      let newThisCall = 0;
-      for (const p of places) {
-        if (p.id && !seen.has(p.id)) {
-          seen.add(p.id);
-          allLeads.push(formatPlace(p));
-          newThisCall++;
+        let newThisCall = 0;
+        for (const p of places) {
+          if (p.id && !seen.has(p.id)) {
+            seen.add(p.id);
+            allLeads.push(formatPlace(p));
+            newThisCall++;
+          }
         }
-      }
 
-      log(
-        `[matrix] ${callIdx}/${matrixTotal} | query="${query}"`,
-        `-> ${places.length} raw, ${newThisCall} new unique`,
-        `| total=${allLeads.length} | apiCalls=${totalApiCalls}`,
-      );
+        log(
+          `[matrix] ${callIdx}/${matrixTotal} | query="${query}"`,
+          `-> ${places.length} raw, ${newThisCall} new unique`,
+          `| total=${allLeads.length} | apiCalls=${totalApiCalls}`,
+        );
 
-      if (onProgress) {
-        onProgress({
-          phase:    'searching',
-          message:  `${callIdx}/${matrixTotal} sweeps complete — ${allLeads.length} unique businesses found…`,
-          current:  callIdx,
-          total:    matrixTotal,
-          found:    allLeads.length,
-          apiCalls: totalApiCalls,
-        });
-      }
+        if (onProgress) {
+          onProgress({
+            phase:    'searching',
+            message:  `${callIdx}/${matrixTotal} sweeps complete — ${allLeads.length} unique businesses found…`,
+            current:  callIdx,
+            total:    matrixTotal,
+            found:    allLeads.length,
+            apiCalls: totalApiCalls,
+          });
+        }
       // NOTE: We do NOT skip remaining queries on this cell even if newThisCall===0.
       // Different query variants ("shop", "wholesaler") surface different businesses
       // from Google's index even within the same geographic rectangle.
       // The per-page seenIds check inside searchQueryPaged already prevents paying
       // for additional pages when a page is fully saturated.
+      }
     }
-  }
 
-  log(`[search] grid sweep complete | ${totalApiCalls} API calls -> ${allLeads.length} unique places`);
+    log(`[search] grid sweep complete | ${totalApiCalls} API calls -> ${allLeads.length} unique places`);
 
-  // ── 6. Geographic fence filter (neighbourhood & specific scopes only) ──────
-  // For city scope the full-city grid is the intent — no filtering needed.
-  // For neighbourhood/specific we filter by the geocoder's `bounds` bbox
-  // (the administrative boundary of e.g. "Maninagar") rather than the
-  // wider viewport.  bounds is typically 30–50% smaller than viewport for
-  // Indian localities, which is exactly what excludes Isanpur / Saraspur.
-  // A 5% grace margin retains businesses sitting right on the boundary edge.
-  // Places without coordinates are kept (conservative fallback, rare).
-  let finalLeads = allLeads;
-  if (geoFenceBounds) {
-    // Neighbourhood/specific: strict bbox filter using the same radius box.
-    // 0% margin — if a place is outside the radius box it's excluded.
-    // Places without coordinates are kept (conservative fallback, rare).
+  // ── 6. Geographic fence filter (all scopes) ─────────────────────────────────
+  // TWO-LAYER GEO FENCE:
+  //   Layer 1: Bounding box filter using geo.bounds (tight admin boundary)
+  //   Layer 2: Address-string verification — formattedAddress must contain area name
+  // This double-lock prevents results from neighbouring areas (e.g. Isanpur
+  // appearing in a Maninagar search) even when those results technically fall
+  // within the wider viewport or on the edge of the bounds bbox.
+    let finalLeads = allLeads;
+    if (geoFenceBounds) {
     const fence  = geoFenceBounds;
     const before = allLeads.length;
+
+    // Layer 1: Bounding box filter
     finalLeads = allLeads.filter((lead) => {
       if (lead.lat == null || lead.lng == null) return true;
       return lead.lat >= fence.sw.lat
@@ -768,128 +1105,229 @@ const _searchSingle = async (keyword, location, options = {}) => {
           && lead.lng >= fence.sw.lng
           && lead.lng <= fence.ne.lng;
     });
+
+    const afterBbox = finalLeads.length;
     log(
-      `[geo-fence] ${before} → ${finalLeads.length} results after strict radius filter`,
+      `[geo-fence-L1] ${before} → ${afterBbox} results after bbox filter`,
       `| sw=(${fence.sw.lat.toFixed(5)},${fence.sw.lng.toFixed(5)})`,
       `  ne=(${fence.ne.lat.toFixed(5)},${fence.ne.lng.toFixed(5)})`,
     );
+
+    // Layer 2: Address-string verification
+    // City must always match. If area is supplied, enforce area too.
+    // This removes nearby-locality bleed-through even when coordinates are
+    // close to boundary edges.
+    const beforeAddr = finalLeads.length;
+
+    finalLeads = finalLeads.filter((lead) => {
+      const addr = lead.formattedAddress || '';
+      // For neighbourhood/specific: bbox (Layer 1) already restricts to the area.
+      // Only enforce city in the address string to avoid over-filtering.
+      const enforceArea = (searchScope === 'city') ? (areaStr || null) : null;
+      return addressMatchesLocation(addr, cityStr, enforceArea);
+    });
+
+    log(
+      `[geo-fence-L2] ${beforeAddr} → ${finalLeads.length} results after address-string filter`,
+      `| city="${cityStr}"`,
+      areaStr ? `| area="${areaStr}"` : '| area=none',
+    );
+    }
+
+  // ── 7. Three-Layer Relevance Filter (AI-powered for product searches) ──────
+    const kwLower = keyword.trim().toLowerCase();
+    const isJewellerySearch = JEWELLERY_KEYWORDS.test(kwLower);
+    const beforeRelevance = finalLeads.length;
+
+    if (isProductType && !isFoodSearch && !isServiceSearch) {
+    // ── Layer A: Type-Based Exclusion ────────────────────────────────────
+    const NON_PRODUCT_TYPES = new Set([
+      'restaurant', 'cafe', 'bar', 'food', 'bakery', 'meal_delivery',
+      'meal_takeaway', 'fast_food_restaurant', 'ice_cream_shop',
+      'coffee_shop', 'night_club', 'caterer',
+      'bank', 'atm', 'accounting', 'insurance_agency',
+      'hospital', 'doctor', 'dentist', 'physiotherapist', 'veterinary_care',
+      'lodging', 'hotel', 'motel',
+      'movie_theater', 'amusement_park', 'casino', 'stadium',
+      'zoo', 'aquarium', 'art_gallery', 'museum',
+      'tourist_attraction', 'event_venue', 'banquet_hall', 'wedding_venue',
+      'beauty_salon', 'hair_care', 'spa', 'nail_salon',
+      'school', 'university', 'library',
+      'airport', 'bus_station', 'train_station', 'transit_station',
+      'subway_station', 'parking',
+      'church', 'mosque', 'hindu_temple', 'place_of_worship', 'cemetery',
+      'local_government_office', 'courthouse', 'embassy',
+      'fire_station', 'police',
+      'car_rental', 'car_repair', 'car_wash',
+      'gym', 'fitness_center',
+    ]);
+    if (!isJewellerySearch) NON_PRODUCT_TYPES.add('jewelry_store');
+
+    const beforeA = finalLeads.length;
+    finalLeads = finalLeads.filter((lead) => {
+      const types = lead.types || [];
+      const name = (lead.displayName?.text || '').toLowerCase();
+      // Name match always wins — if the business name contains the keyword, keep it
+      if (name.includes(kwLower)) return true;
+      // No types at all — keep (can't determine category)
+      if (types.length === 0) return true;
+      const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
+      if (specific.length === 0) {
+        // Place has only generic types — keep ONLY if the business name contains
+        // the search keyword (strong signal it actually deals in that product).
+        return name.includes(kwLower);
+      }
+      // Whitelist: keep only if place has ≥1 type that is a known product seller
+      const hasProductType = specific.some(t => PRODUCT_SELLER_TYPES.has(t));
+      if (hasProductType) return true;
+      // Has specific types but none are product-seller types → drop
+      return false;
+    });
+    log(`[filter-A] ${beforeA} → ${finalLeads.length} after type whitelist`);
+
+    // ── Layer B: Intent Name Exclusion ───────────────────────────────────
+    if (intent?.exclude_name_words?.length) {
+      const excludeWords = intent.exclude_name_words.map(w => w.toLowerCase());
+      const beforeB = finalLeads.length;
+      finalLeads = finalLeads.filter((lead) => {
+        const name = (lead.displayName?.text || '').toLowerCase();
+        if (name.includes(kwLower)) return true;
+        return !excludeWords.some(w => name.includes(w));
+      });
+      log(`[filter-B] ${beforeB} → ${finalLeads.length} after name exclusion`);
+    }
+
+    // ── Layer C: Anti-Stock Keyword Filter ───────────────────────────────
+    if (intent?.anti_stock_keywords?.length) {
+      const antiWords = intent.anti_stock_keywords.map(w => w.toLowerCase());
+      const beforeC = finalLeads.length;
+      finalLeads = finalLeads.filter((lead) => {
+        const name = (lead.displayName?.text || '').toLowerCase();
+        if (name.includes(kwLower)) return true;
+        return !antiWords.some(w => name.includes(w));
+      });
+      log(`[filter-C] ${beforeC} → ${finalLeads.length} after anti-stock filter`);
+    }
+
+    log(`[relevance] THREE-LAYER | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
+
+    } else if (isProductType && isFoodSearch) {
+    const foodAndProductTypes = new Set([...FOOD_DRINK_TYPES, ...PRODUCT_SELLER_TYPES]);
+    finalLeads = finalLeads.filter((lead) => {
+      const types = lead.types || [];
+      if (types.length === 0) return true;
+      const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
+      if (specific.length === 0) return true;
+      return specific.some(t => foodAndProductTypes.has(t));
+    });
+    log(`[relevance] FOOD whitelist | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
+
+    } else if (isProductType && isServiceSearch) {
+    // Look up a whitelist for this service keyword if one exists
+    const serviceTypeKey = Object.keys(SERVICE_TYPE_WHITELIST).find(k => kwLower.includes(k));
+    if (serviceTypeKey) {
+      const whitelist = SERVICE_TYPE_WHITELIST[serviceTypeKey];
+      finalLeads = finalLeads.filter((lead) => {
+        const types = lead.types || [];
+        const name = (lead.displayName?.text || '').toLowerCase();
+        if (name.includes(kwLower)) return true;   // name match always wins
+        if (types.length === 0) return true;
+        const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
+        if (specific.length === 0) return name.includes(kwLower);
+        return specific.some(t => whitelist.has(t));
+      });
+      log(`[relevance] SERVICE keyword whitelist | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
+    } else {
+      // No whitelist for this service — apply name-based filter at minimum
+      finalLeads = finalLeads.filter((lead) => {
+        const name = (lead.displayName?.text || '').toLowerCase();
+        return name.includes(kwLower) || (lead.types || []).some(t => t.includes(kwLower.replace(/\s+/g, '_')));
+      });
+      log(`[relevance] SERVICE keyword name-filter | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
+    }
+
+    } else if (SERVICE_TYPE_WHITELIST[type]) {
+    const whitelist = SERVICE_TYPE_WHITELIST[type];
+    finalLeads = finalLeads.filter((lead) => {
+      const types = lead.types || [];
+      if (types.length === 0) return true;
+      const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
+      if (specific.length === 0) return true;
+      return specific.some(t => whitelist.has(t));
+    });
+    log(`[relevance] SERVICE whitelist type="${type}" | ${beforeRelevance} → ${finalLeads.length}`);
+    }
+
+  // ── 8. Confidence Scoring & Review Mining ─────────────────────────────────
+    if (isProductType && !isFoodSearch && !isServiceSearch && intent) {
+    const reviewWords = [
+      ...(intent.review_keywords || []),
+      ...(intent.synonyms || []),
+      kwLower,
+    ].map(w => w.toLowerCase());
+    const storeHintWords = (intent.store_name_keywords || []).map(w => w.toLowerCase());
+
+    for (const lead of finalLeads) {
+      let score = 0;
+      const name = (lead.displayName?.text || '').toLowerCase();
+      const reviewText = (lead._reviewText || '').toLowerCase();
+      const types = lead.types || [];
+
+      if (reviewText && reviewWords.some(w => reviewText.includes(w))) score += 60;
+      if (storeHintWords.some(w => name.includes(w))) score += 40;
+      if (types.some(t => PRODUCT_SELLER_TYPES.has(t))) score += 30;
+      if (name.includes(kwLower)) score += 20;
+      // Penalise places with only generic types — they are unverified
+      if (types.length > 0 && types.filter(t => !GENERIC_PLACE_TYPES.has(t)).length === 0) score -= 10;
+
+      lead.confidenceScore = score;
+      lead.confidenceLabel = score >= 60 ? 'verified' : score >= 20 ? 'likely' : 'possible';
+    }
+
+    finalLeads.sort((a, b) => (b.confidenceScore || 0) - (a.confidenceScore || 0));
+
+    // Drop "possible" results only when we have enough verified/likely results
+    // to not leave the user with an empty result set.
+    const CONFIDENCE_THRESHOLD = 10;
+    const highQuality = finalLeads.filter(l => (l.confidenceScore || 0) >= CONFIDENCE_THRESHOLD);
+    if (highQuality.length >= 5) {
+      finalLeads = highQuality;
+      log(`[confidence] threshold filter: kept ${finalLeads.length} results (score ≥ ${CONFIDENCE_THRESHOLD})`);
+    }
+
+    const v = finalLeads.filter(l => l.confidenceLabel === 'verified').length;
+    const lk = finalLeads.filter(l => l.confidenceLabel === 'likely').length;
+    const ps = finalLeads.filter(l => l.confidenceLabel === 'possible').length;
+    log(`[confidence] ${v} VERIFIED, ${lk} LIKELY, ${ps} POSSIBLE out of ${finalLeads.length}`);
+    }
+
+  // ── 9. Strip _reviewText before cache/return ──────────────────────────────
+    for (const lead of finalLeads) { delete lead._reviewText; }
+
+  // ── 10. Cache write (fire-and-forget) ─────────────────────────────────────
+    if (finalLeads.length > 0) {
+      writeCache(cacheKey, keyword.trim(), fullLocation, finalLeads);
+    }
+
+    if (onProgress) {
+      onProgress({ phase: 'done', message: `Found ${finalLeads.length} businesses`, found: finalLeads.length, cached: false });
+    }
+
+    return {
+      results:      finalLeads,
+      apiCalls:     totalApiCalls,
+      cached:       false,
+      totalResults: finalLeads.length,
+    };
+  } catch (err) {
+    if (isAbortError(err)) {
+      err.partialApiCalls = Number(err.partialApiCalls ?? totalApiCalls ?? 0);
+    }
+    throw err;
   }
-
-  // ── 7. Relevance filter ──────────────────────────────────────────────────
-  //
-  // PURPOSE: This is a PRODUCT SEARCH app. User types a product name like
-  // "ball", "watch", "kurti", "hardware" and wants every kind of place that
-  // SELLS or DEALS in that product — shops, supermarkets, wholesalers etc.
-  //
-  // DESIGN PRINCIPLE: Filter by Google PLACE TYPE only. Never by business name.
-  // Reason: Brand names like "Titan" tell you nothing about what is sold.
-  // Only Google's type tags reliably indicate the category of a business.
-  //
-  // TWO-PASS LOGIC:
-  //
-  // Pass 1 — Clear unrelated types:
-  //   A place is removed if ALL its specific (non-generic) types are in the
-  //   UNRELATED set. e.g. ['restaurant','food'] → all unrelated → REMOVED.
-  //   A place with ['sporting_goods_store','store'] → sporting_goods_store
-  //   is NOT unrelated → KEPT.
-  //
-  // Pass 2 — All-generic fallback:
-  //   Some Indian businesses are tagged by Google as only
-  //   ['store','point_of_interest','establishment'] — Google hasn't told us
-  //   what KIND of store. This is genuinely ambiguous.
-  //   For these we KEEP the place — better to show an extra result
-  //   than to incorrectly hide a valid product seller.
-  //   The user can see the name and judge for themselves.
-  //
-  // NOTE on jewelry_store:
-  //   jewelry_store is in UNRELATED. A jewellery store cannot sell balls,
-  //   hardware, or kurti. It only makes sense for jewellery keywords
-  //   (watch, ring, chain, gold, necklace, bracelet).
-  //   We detect jewellery keywords below and exempt jewelry_store for them.
-  //
-  // NOTE on electronics_store:
-  //   electronics_store is NOT in UNRELATED. Electronics stores sell
-  //   smartwatches, gadgets, cables, batteries — valid for many keywords.
-
-  const kwLower = keyword.trim().toLowerCase();
-
-  // Jewellery keyword detection:
-  // jewelry_store removed for ALL searches EXCEPT jewellery keywords.
-  // "ball"  -> jewelry_store removed (Titan watch shop should not appear)
-  // "watch" -> jewelry_store kept    (Titan watch shop should appear)
-  const JEWELLERY_KEYWORDS = /\b(watch|ring|chain|necklace|bracelet|bangle|earring|gold|silver|diamond|jewel|jewellery|jewelry|pendant|locket|bead|haar|kangan|mangalsutra|payal|anklet)\b/i;
-  const isJewellerySearch = JEWELLERY_KEYWORDS.test(kwLower);
-
-  // Strong positive retail types: dedicated product-selling stores.
-  // A place with ANY of these is always kept even if Google also tagged
-  // it with a food type (e.g. hardware shop that also sells packaged snacks).
-  const STRONG_RETAIL_TYPES = new Set([
-    'sporting_goods_store', 'toy_store', 'hardware_store',
-    'electronics_store', 'clothing_store', 'shoe_store',
-    'book_store', 'bicycle_store', 'furniture_store',
-    'home_goods_store', 'pet_store',
-    'convenience_store', 'department_store', 'supermarket',
-    'wholesale_store', 'warehouse_store', 'grocery_or_supermarket',
-  ]);
-
-  // Hard-remove food/drink types:
-  // Google tags Indian sweet shops and bakeries as ['bakery','food','store'].
-  // The 'store' tag made the old filter keep them. New rule:
-  // if ANY food/drink type present AND no strong retail override -> remove.
-  // TGB Bakery ['bakery','food','store'] -> bakery present, no strong retail -> REMOVED
-  // Big Basket ['grocery_or_supermarket','food','store'] -> strong retail present -> KEPT
-  const HARD_REMOVE_FOOD = new Set([
-    'restaurant', 'cafe', 'bar', 'bakery', 'food',
-    'meal_delivery', 'meal_takeaway', 'fast_food_restaurant',
-    'ice_cream_shop', 'coffee_shop', 'night_club', 'liquor_store',
-  ]);
-
-  const beforeRelevance = finalLeads.length;
-  finalLeads = finalLeads.filter((lead) => {
-    const types = lead.types || [];
-
-    // No type info at all -> keep (very rare)
-    if (types.length === 0) return true;
-
-    const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
-
-    // No specific types -> keep (ambiguous, could be any store)
-    if (specific.length === 0) return true;
-
-    // Strong retail override: always keep dedicated product stores
-    if (specific.some(t => STRONG_RETAIL_TYPES.has(t))) return true;
-
-    // Hard-remove: food/drink type present without strong retail override
-    // Removes bakeries and sweet shops tagged as ['bakery','food','store']
-    if (specific.some(t => HARD_REMOVE_FOOD.has(t))) return false;
-
-    // Jewellery check: jewelry_store kept only for jewellery keywords
-    const effectiveUnrelated = isJewellerySearch
-      ? UNRELATED_PLACE_TYPES
-      : new Set([...UNRELATED_PLACE_TYPES, 'jewelry_store']);
-
-    // Standard check: remove if ALL specific types are unrelated
-    return !specific.every(t => effectiveUnrelated.has(t));
-  });
-  log('[relevance] keyword="' + kwLower + '" jewellery=' + isJewellerySearch + ' | ' + beforeRelevance + ' -> ' + finalLeads.length + ' after filter');
-
-
-  // ── 8. Cache write (fire-and-forget) ──────────────────────────────────────
-  if (finalLeads.length > 0) {
-    writeCache(cacheKey, keyword.trim(), fullLocation, finalLeads);
-  }
-
-  if (onProgress) {
-    onProgress({ phase: 'done', message: `Found ${finalLeads.length} businesses`, found: finalLeads.length, cached: false });
-  }
-
-  return {
-    results:      finalLeads,
-    apiCalls:     totalApiCalls,
-    cached:       false,
-    totalResults: finalLeads.length,
-  };
 };
+
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC API — supports comma-separated keywords AND locations
@@ -914,7 +1352,8 @@ const _searchSingle = async (keyword, location, options = {}) => {
  * @returns {Promise<{ results, apiCalls, cached, totalResults }>}
  */
 export const searchBusinesses = async (keyword, location, options = {}) => {
-  const { onProgress = null } = options;
+  const { onProgress = null, signal = null } = options;
+  throwIfAborted(signal);
 
   const keywords  = String(keyword  || '').split(',').map((k) => k.trim()).filter(Boolean);
   const locations = String(location || '').split(',').map((l) => l.trim()).filter(Boolean);
@@ -946,20 +1385,31 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
   }
 
   let done = 0;
-  const allResponses = await Promise.all(
-    pairs.map(async ({ kw, loc }) => {
-      const res = await _searchSingle(kw, loc, { ...options, onProgress: null });
+  const allResponses = [];
+  let totalApiCallsSoFar = 0;
+
+  for (const { kw, loc } of pairs) {
+    throwIfAborted(signal);
+    try {
+      const res = await _searchSingle(kw, loc, { ...options, onProgress: null, signal });
       done++;
+      totalApiCallsSoFar += (res.apiCalls || 0);
+      allResponses.push(res);
+
       if (onProgress) {
         onProgress({
           phase:   'searching',
           message: `Completed ${done}/${total} — "${kw}" in ${loc}`,
-          current: done, total, found: 0, apiCalls: 0,
+          current: done, total, found: 0, apiCalls: totalApiCallsSoFar,
         });
       }
-      return res;
-    })
-  );
+    } catch (err) {
+      if (isAbortError(err)) {
+        err.partialApiCalls = Number(err.partialApiCalls ?? 0) + totalApiCallsSoFar;
+      }
+      throw err;
+    }
+  }
 
   // ── Flatten + deduplicate by place.id across all pairs ───────────────────
   const seen        = new Set();
@@ -976,6 +1426,9 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
       }
     }
   }
+
+  // Re-sort combined results by confidence score (product searches have it; others get 0)
+  combined.sort((a, b) => (b.confidenceScore || 0) - (a.confidenceScore || 0));
 
   if (onProgress) {
     onProgress({

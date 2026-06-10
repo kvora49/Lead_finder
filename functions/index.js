@@ -110,27 +110,20 @@ const currentMonthKey = () => {
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim().toLowerCase());
 
 const parseUserLimit = (creditLimitRaw) => {
-  if (creditLimitRaw === "unlimited") return { isUnlimited: true, limitUsd: Infinity };
-
+  if (creditLimitRaw === "unlimited") return { isUnlimited: true, limitCredits: Infinity };
   if (typeof creditLimitRaw === "number") {
-    return { isUnlimited: false, limitUsd: Math.max(0, creditLimitRaw) };
+    return { isUnlimited: false, limitCredits: Math.max(0, Math.round(creditLimitRaw)) };
   }
-
   if (typeof creditLimitRaw === "string" && creditLimitRaw.trim() !== "") {
-    const parsed = Number.parseFloat(creditLimitRaw);
-    return {
-      isUnlimited: false,
-      limitUsd: Number.isFinite(parsed) ? Math.max(0, parsed) : 0,
-    };
+    const n = Number.parseFloat(creditLimitRaw);
+    if (Number.isFinite(n)) return { isUnlimited: false, limitCredits: Math.max(0, Math.round(n)) };
   }
-
-  return { isUnlimited: false, limitUsd: 0 };
+  return { isUnlimited: false, limitCredits: 2800 }; // DEFAULT_USER_CREDITS
 };
 
-const getMonthlyCostForCurrentMonth = (userData, monthKey) => {
+const getMonthlyCreditsForCurrentMonth = (userData, monthKey) => {
   if (!userData || userData.creditMonth !== monthKey) return 0;
-  const n = Number.parseFloat(userData.userMonthlyApiCost ?? 0);
-  return Number.isFinite(n) ? Math.max(0, n) : 0;
+  return Math.max(0, Math.round(Number(userData.userMonthlyCreditsUsed ?? 0)));
 };
 
 const hashOtp = (uid, code) =>
@@ -150,14 +143,14 @@ exports.sendCreditAlertOnUsageThreshold = onDocumentUpdated(
     if (!userId || !afterData?.email) return;
 
     const monthKey = currentMonthKey();
-    const prevCost = getMonthlyCostForCurrentMonth(beforeData, monthKey);
-    const nextCost = getMonthlyCostForCurrentMonth(afterData, monthKey);
+    const prevCredits = getMonthlyCreditsForCurrentMonth(beforeData, monthKey);
+    const nextCredits = getMonthlyCreditsForCurrentMonth(afterData, monthKey);
 
     // Skip non-usage updates and month reset transitions.
-    if (nextCost <= prevCost) return;
+    if (nextCredits <= prevCredits) return;
 
-    const { isUnlimited, limitUsd } = parseUserLimit(afterData.creditLimit);
-    if (isUnlimited || !Number.isFinite(limitUsd) || limitUsd <= 0) return;
+    const { isUnlimited, limitCredits } = parseUserLimit(afterData.creditLimit);
+    if (isUnlimited || !Number.isFinite(limitCredits) || limitCredits <= 0) return;
 
     const settingsSnap = await db.collection("systemConfig").doc("globalSettings").get();
     const settings = settingsSnap.exists ? settingsSnap.data() : {};
@@ -171,8 +164,8 @@ exports.sendCreditAlertOnUsageThreshold = onDocumentUpdated(
       ? Math.min(Math.max(parsedThreshold, 1), 100)
       : 80;
 
-    const prevPct = (prevCost / Math.max(limitUsd, 0.0001)) * 100;
-    const nextPct = (nextCost / Math.max(limitUsd, 0.0001)) * 100;
+    const prevPct = (prevCredits / Math.max(limitCredits, 1)) * 100;
+    const nextPct = (nextCredits / Math.max(limitCredits, 1)) * 100;
 
     // Fire only once on threshold crossing from below → above.
     if (nextPct < thresholdPct || prevPct >= thresholdPct) return;
@@ -193,7 +186,7 @@ exports.sendCreditAlertOnUsageThreshold = onDocumentUpdated(
     const trackingSnap = await trackingRef.get();
     if (trackingSnap.exists) return;
 
-    const remainingUsd = Math.max(0, +(limitUsd - nextCost).toFixed(2));
+    const creditsRemaining = Math.max(0, limitCredits - nextCredits);
     const roundedPct = +Math.min(nextPct, 100).toFixed(1);
 
     const transporter = createTransporter();
@@ -208,10 +201,10 @@ exports.sendCreditAlertOnUsageThreshold = onDocumentUpdated(
         <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#0f172a;">
           <h2 style="margin-bottom:8px;">Credit Usage Alert</h2>
           <p><strong>User:</strong> ${userEmail || "Unknown"}</p>
-          <p><strong>Usage (%):</strong> ${roundedPct}</p>
-          <p><strong>Remaining (USD):</strong> ${remainingUsd.toFixed(2)}</p>
-          <p><strong>Monthly Used (USD):</strong> ${nextCost.toFixed(2)}</p>
-          <p><strong>Monthly Limit (USD):</strong> ${limitUsd.toFixed(2)}</p>
+          <p><strong>Usage (%):</strong> ${roundedPct}%</p>
+          <p><strong>Credits Remaining:</strong> ${creditsRemaining.toLocaleString()} / ${limitCredits.toLocaleString()}</p>
+          <p><strong>Credits Used:</strong> ${nextCredits.toLocaleString()} (${roundedPct}% of allocation)</p>
+          <p><strong>Monthly Allocation:</strong> ${limitCredits.toLocaleString()} credits</p>
           <p><strong>Reason:</strong> Low credits</p>
           <p><strong>Timestamp:</strong> ${sentAt}</p>
         </div>
@@ -446,10 +439,14 @@ exports.sendSystemEmail = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS },
         <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#0f172a;">
           <h2 style="margin-bottom:8px;">${isRequest ? 'Credit Top-up Request' : 'Credit Usage Alert'}</h2>
           <p><strong>User:</strong> ${effectiveUserEmail || 'Unknown'}</p>
-          <p><strong>Requested Amount (USD):</strong> ${Number(payload.requestedAmountUsd || 0).toFixed(2)}</p>
-          <p><strong>Remaining (USD):</strong> ${Number(payload.remainingUsd || 0).toFixed(2)}</p>
-          <p><strong>Usage (%):</strong> ${Number(payload.usagePct || 0).toFixed(1)}</p>
-          <p><strong>Reason:</strong> ${isRequest ? (payload.reason || 'N/A') : 'Low credits'}</p>
+          <p><strong>${isRequest ? 'Requested Credits' : 'Credits Used'}:</strong> ${
+            isRequest
+              ? Number(payload.requestedAmountCredits || payload.requestedAmountUsd || 0).toLocaleString()
+              : Number(payload.creditsUsed || 0).toLocaleString()
+          } credits</p>
+          <p><strong>Credits Remaining:</strong> ${Number(payload.creditsRemaining || 0).toLocaleString()} credits</p>
+          <p><strong>Usage (%):</strong> ${Number(payload.usagePct || 0).toFixed(1)}%</p>
+          <p><strong>Reason:</strong> ${isRequest ? (payload.reason || 'N/A') : `Low credits — ${Number(payload.usagePct || 0).toFixed(1)}% of monthly allocation used`}</p>
           <p><strong>Timestamp:</strong> ${sentAt}</p>
         </div>
       `,
@@ -765,9 +762,101 @@ exports.helloWorld = onRequest((request, response) => {
   response.send("Hello from Firebase!");
 });
 
-// Simple test function
-exports.helloWorld = onRequest((request, response) => {
-  logger.info("Hello logs!", {structuredData: true});
-  response.send("Hello from Firebase!");
-});
+// ════════════════════════════════════════════════════════════════════════════
+// onGlobalUsageUpdated
+// Firestore trigger on system/global_usage.
+// Sends admin-only emails when Enterprise SKU hits 80% or 95% of free cap.
+// ════════════════════════════════════════════════════════════════════════════
+const SKU_FREE_CAPS   = { enterprise: 7000 };
+const SKU_ADMIN_ALERT = { enterprise: 5600 };   // 80%
+const SKU_KILL_SWITCH = { enterprise: 6650 };   // 95%
+
+exports.onGlobalUsageUpdated = onDocumentUpdated(
+  { document: "system/global_usage", timeoutSeconds: 30, secrets: EMAIL_SECRETS },
+  async (event) => {
+    const after  = event.data.after.data()  || {};
+    const before = event.data.before.data() || {};
+    const month  = after.month;
+
+    if (!month) return;
+
+    const tier           = "enterprise";
+    const currentCalls   = after[`sku_${tier}_calls`]  ?? 0;
+    const prevCalls      = before[`sku_${tier}_calls`] ?? 0;
+
+    const crossedAlert = prevCalls < SKU_ADMIN_ALERT[tier] && currentCalls >= SKU_ADMIN_ALERT[tier];
+    const crossedKill  = prevCalls < SKU_KILL_SWITCH[tier] && currentCalls >= SKU_KILL_SWITCH[tier];
+
+    if (!crossedAlert && !crossedKill) return;
+
+    const settingsSnap = await db.collection("systemConfig").doc("globalSettings").get();
+    const settings     = settingsSnap.exists ? settingsSnap.data() : {};
+
+    if (!(settings.emailNotificationsEnabled ?? true)) return;
+
+    const adminEmails = parseAdminEmails(settings.adminNotificationEmail || "");
+    if (adminEmails.length === 0) {
+      logger.warn("onGlobalUsageUpdated: no admin emails configured");
+      return;
+    }
+
+    const alertType = crossedKill ? "HARD_KILL_95PCT" : "ADMIN_ALERT_80PCT";
+    const pct       = ((currentCalls / SKU_FREE_CAPS[tier]) * 100).toFixed(1);
+
+    const trackingId  = `admin-${alertType}-${tier}-${month}`;
+    const trackingRef = db.collection("admin_alert_dispatches").doc(trackingId);
+    if ((await trackingRef.get()).exists) return;  // already sent this month
+
+    const smtpReady = process.env.SMTP_USER && process.env.SMTP_PASS;
+    if (!smtpReady) {
+      logger.warn("onGlobalUsageUpdated: SMTP not configured");
+      return;
+    }
+
+    const creditsUsed = currentCalls * 10;
+    const creditsCap  = SKU_FREE_CAPS[tier] * 10;
+
+    const subject = crossedKill
+      ? `HARD KILL: Enterprise API at ${pct}% — All searches stopped`
+      : `WARNING: Enterprise API at ${pct}% — Approaching limit`;
+
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#0f172a;">
+        <h2 style="color:${crossedKill ? '#dc2626' : '#d97706'}">
+          ${crossedKill ? "Platform Hard Kill Triggered" : "Platform Usage Warning"}
+        </h2>
+        <p><strong>Tier:</strong> ENTERPRISE (phone, website, ratings, reviews)</p>
+        <p><strong>API Calls Used:</strong> ${currentCalls.toLocaleString()} / ${SKU_FREE_CAPS[tier].toLocaleString()}</p>
+        <p><strong>Credits Used:</strong> ${creditsUsed.toLocaleString()} / ${creditsCap.toLocaleString()}</p>
+        <p><strong>Percent Used:</strong> ${pct}%</p>
+        <p><strong>Status:</strong> ${crossedKill ? "ALL SEARCHES BLOCKED" : `Approaching kill switch (${SKU_KILL_SWITCH[tier].toLocaleString()} calls)`}</p>
+        <p><strong>Month:</strong> ${month}</p>
+        <p><strong>Resets:</strong> 1st of next month (automatic)</p>
+        ${crossedKill
+          ? "<p style='color:#dc2626'>Users are now blocked from new searches. Cached results still work. Resets automatically on the 1st.</p>"
+          : `<p>No action needed yet. Hard kill triggers at ${SKU_KILL_SWITCH[tier].toLocaleString()} calls (95%).</p>`}
+        <p style="color:#6b7280;font-size:12px">Sent: ${formatAlertTimestamp()}</p>
+      </div>
+    `;
+
+    const transporter = createTransporter();
+    await transporter.sendMail({
+      from:    getFormattedFrom(),
+      to:      adminEmails.join(", "),
+      subject,
+      html,
+    });
+
+    await trackingRef.set({
+      sent:      true,
+      tier,
+      pct,
+      month,
+      alertType,
+      sentAt:    admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info("Admin platform alert sent", { alertType, tier, pct, month });
+  }
+);
 

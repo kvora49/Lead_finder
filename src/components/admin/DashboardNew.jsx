@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Users,
   Activity,
@@ -7,8 +7,8 @@ import {
   Zap,
   BarChart3,
   Calendar,
-  DollarSign,
   RefreshCw,
+  DollarSign,
 } from 'lucide-react';
 import {
   collection,
@@ -38,8 +38,8 @@ import {
   Bar,
 } from 'recharts';
 
-const FREE_TIER_USD = CREDIT_CONFIG.FREE_TIER_USD ?? 200;
-const PLATFORM_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD ?? 195;
+const ENTERPRISE_CAP = CREDIT_CONFIG.SKU_FREE_CAPS?.enterprise ?? 7000;
+// PLATFORM_CAP_USD removed — use ENTERPRISE_CAP
 
 const DashboardNew = () => {
   const navigate = useNavigate();
@@ -47,7 +47,7 @@ const DashboardNew = () => {
     totalUsers:    0,
     activeUsers7d: 0,
     totalApiCalls: 0,
-    monthlyCost:   0,
+    monthlyCost:   0, enterpriseCalls: 0,
     freeTierPct:   0,
     currentMonth:  '',
   });
@@ -78,19 +78,17 @@ const DashboardNew = () => {
       let totalApiCalls = 0;
       let monthlyCost   = 0;
       let currentMonth  = '';
+      let enterpriseCalls = 0;
       if (globalSnap.exists()) {
         const d   = globalSnap.data();
         totalApiCalls = d.totalApiCalls ?? 0;
-        monthlyCost   = d.monthly_api_cost ?? 0;
+        enterpriseCalls = d.sku_enterprise_calls ?? 0;
         currentMonth  = d.month ?? '';
       }
 
-      const freeTierPct = Math.min(
-        100,
-        parseFloat(((monthlyCost / PLATFORM_CAP_USD) * 100).toFixed(1))
-      );
+      const freeTierPct = Math.min(100, parseFloat(((enterpriseCalls / ENTERPRISE_CAP) * 100).toFixed(1)));
 
-      setStats({ totalUsers, activeUsers7d, totalApiCalls, monthlyCost, freeTierPct, currentMonth });
+      setStats({ totalUsers, activeUsers7d, totalApiCalls, monthlyCost: 0, enterpriseCalls, freeTierPct, currentMonth });
 
       // 4. Recent system events (7-day bar)
       const logsSnap = await getDocs(
@@ -235,10 +233,10 @@ const DashboardNew = () => {
           accent="purple"
         />
         <StatCard
-          icon={DollarSign}
+          icon={Zap}
           label="Monthly API Cost"
-          value={`$${Number(stats.monthlyCost).toFixed(2)}`}
-          sub={`${stats.freeTierPct}% of $${PLATFORM_CAP_USD} platform cap`}
+          value={`${(stats.enterpriseCalls || 0).toLocaleString()}`}
+          sub={`${stats.freeTierPct}% of 7,000 Enterprise calls`}
           accent={stats.freeTierPct > 80 ? 'red' : stats.freeTierPct > 50 ? 'orange' : 'green'}
         />
       </div>
@@ -254,7 +252,7 @@ const DashboardNew = () => {
             stats.freeTierPct > 80 ? 'text-red-400' :
             stats.freeTierPct > 50 ? 'text-orange-400' : 'text-green-400'
           }`}>
-            ${Number(stats.monthlyCost).toFixed(2)} / $${PLATFORM_CAP_USD}
+            ${stats.enterpriseCalls || 0} / 7,000 Enterprise calls
           </span>
         </div>
         <div className="w-full bg-slate-700 rounded-full h-4 overflow-hidden">
@@ -267,9 +265,9 @@ const DashboardNew = () => {
           />
         </div>
         <div className="flex justify-between mt-2 text-xs text-gray-500">
-          <span>$0</span>
+          <span>0</span>
           <span className="text-gray-400">{stats.freeTierPct}% used this month</span>
-          <span>$${PLATFORM_CAP_USD} platform cap</span>
+          <span>7,000 Enterprise calls (free cap)</span>
         </div>
       </div>
 
@@ -331,11 +329,11 @@ const DashboardNew = () => {
                 const d     = i + 1;
                 const label = new Date(year, month, d)
                   .toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-                if (d > todayDay) return { day: label, cost: null, limit: PLATFORM_CAP_USD };
+                if (d > todayDay) return { day: label, cost: null, limit: 7000 };
                 // eased growth curve (ease-in-out quad)
                 const t     = d / todayDay;
                 const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-                return { day: label, cost: parseFloat((total * eased).toFixed(2)), limit: PLATFORM_CAP_USD };
+                return { day: label, cost: Math.round(total * eased), limit: 7000 };
               });
             })()}>
               <defs>
@@ -355,7 +353,7 @@ const DashboardNew = () => {
                 tick={{ fontSize: 10 }}
                 interval={Math.ceil(new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate() / 6) - 1}
               />
-              <YAxis stroke="#6b7280" tick={{ fontSize: 11 }} tickFormatter={v => `$${v}`} width={48} />
+              <YAxis stroke="#6b7280" tick={{ fontSize: 11 }} tickFormatter={v => v.toLocaleString()} width={48} />
               <Tooltip
                 contentStyle={{
                   backgroundColor: '#0f172a',
@@ -367,7 +365,7 @@ const DashboardNew = () => {
                 labelStyle={{ color: '#94a3b8', fontSize: 11, marginBottom: 4 }}
                 itemStyle={{ color: '#f1f5f9', fontSize: 12 }}
                 formatter={(v, name) => [
-                  `$${Number(v).toFixed(2)}`,
+                  v.toLocaleString(),
                   name === 'cost' ? 'API Cost' : 'Platform Cap',
                 ]}
               />
@@ -419,7 +417,7 @@ const DashboardNew = () => {
               : Free Tier {stats.freeTierPct}% Used
             </p>
             <p className="text-gray-300 text-sm">
-              Monthly API cost is ${Number(stats.monthlyCost).toFixed(2)} of the ${PLATFORM_CAP_USD} platform cap.
+              Enterprise SKU usage: ${stats.enterpriseCalls || 0} of 7,000 free calls this month.
               {stats.freeTierPct > 95
                 ? ' Billing will begin immediately — action required!'
                 : ' Review usage or increase credit limits to avoid overage charges.'}

@@ -45,9 +45,7 @@ const SidebarContent = ({ onClose }) => {
   const navigate = useNavigate();
   const { currentUser, userProfile, signOut, isAdmin } = useAuth();
   const {
-    myMonthlyUsdUsed,
-    myMonthlyLimitUsd,
-    myCreditRemainingUsd,
+            myCreditsUsed, myCreditsLimit, myCreditsRemaining,
     myCreditPctUsed,
     myCreditIsUnlimited,
   } = useCredit();
@@ -133,11 +131,11 @@ const SidebarContent = ({ onClose }) => {
           }`}>
             {myCreditIsUnlimited
               ? 'Unlimited'
-              : `$${(myMonthlyUsdUsed ?? 0).toFixed(2)} / $${(myMonthlyLimitUsd ?? 0).toFixed(2)}`}
+              : `${(myCreditsUsed ?? 0).toLocaleString()} / ${(myCreditsLimit ?? 0).toLocaleString()} credits`}
           </span>
         </div>
 
-        {!myCreditIsUnlimited && (myCreditRemainingUsd ?? 0) < 5 && (
+        {!myCreditIsUnlimited && (myCreditsRemaining ?? 0) < 280 && (
           <p className="mt-1.5 text-[10px] text-amber-500 font-medium">
             Low remaining monthly credits
           </p>

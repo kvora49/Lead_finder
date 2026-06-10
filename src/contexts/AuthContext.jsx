@@ -44,7 +44,7 @@ const loadRuntimeAccessSettings = async () => {
     const data = snap.exists() ? snap.data() : {};
 
     const rawDefaultLimit = data.defaultUserCreditLimit;
-    let defaultUserCreditLimit = CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD;
+    let defaultUserCreditLimit = CREDIT_CONFIG.DEFAULT_USER_CREDITS;
     if (rawDefaultLimit === 'unlimited') {
       defaultUserCreditLimit = 'unlimited';
     } else {
@@ -61,7 +61,7 @@ const loadRuntimeAccessSettings = async () => {
   } catch {
     return {
       autoApproveUsers: true,
-      defaultUserCreditLimit: CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD,
+      defaultUserCreditLimit: CREDIT_CONFIG.DEFAULT_USER_CREDITS,
     };
   }
 };

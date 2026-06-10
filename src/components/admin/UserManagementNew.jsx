@@ -60,7 +60,7 @@ const currentMonthStr = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
-const formatUsd = (value) => `$${Number(value || 0).toFixed(2)}`;
+const formatCredits = (value) => value === 'unlimited' ? 'Unlimited' : `${Number(value || 0).toLocaleString()} credits`;
 
 /** Format a Date as DD/MM/YYYY */
 const formatAdminDate = (date) => {
@@ -128,7 +128,7 @@ const CreditBar = ({ used, limit: lim }) => {
   const bar = pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-emerald-500';
   return (
     <div className="space-y-1 min-w-[80px]">
-      <span className="text-xs text-white font-medium">{formatUsd(lim)}</span>
+      <span className="text-xs text-white font-medium">{formatCredits(lim)}</span>
       <div className="h-1 rounded-full bg-slate-700">
         <div className={`h-1 rounded-full ${bar}`} style={{ width: `${pct}%` }} />
       </div>
@@ -147,7 +147,7 @@ const CreditModal = ({ user, onClose, onUpdate }) => {
 
   const handleSave = () => {
     const parsed = Number.parseFloat(amount);
-    const val = limitType === 'unlimited' ? 'unlimited' : limitType === 'suspended' ? 0 : (Number.isFinite(parsed) ? Math.max(0, +parsed.toFixed(2)) : 0);
+    const val = limitType === 'unlimited' ? 'unlimited' : limitType === 'suspended' ? 0 : (Number.isFinite(parsed) ? Math.max(0, +parsed) : 0);
     onUpdate(user.id, val);
     onClose();
   };
@@ -167,8 +167,8 @@ const CreditModal = ({ user, onClose, onUpdate }) => {
         <div className="p-6 space-y-3">
           {[
             { key: 'unlimited', label: 'Unlimited',             desc: 'No credit restrictions',    accent: 'violet' },
-            { key: 'custom',    label: 'Custom Monthly Limit',  desc: 'Set per-user USD allocation',accent: 'blue'   },
-            { key: 'suspended', label: 'Suspended (0 credits)', desc: 'Block all credit usage',     accent: 'red'    },
+            { key: 'custom',    label: 'Custom Monthly Limit',  desc: 'Set per-user credit allocation',accent: 'blue'   },
+            { key: 'suspended', label: 'Suspended (0 credits)', desc: 'Block all searches (0 credits)',     accent: 'red'    },
           ].map(({ key, label, desc, accent }) => (
             <button
               key={key}
@@ -188,13 +188,13 @@ const CreditModal = ({ user, onClose, onUpdate }) => {
               type="number"
               value={amount}
               onChange={e => setAmount(e.target.value)}
-              placeholder="e.g. 50"
+              placeholder="e.g. 2800"
               className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           )}
           <div className="text-xs text-slate-500 bg-slate-900/50 rounded-xl p-3 space-y-1">
-            <div className="flex justify-between"><span>Current month spent:</span><span className="text-white">{formatUsd(user.monthlyCreditUsdUsed)}</span></div>
-            <div className="flex justify-between"><span>Current limit:</span><span className="text-white">{user.creditLimit === 'unlimited' ? 'Unlimited' : formatUsd(user.creditLimit)}</span></div>
+            <div className="flex justify-between"><span>Credits used this month:</span><span className="text-white">{formatCredits(user.creditsUsed)}</span></div>
+            <div className="flex justify-between"><span>Credit limit:</span><span className="text-white">{user.creditLimit === 'unlimited' ? 'Unlimited' : formatCredits(user.creditLimit)}</span></div>
           </div>
           <div className="flex gap-3 pt-1">
             <button onClick={onClose} className="flex-1 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-sm transition-colors">Cancel</button>
@@ -242,9 +242,9 @@ const UserDetailModal = ({ user, onClose }) => (
             ['Display Name', user.displayName],
             ['User ID', user.id],
             ['Role', ghostRoleLabel(user.role)],
-            ['API Calls Used', (user.creditsUsed ?? 0).toLocaleString()],
-            ['Spent This Month', formatUsd(user.monthlyCreditUsdUsed)],
-            ['Credit Limit', user.creditLimit === 'unlimited' ? 'Unlimited' : formatUsd(user.creditLimit)],
+            ['API Calls Used', (user.apiCallsUsed ?? 0).toLocaleString()],
+            ['Spent This Month', formatCredits(user.creditsUsed)],
+            ['Credit Limit', user.creditLimit === 'unlimited' ? 'Unlimited' : formatCredits(user.creditLimit)],
             ['Searches', (user.searchCount ?? 0).toLocaleString()],
             ['Registered', user.createdAt ? formatAdminDate(user.createdAt) : '—'],
             ['Last Active', user.lastActive ? formatAdminDate(user.lastActive) : 'Never'],
@@ -449,11 +449,11 @@ const UserManagementNew = () => {
       createdAt:   u.createdAt?.toDate?.()  ?? new Date(0),
       lastActive:  u.lastActive?.toDate?.() ?? null,
       credits:     u.credits      ?? 0,
-      creditsUsed: effectiveMetrics.monthlyApiCalls,
-      monthlyCreditUsdUsed: effectiveMetrics.monthlyApiCost,
+      apiCallsUsed: effectiveMetrics.monthlyApiCalls,
+      creditsUsed: effectiveMetrics.monthlyCreditsUsed ?? 0,
       searchCount: u.searchCount  ?? 0,
       status:      resolvedStatus,
-      creditLimit: u.creditLimit   ?? 50,
+      creditLimit: u.creditLimit   ?? 2800,
       role:        u.role          ?? 'user',
     };
   };
@@ -629,16 +629,16 @@ const UserManagementNew = () => {
 
   const exportCsv = () => {
     const rows = [
-      ['ID', 'Email', 'Name', 'Role', 'Status', 'Monthly Spend (USD)', 'Monthly Limit (USD)', 'API Calls Used', 'Registered'].join(','),
+      ['ID', 'Email', 'Name', 'Role', 'Status', 'Monthly Credits Used', 'Monthly Credit Limit', 'API Calls Used', 'Registered'].join(','),
       ...filteredUsers.map(u => [
         u.id,
         u.email,
         u.displayName,
         ghostRoleLabel(u.role),
         u.status,
-        Number(u.monthlyCreditUsdUsed || 0).toFixed(2),
-        u.creditLimit === 'unlimited' ? 'unlimited' : Number(u.creditLimit || 0).toFixed(2),
-        u.creditsUsed,
+        Number(u.creditsUsed || 0),
+        u.creditLimit === 'unlimited' ? 'unlimited' : Number(u.creditLimit || 0),
+        Number(u.apiCallsUsed || 0),
         u.createdAt ? formatAdminDate(u.createdAt) : '—',
       ].join(',')),
     ].join('\n');
@@ -667,7 +667,7 @@ const UserManagementNew = () => {
           });
         })
       );
-      toast.success(`$${amount} granted to ${snap.docs.length} users`);
+      toast.success(`${amount} credits granted to ${snap.docs.length} users`);
       setShowBulkGrantModal(false);
       setBulkGrantAmount('');
     } catch (err) {
@@ -974,11 +974,11 @@ const UserManagementNew = () => {
                         <td className="px-4 py-4">
                           <div className="flex items-center gap-1.5 text-xs font-medium text-white">
                             <BarChart3 className="w-3.5 h-3.5 text-blue-400" />
-                            {formatUsd(user.monthlyCreditUsdUsed)}
+                            {formatCredits(user.creditsUsed)}
                           </div>
                         </td>
                         <td className="px-4 py-4">
-                          <CreditBar used={user.monthlyCreditUsdUsed} limit={user.creditLimit} />
+                          <CreditBar used={user.creditsUsed} limit={user.creditLimit} />
                         </td>
                         <td className="px-4 py-4">
                           <StatusBadge status={user.status} />
@@ -1117,7 +1117,7 @@ const UserManagementNew = () => {
               Adds this amount to every user's credit limit simultaneously.
             </p>
             <div className="flex items-center gap-2 mb-4">
-              <span className="text-sm text-gray-400">$</span>
+              <span className="text-sm text-gray-400">credits</span>
               <input
                 type="number"
                 min="0.01"

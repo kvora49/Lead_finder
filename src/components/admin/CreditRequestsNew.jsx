@@ -3,7 +3,7 @@ import {
   CheckCircle,
   Clock,
   XCircle,
-  DollarSign,
+  Zap,
   Mail,
   Calendar,
   MessageSquare,
@@ -87,7 +87,7 @@ const CreditRequestsNew = () => {
   }, [requests, filterStatus, searchTerm]);
 
   const handleApprove = async (requestId, request) => {
-    const approvedAmount = approvalAmount[requestId] || request.requestedAmountUsd;
+    const approvedAmount = approvalAmount[requestId] || request.requestedAmountCredits;
 
     if (approvedAmount <= 0) {
       toast.error('Approved amount must be greater than 0');
@@ -114,7 +114,7 @@ const CreditRequestsNew = () => {
         lastCreditUpdate: serverTimestamp(),
       });
 
-      toast.success(`Approved $${approvedAmount.toFixed(2)} for ${request.userEmail}`);
+      toast.success(`Approved ${approvedAmount.toLocaleString()} credits for ${request.userEmail}`);
       setApprovalAmount((prev) => {
         const next = { ...prev };
         delete next[requestId];
@@ -249,7 +249,7 @@ const CreditRequestsNew = () => {
                   <div className="flex-1 min-w-0">
                     <p className="text-white font-semibold truncate">{request.userEmail}</p>
                     <p className="text-sm text-gray-400 mt-0.5">
-                      ${request.requestedAmountUsd?.toFixed(2) || '0.00'} requested • {request.scope} search
+                      ${request.requestedAmountCredits?.toFixed(2) || '0.00'} requested • {request.scope} search
                     </p>
                   </div>
                   {getStatusBadge(request.status)}
@@ -277,11 +277,11 @@ const CreditRequestsNew = () => {
                       </div>
                       <div>
                         <p className="text-xs text-gray-400 uppercase tracking-widest mb-1">Estimated Cost</p>
-                        <p className="text-white font-medium">${request.estimatedCostUsd?.toFixed(2) || '0.00'}</p>
+                        <p className="text-white font-medium">{(request.estimatedCostCredits || request.requestedAmountCredits || 0).toLocaleString()} credits</p>
                       </div>
                       <div>
                         <p className="text-xs text-gray-400 uppercase tracking-widest mb-1">Current Remaining</p>
-                        <p className="text-emerald-400 font-medium">${request.remainingUsd?.toFixed(2) || '0.00'}</p>
+                        <p className="text-emerald-400 font-medium">{(request.creditsRemaining || 0).toLocaleString()} remaining</p>
                       </div>
                     </div>
 
@@ -314,13 +314,13 @@ const CreditRequestsNew = () => {
                         <p className="text-xs text-gray-400 uppercase tracking-widest mb-3">Approval Amount</p>
                         <div className="flex gap-3">
                           <div className="flex-1 relative">
-                            <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                            <Zap className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
                             <input
                               type="number"
                               min="0"
                               max="1000"
                               step="5"
-                              value={approvalAmount[request.id] ?? request.requestedAmountUsd ?? 0}
+                              value={approvalAmount[request.id] ?? request.requestedAmountCredits ?? 0}
                               onChange={(e) =>
                                 setApprovalAmount((prev) => ({
                                   ...prev,
@@ -331,7 +331,7 @@ const CreditRequestsNew = () => {
                             />
                           </div>
                           <span className="text-sm text-gray-400 self-center">
-                            (requested:${request.requestedAmountUsd?.toFixed(2) || '0.00'})
+                            (requested:${request.requestedAmountCredits?.toFixed(2) || '0.00'})
                           </span>
                         </div>
                       </div>

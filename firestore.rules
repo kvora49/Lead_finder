@@ -148,6 +148,24 @@ service cloud.firestore {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // KEYWORD INTENT CACHE   keyword_intent_cache/{doc}
+    // Permanent cache of Gemini AI intent classifications. Shared across
+    // all users — any authenticated user can read/write.
+    // ═══════════════════════════════════════════════════════════════════════
+    match /keyword_intent_cache/{doc} {
+      allow read, write: if isAuth();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // GEMINI USAGE TRACKER   gemini_usage/{doc}
+    // Tracks monthly Gemini API call count for rate limit protection.
+    // Read by all authenticated users; written by the Intent Engine.
+    // ═══════════════════════════════════════════════════════════════════════
+    match /gemini_usage/{doc} {
+      allow read, write: if isAuth();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // OTP CODES   otp_codes/{email}
     // Temporary short-lived documents written by AdminGatekeeper during the
     // email verification flow. Auto-deleted after successful verify.

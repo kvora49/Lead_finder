@@ -1,10 +1,14 @@
 /**
- * Lead Finder - Credit Service
+ * Lead Finder - Credit Service (SKU-Based)
  *
  * Model:
- * - Global monthly usage is tracked in system/global_usage and capped at $195.
- * - Each user has a dynamic monthly USD allocation (users/{uid}.creditLimit).
- * - Actual Google API usage cost is charged from measured apiCalls only.
+ * - All users share a single API key.
+ * - Google bills at the highest SKU tier present in FIELD_MASK (Enterprise).
+ * - Enterprise free cap: 7,000 calls/month (India region).
+ * - Each call costs 10 credits. All users get 2,800 credits/month.
+ * - Platform hard kill at 95% of Enterprise cap (6,650 calls).
+ * - Admin email alert at 80% of Enterprise cap (5,600 calls) via Cloud Function trigger.
+ * - All users have the same credit allocation — no tiers, no pro/standard split.
  */
 
 import { db } from '../firebase';
@@ -14,209 +18,222 @@ import {
   runTransaction,
   getDoc,
   setDoc,
+  updateDoc,
   serverTimestamp,
+  increment,
 } from 'firebase/firestore';
 import { CREDIT_CONFIG } from '../config';
 
-const COST_PER_CALL   = CREDIT_CONFIG.COST_PER_REQUEST_USD; // $0.032
-const HARD_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD || 195.00;
-const DEFAULT_USER_BUDGET_USD = CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD || 50;
+const DEFAULT_USER_CREDITS = CREDIT_CONFIG.DEFAULT_USER_CREDITS; // 2800
 const GLOBAL_DOC_PATH = ['system', 'global_usage'];
-
-/** Total free calls per month (for display) */
-export const MONTHLY_FREE_CALLS = Math.floor(HARD_CAP_USD / COST_PER_CALL); // 6 093
 
 const currentMonth = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
+// ── User credit limit parser ──────────────────────────────────────────────────
+// creditLimit field stores integer credits or 'unlimited'.
+// No tiers — all users are equal. Admin can override per-user if needed.
 const parseUserLimit = (creditLimitRaw) => {
-  if (creditLimitRaw === 'unlimited') return { isUnlimited: true, limitUsd: Infinity };
+  if (creditLimitRaw === 'unlimited') return { isUnlimited: true, limitCredits: Infinity };
   if (typeof creditLimitRaw === 'number') {
-    return { isUnlimited: false, limitUsd: Math.max(0, creditLimitRaw) };
+    return { isUnlimited: false, limitCredits: Math.max(0, Math.round(creditLimitRaw)) };
   }
   if (typeof creditLimitRaw === 'string' && creditLimitRaw.trim() !== '') {
     const n = Number.parseFloat(creditLimitRaw);
-    if (Number.isFinite(n)) return { isUnlimited: false, limitUsd: Math.max(0, n) };
+    if (Number.isFinite(n)) return { isUnlimited: false, limitCredits: Math.max(0, Math.round(n)) };
   }
-  return { isUnlimited: false, limitUsd: DEFAULT_USER_BUDGET_USD };
+  return { isUnlimited: false, limitCredits: DEFAULT_USER_CREDITS };
 };
 
-const parseDefaultUserLimit = (raw) => {
-  if (raw === 'unlimited') return 'unlimited';
-  const n = Number.parseFloat(raw);
-  if (Number.isFinite(n) && n >= 0) return n;
-  return DEFAULT_USER_BUDGET_USD;
-};
-
+// ── Runtime settings (reads systemConfig/globalSettings for overrides) ────────
 export const getCreditRuntimeSettings = async () => {
   try {
     const snap = await getDoc(doc(db, 'systemConfig', 'globalSettings'));
     if (!snap.exists()) {
-      return {
-        globalCreditLimitUsd: HARD_CAP_USD,
-        defaultUserCreditLimitUsd: DEFAULT_USER_BUDGET_USD,
-      };
+      return { globalCreditLimit: CREDIT_CONFIG.PLATFORM_CREDITS_POOL };
     }
-
     const data = snap.data() || {};
-    const configuredGlobal = Number.parseFloat(data.globalCreditLimit);
-    const safeGlobal = Number.isFinite(configuredGlobal) && configuredGlobal > 0
-      ? configuredGlobal
-      : HARD_CAP_USD;
-
-    // Global setting can reduce spending below hard cap, but never exceed hard cap.
-    const effectiveGlobalLimit = Math.min(safeGlobal, HARD_CAP_USD);
-    const parsedDefaultUser = parseDefaultUserLimit(data.defaultUserCreditLimit);
-
-    return {
-      globalCreditLimitUsd: effectiveGlobalLimit,
-      defaultUserCreditLimitUsd: parsedDefaultUser,
-    };
+    const configured = Number.parseInt(data.globalCreditLimit, 10);
+    const effective = Number.isFinite(configured) && configured > 0
+      ? Math.min(configured, CREDIT_CONFIG.PLATFORM_CREDITS_POOL)
+      : CREDIT_CONFIG.PLATFORM_CREDITS_POOL;
+    return { globalCreditLimit: effective };
   } catch {
-    return {
-      globalCreditLimitUsd: HARD_CAP_USD,
-      defaultUserCreditLimitUsd: DEFAULT_USER_BUDGET_USD,
-    };
+    return { globalCreditLimit: CREDIT_CONFIG.PLATFORM_CREDITS_POOL };
   }
 };
 
+// ── Effective user metrics for current month ──────────────────────────────────
 export const getEffectiveUserMonthMetrics = (userData = {}, month = currentMonth()) => {
-  const legacyApiCalls = Number(userData.creditsUsed ?? 0);
-  const legacyCostUsd = +(legacyApiCalls * COST_PER_CALL).toFixed(4);
-
-  const hasCurrentMonthRecord = userData.creditMonth === month;
-  const explicitApiCalls = hasCurrentMonthRecord ? Number(userData.userMonthlyApiCalls ?? 0) : 0;
-  const explicitCostUsd = hasCurrentMonthRecord ? +(Number(userData.userMonthlyApiCost ?? 0)).toFixed(4) : 0;
-
-  const shouldUseLegacyFallback = !hasCurrentMonthRecord || (
-    explicitApiCalls === 0 && explicitCostUsd === 0 && legacyApiCalls > 0
-  );
+  const hasCurrentMonth = userData.creditMonth === month;
+  const monthlyCreditsUsed = hasCurrentMonth
+    ? Number(userData.userMonthlyCreditsUsed ?? 0)
+    : 0;
+  const monthlyApiCalls = hasCurrentMonth
+    ? Number(userData.userMonthlyApiCalls ?? 0)
+    : 0;
 
   return {
     month,
-    monthlyApiCalls: shouldUseLegacyFallback ? legacyApiCalls : explicitApiCalls,
-    monthlyApiCost: shouldUseLegacyFallback ? legacyCostUsd : explicitCostUsd,
-    isLegacyFallback: shouldUseLegacyFallback,
+    monthlyCreditsUsed,
+    monthlyApiCalls,
+    // Legacy field kept at 0 — no longer USD
+    monthlyApiCost: 0,
   };
 };
 
 /**
- * Atomic Firestore transaction:
- *   1. Read system/global_usage.
- *   2. Abort if projected cost >= $195 (platform cap).
- *   3. Increment global stats + record per-user analytics.
- *   4. Write audit receipt to users/{userId}/credit_logs.
+ * Deduct credits for an API search.
+ *
+ * Flow:
+ *   1. Pre-check: read global_usage to enforce platform kill switch (95%).
+ *   2. Transaction on user doc: check user credit limit, write user counters.
+ *   3. increment() on global doc: contention-free counter update.
+ *   4. Write credit_log entry inside user transaction.
  *
  * @param {string} userId
- * @param {number} apiCalls  Actual Places API calls consumed (0 = free cache hit)
- * @param {object} [meta]    { keyword, location, scope }
+ * @param {number} apiCalls   Actual Places API calls consumed (0 = cache hit)
+ * @param {string} tier       'enterprise' | 'pro' | 'essentials' (default enterprise)
+ * @param {object} meta       { keyword, location, scope }
  */
-export const deductCredits = async (userId, apiCalls, meta = {}) => {
+export const deductCredits = async (userId, apiCalls, tier = 'enterprise', meta = {}) => {
   if (!userId) throw new Error('userId is required.');
   if (!apiCalls || apiCalls <= 0) return;
 
-  const costUsd   = +(apiCalls * COST_PER_CALL).toFixed(4);
-  const month     = currentMonth();
-  const userRef   = doc(db, 'users', userId);
-  const globalRef = doc(db, ...GLOBAL_DOC_PATH);
-  const runtimeSettings = await getCreditRuntimeSettings();
-  const monthlyCapUsd = runtimeSettings.globalCreditLimitUsd;
+  const creditsPerCall  = CREDIT_CONFIG.CREDITS_PER_TIER[tier] ?? CREDIT_CONFIG.CREDITS_PER_TIER.enterprise;
+  const creditsToDeduct = apiCalls * creditsPerCall;
+  const month           = currentMonth();
+  const userRef         = doc(db, 'users', userId);
+  const globalRef       = doc(db, ...GLOBAL_DOC_PATH);
 
-  await runTransaction(db, async (tx) => {
-    const [userSnap, globalSnap] = await Promise.all([
-      tx.get(userRef),
-      tx.get(globalRef),
-    ]);
-
-    if (!userSnap.exists()) {
-      throw new Error('User profile not found. Please sign in again.');
-    }
-
-    const ud = userSnap.data();
-    const { isUnlimited, limitUsd } = parseUserLimit(ud.creditLimit);
-    const currentUserMetrics = getEffectiveUserMonthMetrics(ud, month);
-    const isNewUserMonth = ud.creditMonth !== month;
-    const userCurrentMonthCost = currentUserMetrics.monthlyApiCost;
-    const userCurrentMonthCalls = currentUserMetrics.monthlyApiCalls;
-
-    if (!isUnlimited && limitUsd <= 0) {
-      throw new Error('Your credit allocation is 0. Please contact admin.');
-    }
-
-    if (!isUnlimited && userCurrentMonthCost + costUsd > limitUsd) {
-      const remaining = Math.max(0, limitUsd - userCurrentMonthCost);
+  // ── Step 1: Platform kill switch pre-check (read-only, fast) ────────────────
+  const globalSnap = await getDoc(globalRef);
+  if (globalSnap.exists() && globalSnap.data().month === month) {
+    const currentSkuCalls = globalSnap.data()[`sku_${tier}_calls`] ?? 0;
+    if (currentSkuCalls + apiCalls > CREDIT_CONFIG.SKU_KILL_SWITCH[tier]) {
       throw new Error(
-        `Insufficient user credits. Remaining $${remaining.toFixed(2)} of $${limitUsd.toFixed(2)} monthly allocation.`
-      );
-    }
-
-    const globalData    = globalSnap.exists() ? globalSnap.data() : {};
-    const isNewMonth    = !globalSnap.exists() || globalData.month !== month;
-    const currentCost   = isNewMonth ? 0 : (globalData.monthly_api_cost ?? 0);
-
-    if (currentCost + costUsd > monthlyCapUsd) {
-      throw new Error(
-        `Platform monthly search budget reached ` +
-        `($${currentCost.toFixed(2)} / $${monthlyCapUsd}). ` +
+        `Platform monthly search limit reached (95% of free tier). ` +
         `Resets on the 1st of next month. Cached results are still free.`
       );
     }
+  }
 
-    const newUserMonthCost = +(userCurrentMonthCost + costUsd).toFixed(4);
+  // ── Step 2: User transaction (read → check → write) ─────────────────────────
+  await runTransaction(db, async (tx) => {
+    const userSnap = await tx.get(userRef);
+    if (!userSnap.exists()) throw new Error('User profile not found. Please sign in again.');
 
-    const newGlobal = {
-      month,
-      monthly_api_cost: isNewMonth ? costUsd : currentCost + costUsd,
-      totalApiCalls:    isNewMonth ? apiCalls : (globalData.totalApiCalls ?? 0) + apiCalls,
-      lastUpdated:      serverTimestamp(),
-    };
-    if (!globalSnap.exists() || isNewMonth) tx.set(globalRef, newGlobal);
-    else                                     tx.update(globalRef, newGlobal);
+    const ud = userSnap.data();
+    const { isUnlimited, limitCredits } = parseUserLimit(ud.creditLimit);
 
-    // Keep legacy counters while adding precise per-user monthly USD tracking.
+    if (!isUnlimited && limitCredits <= 0) {
+      throw new Error('Your account has been suspended. Please contact admin.');
+    }
+
+    const isNewUserMonth       = ud.creditMonth !== month;
+    const creditsUsedThisMonth = isNewUserMonth ? 0 : (ud.userMonthlyCreditsUsed ?? 0);
+
+    if (!isUnlimited && creditsUsedThisMonth + creditsToDeduct > limitCredits) {
+      const remaining = Math.max(0, limitCredits - creditsUsedThisMonth);
+      throw new Error(
+        `Insufficient credits. You have ${remaining} credits remaining of your ` +
+        `${limitCredits} monthly allocation.`
+      );
+    }
+
+    const newCreditsUsed       = creditsUsedThisMonth + creditsToDeduct;
+    const creditRemainingInt   = isUnlimited ? null : Math.max(0, limitCredits - newCreditsUsed);
+
     tx.update(userRef, {
-      creditsUsed: (ud.creditsUsed ?? 0) + apiCalls,
-      searchCount: (ud.searchCount ?? 0) + 1,
-      creditMonth: month,
-      userMonthlyApiCost: newUserMonthCost,
-      userMonthlyApiCalls: userCurrentMonthCalls + apiCalls,
-      creditRemainingUsd: isUnlimited ? null : +(Math.max(0, limitUsd - newUserMonthCost).toFixed(4)),
-      lastCreditChargeAt: serverTimestamp(),
+      // SKU credit fields
+      userMonthlyCreditsUsed:  newCreditsUsed,
+      creditRemainingCredits:  creditRemainingInt,
+      creditMonth:             month,
+      // Legacy API call counters (kept for search history / analytics)
+      creditsUsed:             (ud.creditsUsed ?? 0) + apiCalls,
+      userMonthlyApiCalls:     (ud.userMonthlyApiCalls ?? 0) + apiCalls,
+      searchCount:             (ud.searchCount ?? 0) + 1,
+      lastCreditChargeAt:      serverTimestamp(),
+      // Legacy USD fields frozen at null/0 — no longer used
+      userMonthlyApiCost:      0,
+      creditRemainingUsd:      null,
     });
 
+    // Credit log
     tx.set(doc(collection(db, 'users', userId, 'credit_logs')), {
       userId,
       apiCalls,
-      costUsd,
-      userMonthlyLimitUsd: isUnlimited ? 'unlimited' : limitUsd,
-      keyword:  meta.keyword  || '',
-      location: meta.location || '',
-      scope:    meta.scope    || '',
+      tier,
+      creditsDeducted:   creditsToDeduct,
+      creditsPerCall,
+      userCreditLimit:   isUnlimited ? 'unlimited' : limitCredits,
+      // Legacy fields frozen at 0/null
+      costUsd:           0,
+      userMonthlyLimitUsd: null,
+      keyword:           meta.keyword  || '',
+      location:          meta.location || '',
+      scope:             meta.scope    || '',
       month,
-      createdAt: serverTimestamp(),
+      createdAt:         serverTimestamp(),
     });
-
-    console.log(
-      `[credits] uid=${userId} +${apiCalls} calls ($${costUsd}) | ` +
-      `user: $${userCurrentMonthCost.toFixed(2)} -> $${newUserMonthCost.toFixed(2)} | ` +
-      `platform: $${currentCost.toFixed(2)} -> $${(currentCost + costUsd).toFixed(2)}/$${monthlyCapUsd}`
-    );
   });
+
+  // ── Step 3: Global counters — increment() (contention-free) ─────────────────
+  const isNewMonth = !globalSnap.exists() || globalSnap.data().month !== month;
+
+  if (isNewMonth) {
+    await setDoc(globalRef, {
+      month,
+      [`sku_${tier}_calls`]: apiCalls,
+      totalApiCalls:         apiCalls,
+      totalCreditsUsed:      creditsToDeduct,
+      monthly_api_cost:      0,   // legacy field frozen at 0
+      lastUpdated:           serverTimestamp(),
+    });
+  } else {
+    await updateDoc(globalRef, {
+      [`sku_${tier}_calls`]: increment(apiCalls),
+      totalApiCalls:         increment(apiCalls),
+      totalCreditsUsed:      increment(creditsToDeduct),
+      lastUpdated:           serverTimestamp(),
+    });
+  }
+
+  console.log(
+    `[credits] uid=${userId} +${apiCalls} ${tier} calls (-${creditsToDeduct} credits) | ` +
+    `kill switch at ${CREDIT_CONFIG.SKU_KILL_SWITCH[tier]} ${tier} calls`
+  );
 };
 
-export const getUserCreditBalance = async (userId) => {
-  if (!userId) return 0;
-  const snap = await getDoc(doc(db, 'users', userId));
-  return snap.exists() ? (snap.data().credits ?? 0) : 0;
-};
-
+// ── Global usage reader ───────────────────────────────────────────────────────
 export const getGlobalUsage = async () => {
   const snap = await getDoc(doc(db, ...GLOBAL_DOC_PATH));
-  if (!snap.exists()) return { monthly_api_cost: 0, totalApiCalls: 0, month: currentMonth() };
+  if (!snap.exists()) {
+    return {
+      sku_enterprise_calls: 0,
+      sku_pro_calls:        0,
+      sku_essentials_calls: 0,
+      totalApiCalls:        0,
+      totalCreditsUsed:     0,
+      monthly_api_cost:     0,
+      month:                currentMonth(),
+    };
+  }
   const d = snap.data();
-  return d.month === currentMonth() ? d : { monthly_api_cost: 0, totalApiCalls: 0, month: currentMonth() };
+  if (d.month !== currentMonth()) {
+    return {
+      sku_enterprise_calls: 0,
+      sku_pro_calls:        0,
+      sku_essentials_calls: 0,
+      totalApiCalls:        0,
+      totalCreditsUsed:     0,
+      monthly_api_cost:     0,
+      month:                currentMonth(),
+    };
+  }
+  return d;
 };
 
 export const ensureGlobalUsageDoc = async () => {
@@ -224,26 +241,43 @@ export const ensureGlobalUsageDoc = async () => {
   const snap  = await getDoc(ref);
   const month = currentMonth();
   if (!snap.exists() || snap.data().month !== month) {
-    await setDoc(ref, { month, monthly_api_cost: 0, totalApiCalls: 0, lastUpdated: serverTimestamp() });
+    await setDoc(ref, {
+      month,
+      sku_enterprise_calls: 0,
+      sku_pro_calls:        0,
+      sku_essentials_calls: 0,
+      totalApiCalls:        0,
+      totalCreditsUsed:     0,
+      monthly_api_cost:     0,
+      lastUpdated:          serverTimestamp(),
+    });
   }
 };
 
-// Backward compatibility stubs.
-/* eslint-disable no-unused-vars */
-export const initializeGlobalCredits  = ()        => ensureGlobalUsageDoc();
-export const getGlobalCredits         = ()        => getGlobalUsage().then(d => d.totalApiCalls ?? 0);
-export const addGlobalCredits         = ()        => Promise.resolve();
-export const subscribeToGlobalCredits = ()        => () => {};
-export const resetGlobalCredits       = ()        => Promise.resolve();
-export const getCreditStats           = (n)       => ({
-  totalCalls:     n,
-  totalCost:      (n * COST_PER_CALL).toFixed(2),
-  remainingCalls: Math.max(0, MONTHLY_FREE_CALLS - n),
-  percentageUsed: Math.min((n / MONTHLY_FREE_CALLS) * 100, 100).toFixed(1),
+// ── Platform credit % used (based on Enterprise — the real bottleneck) ────────
+export const getPlatformCreditPct = (globalData = {}) => {
+  const enterpriseCalls = globalData.sku_enterprise_calls ?? 0;
+  return Math.min(
+    +((enterpriseCalls / CREDIT_CONFIG.SKU_FREE_CAPS.enterprise) * 100).toFixed(1),
+    100
+  );
+};
+
+// Deprecated stubs — kept so nothing breaks during migration
+export const MONTHLY_FREE_CALLS = CREDIT_CONFIG.PLATFORM_CREDITS_POOL;
+export const initializeGlobalCredits  = ()       => ensureGlobalUsageDoc();
+export const getGlobalCredits         = ()       => getGlobalUsage().then(d => d.totalApiCalls ?? 0);
+export const addGlobalCredits         = ()       => Promise.resolve();
+export const subscribeToGlobalCredits = ()       => () => {};
+export const resetGlobalCredits       = ()       => Promise.resolve();
+export const getCreditStats           = (calls)  => ({
+  totalCalls:     calls,
+  totalCost:      0,
+  remainingCalls: Math.max(0, CREDIT_CONFIG.SKU_FREE_CAPS.enterprise - calls),
+  percentageUsed: Math.min((calls / CREDIT_CONFIG.SKU_FREE_CAPS.enterprise) * 100, 100).toFixed(1),
 });
-export const initializeUserCredits = (_uid) => ensureGlobalUsageDoc();
-export const getUserCredits        = (uid)  => getUserCreditBalance(uid);
-export const addCredits            = ()     => Promise.resolve();
+export const initializeUserCredits = () => ensureGlobalUsageDoc();
+export const getUserCredits        = () => Promise.resolve(0);
+export const addCredits            = () => Promise.resolve();
 export const subscribeToCredits    = (_uid, cb) => { cb(0); return () => {}; };
-export const resetUserCredits      = ()     => Promise.resolve();
-/* eslint-enable no-unused-vars */
+export const resetUserCredits      = () => Promise.resolve();

@@ -1,55 +1,60 @@
 import { useState } from 'react';
-import { doc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
+import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
-import { DollarSign, Plus, Minus, X } from 'lucide-react';
+import { Zap, Plus, Minus, X } from 'lucide-react';
 import { logAdminAction } from '../../services/analyticsService';
+import { CREDIT_CONFIG } from '../../config';
 
 /**
- * CreditManagementModal Component
- * Allows admins to manually adjust user credits
+ * CreditManagementModal
+ * Admin tool to manually adjust a user's monthly credit limit.
+ * Works with integer credits — no USD amounts.
  */
 const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
-  const [amount, setAmount] = useState('');
-  const [action, setAction] = useState('add'); // 'add' or 'remove'
-  const [reason, setReason] = useState('');
+  const [amount,  setAmount]  = useState('');
+  const [action,  setAction]  = useState('add');
+  const [reason,  setReason]  = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error,   setError]   = useState('');
+
+  const currentLimit = user.creditLimit === 'unlimited'
+    ? 'unlimited'
+    : (typeof user.creditLimit === 'number' ? user.creditLimit : CREDIT_CONFIG.DEFAULT_USER_CREDITS);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
 
-    const creditAmount = parseInt(amount);
+    const creditAmount = parseInt(amount, 10);
     if (isNaN(creditAmount) || creditAmount <= 0) {
       setError('Please enter a valid positive number');
       return;
     }
-
     if (!reason.trim()) {
       setError('Please provide a reason for this adjustment');
       return;
     }
 
     setLoading(true);
-
     try {
-      const userRef = doc(db, 'users', user.id);
-      const adjustmentAmount = action === 'add' ? creditAmount : -creditAmount;
+      const userRef    = doc(db, 'users', user.id);
+      const baseLimt   = currentLimit === 'unlimited' ? CREDIT_CONFIG.DEFAULT_USER_CREDITS : currentLimit;
+      const newLimit   = action === 'add'
+        ? baseLimt + creditAmount
+        : Math.max(0, baseLimt - creditAmount);
 
-      // Update user credits balance directly on the users/{uid} document
       await updateDoc(userRef, {
-        credits: increment(adjustmentAmount),
-        updatedAt: serverTimestamp(),
+        creditLimit: newLimit,
+        updatedAt:   serverTimestamp(),
       });
 
-      // Log the admin action (non-blocking)
       try {
         await logAdminAction(
           adminUser?.uid,
           adminUser?.email,
-          `Credit Adjustment - ${action === 'add' ? 'Added' : 'Removed'} ${creditAmount} credits`,
+          `Credit Limit ${action === 'add' ? 'Increased' : 'Decreased'} by ${creditAmount} credits`,
           user.id,
-          `${action === 'add' ? 'Granted' : 'Removed'} ${creditAmount} credits for ${user.email}. Reason: ${reason}`
+          `${action === 'add' ? 'Increased' : 'Decreased'} credit limit by ${creditAmount} for ${user.email}. New limit: ${newLimit}. Reason: ${reason}`
         );
       } catch (logErr) {
         console.warn('logAdminAction failed (non-critical):', logErr);
@@ -58,11 +63,18 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
       onSuccess?.();
       onClose();
     } catch (err) {
-      console.error('Error adjusting credits:', err);
+      console.error('Error adjusting credit limit:', err);
       setError('Failed to adjust credits. Please try again.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const previewNewLimit = () => {
+    const amt = parseInt(amount, 10);
+    if (isNaN(amt) || amt <= 0) return null;
+    const base = currentLimit === 'unlimited' ? CREDIT_CONFIG.DEFAULT_USER_CREDITS : currentLimit;
+    return action === 'add' ? base + amt : Math.max(0, base - amt);
   };
 
   return (
@@ -71,38 +83,35 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-slate-700">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-green-500 to-emerald-600 rounded-full flex items-center justify-center">
-              <DollarSign className="w-5 h-5 text-white" />
+            <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-full flex items-center justify-center">
+              <Zap className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-white">Credit Management</h2>
+              <h2 className="text-xl font-bold text-white">Credit Limit Adjustment</h2>
               <p className="text-sm text-gray-400">{user.email}</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-gray-400 hover:text-white transition-colors"
-          >
+          <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors">
             <X className="w-6 h-6" />
           </button>
         </div>
 
         {/* Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          {/* Current Balance */}
+          {/* Current Limit */}
           <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
-            <p className="text-sm text-gray-400 mb-1">Current Credit Balance</p>
-            <p className="text-2xl font-bold text-white">{(user.credits ?? 0).toLocaleString()}</p>
+            <p className="text-sm text-gray-400 mb-1">Current Monthly Credit Limit</p>
+            <p className="text-2xl font-bold text-white">
+              {currentLimit === 'unlimited' ? 'Unlimited' : currentLimit.toLocaleString()}
+            </p>
             <p className="text-xs text-gray-500 mt-1">
-              Credits available for searches
+              Default: {CREDIT_CONFIG.DEFAULT_USER_CREDITS.toLocaleString()} credits/month
             </p>
           </div>
 
-          {/* Action Type */}
+          {/* Action */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Action
-            </label>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Action</label>
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"
@@ -114,7 +123,7 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
                 }`}
               >
                 <Plus className="w-4 h-4" />
-                Grant Credits
+                Increase Limit
               </button>
               <button
                 type="button"
@@ -126,7 +135,7 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
                 }`}
               >
                 <Minus className="w-4 h-4" />
-                Remove Credits
+                Decrease Limit
               </button>
             </div>
           </div>
@@ -134,35 +143,32 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
           {/* Amount */}
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
-              Credit Amount
+              Credits to {action === 'add' ? 'Add' : 'Remove'}
             </label>
             <input
               type="number"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              placeholder="Enter amount"
+              placeholder={`e.g. ${CREDIT_CONFIG.DEFAULT_USER_CREDITS}`}
               min="1"
               required
-              className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
 
           {/* Reason */}
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Reason for Adjustment
-            </label>
+            <label className="block text-sm font-medium text-gray-300 mb-2">Reason</label>
             <textarea
               value={reason}
               onChange={(e) => setReason(e.target.value)}
-              placeholder="E.g., Bonus credits for feedback, Refund for API issues, etc."
-              rows="3"
+              placeholder="e.g. Extra credits for feedback, reduced due to misuse..."
+              rows="2"
               required
-              className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
             />
           </div>
 
-          {/* Error Message */}
           {error && (
             <div className="bg-red-500/10 border border-red-500/50 rounded-lg p-3">
               <p className="text-red-400 text-sm">{error}</p>
@@ -170,13 +176,12 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
           )}
 
           {/* Preview */}
-          {amount && (
-            <div className="bg-blue-500/10 border border-blue-500/50 rounded-lg p-3">
-              <p className="text-blue-400 text-sm">
-              <p className="text-blue-400 text-sm">
-              {action === 'add' ? '✓' : '⚠'} This will {action === 'add' ? 'add' : 'remove'} {amount} credits
-              {action === 'add' ? ' to' : ' from'} {user.email}'s balance.
-            </p>
+          {previewNewLimit() !== null && (
+            <div className="bg-indigo-500/10 border border-indigo-500/50 rounded-lg p-3">
+              <p className="text-indigo-400 text-sm">
+                New monthly limit: <strong>{previewNewLimit()?.toLocaleString()} credits</strong>
+                {' '}({action === 'add' ? '+' : '-'}{amount} from current)
+              </p>
             </div>
           )}
 
@@ -194,12 +199,10 @@ const CreditManagementModal = ({ user, adminUser, onClose, onSuccess }) => {
               type="submit"
               disabled={loading || !amount || !reason.trim()}
               className={`flex-1 px-4 py-2 rounded-lg text-white transition-colors disabled:opacity-50 ${
-                action === 'add'
-                  ? 'bg-green-600 hover:bg-green-700'
-                  : 'bg-red-600 hover:bg-red-700'
+                action === 'add' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'
               }`}
             >
-              {loading ? 'Processing...' : `${action === 'add' ? 'Grant' : 'Remove'} Credits`}
+              {loading ? 'Saving...' : `${action === 'add' ? 'Increase' : 'Decrease'} Limit`}
             </button>
           </div>
         </form>

@@ -1,24 +1,24 @@
-// Platform Usage Page — dedicated page for API credit tracking
+// Platform Usage Page — SKU-based credit tracking for users
 import { useAuth }   from '../contexts/AuthContext';
 import { useCredit } from '../contexts/CreditContext';
 import { useEffect, useState } from 'react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
-import { createCreditRequest } from '../services/analyticsService';
-import CreditRequestModal from '../components/CreditRequestModal';
+import { CREDIT_CONFIG } from '../config';
 import { toast } from 'sonner';
-import { Database, Zap, Search, ShieldCheck, Activity, TrendingUp, Clock, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import {
+  Database, Zap, Search, Activity, TrendingUp,
+  Clock, CheckCircle, XCircle, AlertCircle,
+} from 'lucide-react';
 
 const RequestStatusBadge = ({ status }) => {
   const configs = {
-    pending: { icon: Clock, bg: 'bg-blue-100', text: 'text-blue-700', label: 'Pending Review' },
-    approved: { icon: CheckCircle, bg: 'bg-emerald-100', text: 'text-emerald-700', label: 'Approved' },
-    rejected: { icon: XCircle, bg: 'bg-red-100', text: 'text-red-700', label: 'Rejected' },
+    pending:  { icon: Clock,         bg: 'bg-blue-100',    text: 'text-blue-700',    label: 'Pending Review' },
+    approved: { icon: CheckCircle,   bg: 'bg-emerald-100', text: 'text-emerald-700', label: 'Approved'       },
+    rejected: { icon: XCircle,       bg: 'bg-red-100',     text: 'text-red-700',     label: 'Rejected'       },
   };
-
   const config = configs[status] || configs.pending;
-  const Icon = config.icon;
-
+  const Icon   = config.icon;
   return (
     <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${config.bg} ${config.text}`}>
       <Icon className="w-3.5 h-3.5" />
@@ -28,317 +28,147 @@ const RequestStatusBadge = ({ status }) => {
 };
 
 const PlatformUsagePage = () => {
-  const { userProfile, currentUser } = useAuth();
+  const { currentUser } = useAuth();
   const {
-    myMonthlyUsdUsed,
-    myMonthlyLimitUsd,
-    myCreditRemainingUsd,
+    myCreditsUsed,
+    myCreditsLimit,
+    myCreditsRemaining,
     myCreditPctUsed,
     myCreditIsUnlimited,
-    myCallsUsed,
+    myApiCallsUsed,
+    mySearchCount,
   } = useCredit();
 
-  const [creditRequests, setCreditRequests] = useState([]);
-  const [loadingRequests, setLoadingRequests] = useState(true);
   const [monthlySearches, setMonthlySearches] = useState(0);
-  const [isRequestModalOpen, setIsRequestModalOpen] = useState(false);
-  const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
 
   useEffect(() => {
-    if (!currentUser?.uid) return;
-
-    const q = query(
-      collection(db, 'credit_requests'),
-      where('userId', '==', currentUser.uid)
-    );
-
-    const unsub = onSnapshot(q, (snap) => {
-      const data = snap.docs.map((d) => ({
-        id: d.id,
-        ...d.data(),
-        createdAt: d.data().createdAt?.toDate?.() || new Date(),
-        approvedAt: d.data().approvedAt?.toDate?.(),
-        rejectedAt: d.data().rejectedAt?.toDate?.(),
-      }));
-      setCreditRequests(data.sort((a, b) => b.createdAt - a.createdAt));
-      setLoadingRequests(false);
-    });
-
-    return () => unsub();
-  }, [currentUser?.uid]);
-
-  useEffect(() => {
-    if (!currentUser?.uid) {
-      setMonthlySearches(0);
-      return;
-    }
-
-    const now = new Date();
+    if (!currentUser?.uid) { setMonthlySearches(0); return; }
+    const now        = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const q = query(
       collection(db, 'searchLogs'),
       where('userId', '==', currentUser.uid),
       where('timestamp', '>=', monthStart)
     );
-
-    const unsub = onSnapshot(q, (snap) => {
-      setMonthlySearches(snap.size);
-    });
-
+    const unsub = onSnapshot(q, (snap) => setMonthlySearches(snap.size));
     return () => unsub();
   }, [currentUser?.uid]);
 
-  const pct     = myCreditIsUnlimited ? 0 : (myCreditPctUsed ?? 0);
-  const REQUEST_CTA_THRESHOLD = 80;
-  const requestEligible = !myCreditIsUnlimited && pct >= REQUEST_CTA_THRESHOLD;
-  const hasPendingRequest = creditRequests.some((req) => req.status === 'pending');
-  const suggestedRequestAmount = Math.max(25, Math.ceil((myMonthlyLimitUsd * 0.4) / 5) * 5);
-  const barColor = pct >= 97 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500';
-  const budgetLabel = myCreditIsUnlimited ? 'Unlimited' : `$${(myMonthlyLimitUsd ?? 0).toFixed(2)}`;
-  const remainingLabel = myCreditIsUnlimited
-    ? 'Unlimited'
-    : `$${(myCreditRemainingUsd ?? 0).toFixed(2)}`;
+  const pct      = myCreditIsUnlimited ? 0 : (myCreditPctUsed ?? 0);
+  const barColor = pct >= 95 ? 'bg-red-500' : pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500';
 
-  const stats = [
-    {
-      icon:  <Zap className="w-5 h-5 text-indigo-400" />,
-      label: 'Monthly allocation',
-      value: budgetLabel,
-      color: 'text-indigo-700',
-      bg:    'bg-indigo-50 border-indigo-100',
-    },
-    {
-      icon:  <Database className="w-5 h-5 text-emerald-400" />,
-      label: 'Remaining this month',
-      value: remainingLabel,
-      color: !myCreditIsUnlimited && (myCreditRemainingUsd ?? 0) < 5 ? 'text-amber-600' : 'text-emerald-700',
-      bg:    !myCreditIsUnlimited && (myCreditRemainingUsd ?? 0) < 5 ? 'bg-amber-50 border-amber-100' : 'bg-emerald-50 border-emerald-100',
-    },
-    {
-      icon:  <Search className="w-5 h-5 text-violet-400" />,
-      label: 'My searches (this month)',
-      value: (monthlySearches ?? 0).toLocaleString(),
-      color: 'text-violet-700',
-      bg:    'bg-violet-50 border-violet-100',
-    },
-    {
-      icon:  <Database className="w-5 h-5 text-cyan-400" />,
-      label: 'My API calls used',
-      value: (myCallsUsed ?? 0).toLocaleString(),
-      color: 'text-cyan-700',
-      bg:    'bg-cyan-50 border-cyan-100',
-    },
-    {
-      icon:  <ShieldCheck className="w-5 h-5 text-slate-400" />,
-      label: 'Account role',
-      value: userProfile?.role ?? 'user',
-      color: 'text-slate-700',
-      bg:    'bg-slate-50 border-slate-100',
-    },
-  ];
+  const creditsLabel    = myCreditIsUnlimited ? 'Unlimited' : (myCreditsLimit ?? 0).toLocaleString();
+  const remainingLabel  = myCreditIsUnlimited ? 'Unlimited' : (myCreditsRemaining ?? 0).toLocaleString();
+  const usedLabel       = myCreditIsUnlimited ? '—' : (myCreditsUsed ?? 0).toLocaleString();
 
-  const handleSubmitCreditRequest = async ({ requestedAmountUsd, reason }) => {
-    if (!currentUser?.uid || !currentUser?.email) {
-      toast.error('You must be logged in to submit a request.');
-      return;
-    }
-
-    if (hasPendingRequest) {
-      toast.info('You already have a pending request. Please wait for admin review.');
-      return;
-    }
-
-    setIsSubmittingRequest(true);
-    try {
-      const res = await createCreditRequest({
-        userId: currentUser.uid,
-        userEmail: currentUser.email,
-        keyword: 'Monthly budget top-up',
-        location: 'Platform Usage',
-        scope: 'monthly_budget',
-        estimatedCostUsd: Number((myMonthlyLimitUsd * 0.4).toFixed(2)),
-        remainingUsd: Number((myCreditRemainingUsd ?? 0).toFixed(2)),
-        requestedAmountUsd: Number(requestedAmountUsd || suggestedRequestAmount),
-        reason: reason || `Automatic request from My Usage at ${pct.toFixed(1)}% monthly usage`,
-      });
-
-      if (!res?.ok) throw new Error(res?.error || 'Failed to submit request');
-
-      toast.success('Credit request submitted successfully. Admin will review it shortly.');
-      setIsRequestModalOpen(false);
-    } catch (err) {
-      toast.error(err.message || 'Could not submit credit request. Please try again.');
-    } finally {
-      setIsSubmittingRequest(false);
-    }
-  };
+  // Estimated searches remaining
+  const enterpriseCostPerCity = 32 * CREDIT_CONFIG.CREDITS_PER_TIER.enterprise; // 320
+  const citySearchesLeft = myCreditIsUnlimited
+    ? '∞'
+    : Math.floor((myCreditsRemaining ?? 0) / enterpriseCostPerCity);
 
   return (
-    <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div className="min-h-screen bg-slate-50 dark:bg-[#0f0f0f]">
+      <div className="max-w-3xl mx-auto px-4 py-8 space-y-6">
 
-      {/* ── Page header ── */}
-      <div className="mb-8 flex items-center gap-3">
-        <span className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600
-          flex items-center justify-center shadow-md flex-none">
-          <Activity className="w-5 h-5 text-white" />
-        </span>
+        {/* Header */}
         <div>
-          <h1 className="text-2xl font-bold text-slate-800 leading-tight">My Usage</h1>
-          <p className="text-sm text-slate-500 mt-0.5">My monthly allocation and API usage</p>
-        </div>
-      </div>
-
-      {/* ── Monthly budget card ── */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-6">
-        <div className="flex items-center gap-2 mb-4">
-          <TrendingUp className="w-4 h-4 text-slate-400" />
-          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            My Monthly Credit Usage
-          </span>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white">My Usage</h1>
+          <p className="text-slate-500 dark:text-gray-400 mt-1">
+            Your monthly search credits — resets on the 1st of each month
+          </p>
         </div>
 
-        <div className="flex justify-between items-end mb-3">
-          <div>
-            <p className="text-3xl font-bold text-slate-800">
-              ${(myMonthlyUsdUsed ?? 0).toFixed(2)}
-            </p>
-            <p className="text-sm text-slate-500 mt-0.5">
-              spent of {myCreditIsUnlimited ? 'unlimited allocation' : `${budgetLabel} allocated`}
-            </p>
+        {/* Credit Summary Card */}
+        <div className="bg-white dark:bg-slate-800/60 rounded-2xl border border-slate-200 dark:border-slate-700 p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-violet-600 rounded-xl flex items-center justify-center">
+                <Zap className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <p className="font-semibold text-slate-900 dark:text-white">Monthly Credits</p>
+                <p className="text-xs text-slate-500 dark:text-gray-400">
+                  {myCreditIsUnlimited ? 'Unlimited access' : `${pct.toFixed(1)}% used this month`}
+                </p>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-2xl font-bold text-slate-900 dark:text-white">{remainingLabel}</p>
+              <p className="text-xs text-slate-500 dark:text-gray-400">remaining</p>
+            </div>
           </div>
+
           {!myCreditIsUnlimited && (
-            <span className={`text-2xl font-bold ${
-              pct >= 80 ? 'text-amber-600' : 'text-emerald-600'
-            }`}>
-              {pct.toFixed(1)}%
-            </span>
+            <>
+              <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2 overflow-hidden">
+                <div
+                  className={`h-2 rounded-full transition-all duration-700 ${barColor}`}
+                  style={{ width: `${Math.max(pct, 1)}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-xs text-slate-500 dark:text-gray-400">
+                <span>{usedLabel} used</span>
+                <span>{creditsLabel} total</span>
+              </div>
+            </>
+          )}
+
+          {pct >= 80 && !myCreditIsUnlimited && (
+            <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-lg p-3">
+              <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-none mt-0.5" />
+              <p className="text-sm text-amber-900 dark:text-amber-200">
+                You've used {pct.toFixed(1)}% of your monthly credits.
+                {pct >= 95
+                  ? ' Searches are blocked until the 1st of next month.'
+                  : ' You have limited credits remaining.'}
+              </p>
+            </div>
           )}
         </div>
 
-        {!myCreditIsUnlimited && (
-          <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
-            <div
-              className={`h-3 rounded-full transition-all duration-500 ${barColor}`}
-              style={{ width: `${Math.max(pct, 1)}%` }}
-            />
-          </div>
-        )}
+        {/* Stats Grid */}
+        <div className="grid grid-cols-2 gap-4">
+          <StatCard icon={Search} label="Searches This Month" value={(mySearchCount ?? monthlySearches).toLocaleString()} />
+          <StatCard icon={Database} label="API Calls Used" value={(myApiCallsUsed ?? 0).toLocaleString()} />
+          <StatCard icon={Activity} label="Credits Used" value={usedLabel} />
+          <StatCard icon={TrendingUp} label="City Searches Left" value={String(citySearchesLeft)} />
+        </div>
 
-        {!myCreditIsUnlimited && pct >= 97 && (
-          <p className="mt-2 text-sm text-red-600 font-medium">
-            Credit allocation almost exhausted. Request additional credits below.
-          </p>
-        )}
-        {!myCreditIsUnlimited && pct >= 80 && pct < 97 && (
-          <p className="mt-2 text-sm text-amber-600 font-medium">
-            You are close to your monthly limit. Plan searches carefully.
-          </p>
-        )}
-      </div>
-
-      {/* ── Stats grid ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-        {stats.map(({ icon, label, value, color, bg }) => (
-          <div
-            key={label}
-            className={`flex items-center gap-4 rounded-2xl border p-5 ${bg}`}
-          >
-            <span className="flex-none">{icon}</span>
-            <div className="min-w-0">
-              <p className="text-xs text-slate-500 mb-0.5">{label}</p>
-              <p className={`text-xl font-bold truncate capitalize ${color}`}>{value}</p>
+        {/* Credit Info */}
+        <div className="bg-white dark:bg-slate-800/60 rounded-2xl border border-slate-200 dark:border-slate-700 p-6 space-y-3">
+          <h2 className="font-semibold text-slate-900 dark:text-white">How Credits Work</h2>
+          <div className="space-y-2 text-sm text-slate-600 dark:text-gray-400">
+            <div className="flex justify-between py-2 border-b border-slate-100 dark:border-slate-700">
+              <span>City search (full city)</span>
+              <span className="font-medium text-slate-900 dark:text-white">320 credits</span>
+            </div>
+            <div className="flex justify-between py-2 border-b border-slate-100 dark:border-slate-700">
+              <span>Neighbourhood search</span>
+              <span className="font-medium text-slate-900 dark:text-white">240 credits</span>
+            </div>
+            <div className="flex justify-between py-2">
+              <span>Specific area search</span>
+              <span className="font-medium text-slate-900 dark:text-white">up to 90 credits</span>
             </div>
           </div>
-        ))}
-      </div>
-
-      {!myCreditIsUnlimited && (myCreditRemainingUsd ?? 0) < 5 && (
-        <div className="mb-6 rounded-xl bg-amber-50 border border-amber-200 p-4 flex items-start gap-3">
-          <Zap className="w-5 h-5 text-amber-500 flex-none mt-0.5" />
-          <p className="text-sm text-amber-700 flex-1">
-            <strong>Low remaining credits.</strong> Searches may be blocked when your allocation is exhausted.
-            Use the request button below to ask for more monthly budget.
+          <p className="text-xs text-slate-400 dark:text-gray-500">
+            Credits reset to {(CREDIT_CONFIG.DEFAULT_USER_CREDITS).toLocaleString()} on the 1st of every month.
+            Cached results use 0 credits.
           </p>
         </div>
-      )}
 
-      {!myCreditIsUnlimited && (
-        <div className="mb-6 rounded-2xl bg-white border border-slate-200 shadow-sm p-5">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-slate-800">Need more credits?</p>
-              <p className="text-xs text-slate-500 mt-1">Current usage: {pct.toFixed(1)}%</p>
-              {hasPendingRequest && (
-                <p className="text-xs text-blue-600 mt-1.5 font-medium">
-                  You already have a pending credit request.
-                </p>
-              )}
-            </div>
-            <button
-              onClick={() => setIsRequestModalOpen(true)}
-              disabled={!requestEligible || hasPendingRequest}
-              className="px-4 py-2.5 rounded-lg text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
-              title={!requestEligible ? 'This option becomes available after higher usage.' : undefined}
-            >
-              Request More Credits
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Credit Requests Section */}
-      {!loadingRequests && creditRequests.length > 0 && (
-        <div className="rounded-2xl bg-white border border-slate-200 shadow-sm p-6">
-          <div className="mb-6 flex items-center gap-3">
-            <AlertCircle className="w-5 h-5 text-indigo-600" />
-            <h2 className="text-xl font-bold text-slate-900">Your Credit Requests</h2>
-          </div>
-
-          <div className="space-y-3">
-            {creditRequests.map((req) => (
-              <div key={req.id} className="border border-slate-200 rounded-lg p-4 hover:bg-slate-50 transition-colors">
-                <div className="flex items-start justify-between mb-2">
-                  <div>
-                    <p className="font-semibold text-slate-900">
-                      ${req.requestedAmountUsd?.toFixed(2) || '0.00'} requested
-                    </p>
-                    <p className="text-sm text-slate-600 mt-1">
-                      {req.keyword} • {req.location} • {req.scope} search
-                    </p>
-                  </div>
-                  <RequestStatusBadge status={req.status} />
-                </div>
-
-                {req.reason && (
-                  <p className="text-sm text-slate-600 italic mb-2">"{req.reason}"</p>
-                )}
-
-                <div className="flex items-center justify-between pt-3 border-t border-slate-100 text-xs text-slate-500">
-                  <span>{req.createdAt?.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
-                  {req.status === 'approved' && req.approvedAmountUsd && (
-                    <span className="text-emerald-600 font-medium">
-                      Approved: ${req.approvedAmountUsd.toFixed(2)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <CreditRequestModal
-        isOpen={isRequestModalOpen}
-        onClose={() => setIsRequestModalOpen(false)}
-        userEmail={currentUser?.email || ''}
-        estimatedCostUsd={Math.max(25, myMonthlyLimitUsd * 0.4)}
-        remainingUsd={myCreditRemainingUsd ?? 0}
-        currentLimitUsd={myMonthlyLimitUsd ?? 0}
-        onSubmit={handleSubmitCreditRequest}
-        isLoading={isSubmittingRequest}
-      />
+      </div>
     </div>
   );
 };
+
+const StatCard = ({ icon: Icon, label, value }) => (
+  <div className="bg-white dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+    <Icon className="w-4 h-4 text-indigo-500 mb-2" />
+    <p className="text-xl font-bold text-slate-900 dark:text-white">{value}</p>
+    <p className="text-xs text-slate-500 dark:text-gray-400 mt-0.5">{label}</p>
+  </div>
+);
 
 export default PlatformUsagePage;

@@ -256,9 +256,9 @@ export const createCreditRequest = async (requestData) => {
       keyword: requestData.keyword || '',
       location: requestData.location || '',
       scope: requestData.scope || 'city',
-      estimatedCostUsd: Number(requestData.estimatedCostUsd || 0),
-      remainingUsd: Number(requestData.remainingUsd || 0),
-      requestedAmountUsd: Number(requestData.requestedAmountUsd || 0),
+      estimatedCostCredits: Number(requestData.estimatedCostCredits || requestData.requestedAmountCredits || 0),
+      creditsRemaining: Number(requestData.creditsRemaining || 0),
+      requestedAmountCredits: Number(requestData.requestedAmountCredits || 0),
       reason: requestData.reason || 'Insufficient credits for search',
       status: 'pending',
       createdAt: serverTimestamp(),
@@ -290,12 +290,12 @@ export const createCreditRequest = async (requestData) => {
         user: payload.userEmail,
         userEmail: payload.userEmail,
         userId: payload.userId,
-        details: `Requested ${payload.scope} search - Top-up: $${payload.requestedAmountUsd.toFixed(2)}`,
+        details: `Requested ${payload.scope} search - Top-up: ${payload.requestedAmountCredits?.toLocaleString() || 0} credits`,
         metadata: {
           requestId: docRef.id,
-          estimatedCostUsd: payload.estimatedCostUsd,
-          remainingUsd: payload.remainingUsd,
-          requestedAmountUsd: payload.requestedAmountUsd,
+          estimatedCostCredits: payload.estimatedCostCredits,
+          creditsRemaining: payload.creditsRemaining,
+          requestedAmountCredits: payload.requestedAmountCredits,
           status: payload.status,
         },
       });
@@ -309,8 +309,8 @@ export const createCreditRequest = async (requestData) => {
       await triggerSystemEmail('credit_request', {
         requestId: docRef.id,
         userEmail: payload.userEmail,
-        requestedAmountUsd: payload.requestedAmountUsd,
-        remainingUsd: payload.remainingUsd,
+        requestedAmountCredits: payload.requestedAmountCredits,
+        creditsRemaining: payload.creditsRemaining,
         reason: payload.reason,
       });
     } catch (emailErr) {

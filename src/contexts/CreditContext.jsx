@@ -1,7 +1,18 @@
 /**
- * Lead Finder - Credit Context
+ * Lead Finder - Credit Context (SKU-Based)
  *
- * Exposes both global platform usage and per-user monthly allocation usage.
+ * Exposes SKU-based credit state to the whole app.
+ * All users are equal — same 2,800 credits/month, no tiers.
+ * Admin can override creditLimit per user (integer credits or 'unlimited').
+ *
+ * Key values exposed:
+ *   myCreditsUsed        — credits consumed this month
+ *   myCreditsLimit       — monthly credit limit (default 2,800)
+ *   myCreditsRemaining   — credits left this month
+ *   myCreditPctUsed      — percentage used (0–100)
+ *   myCreditIsUnlimited  — true if admin set 'unlimited'
+ *   platformEnterpriseCallsUsed — raw Enterprise SKU calls (admin use)
+ *   platformCreditPctUsed       — platform % used (based on Enterprise cap)
  */
 
 import { createContext, useContext, useEffect, useState, useCallback } from 'react';
@@ -13,15 +24,11 @@ import {
   ensureGlobalUsageDoc,
   getEffectiveUserMonthMetrics,
   getCreditRuntimeSettings,
-  MONTHLY_FREE_CALLS,
 } from '../services/creditService';
 import { CREDIT_CONFIG } from '../config';
 import { triggerSystemEmail } from '../services/notificationService';
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-const MONTHLY_CAP_USD = CREDIT_CONFIG.PLATFORM_CAP_USD || 195.00;
-const DEFAULT_USER_BUDGET_USD = CREDIT_CONFIG.DEFAULT_USER_BUDGET_USD || 50;
+const DEFAULT_USER_CREDITS = CREDIT_CONFIG.DEFAULT_USER_CREDITS;
 
 const currentMonthStr = () => {
   const d = new Date();
@@ -36,61 +43,60 @@ export const useCredit = () => {
   return ctx;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PROVIDER
-// ─────────────────────────────────────────────────────────────────────────────
-
 // eslint-disable-next-line react-refresh/only-export-components
 export const CreditProvider = ({ children }) => {
   const { currentUser } = useAuth();
 
-  // Platform-level state
-  const [monthlyApiCost,  setMonthlyApiCost]  = useState(0);
-  const [totalApiCalls,   setTotalApiCalls]   = useState(0);
-  const [loadingGlobal,   setLoadingGlobal]   = useState(true);
-  const [effectivePlatformCapUsd, setEffectivePlatformCapUsd] = useState(MONTHLY_CAP_USD);
+  // ── Platform-level state ───────────────────────────────────────────────────
+  const [platformEnterpriseCallsUsed, setPlatformEnterpriseCallsUsed] = useState(0);
+  const [platformTotalApiCalls,       setPlatformTotalApiCalls]       = useState(0);
+  const [platformTotalCreditsUsed,    setPlatformTotalCreditsUsed]    = useState(0);
+  const [loadingGlobal,               setLoadingGlobal]               = useState(true);
 
-  // Per-user analytics state (no balance, just counters)
-  const [mySearchCount,  setMySearchCount]  = useState(0);
-  const [myCallsUsed,    setMyCallsUsed]    = useState(0);
-  const [myMonthlyUsdUsed, setMyMonthlyUsdUsed] = useState(0);
-  const [myMonthlyLimitUsd, setMyMonthlyLimitUsd] = useState(DEFAULT_USER_BUDGET_USD);
-  const [myUnlimited, setMyUnlimited] = useState(false);
+  // ── Per-user state ─────────────────────────────────────────────────────────
+  const [mySearchCount,      setMySearchCount]      = useState(0);
+  const [myApiCallsUsed,     setMyApiCallsUsed]     = useState(0);
+  const [myCreditsUsed,      setMyCreditsUsed]      = useState(0);
+  const [myCreditsLimit,     setMyCreditsLimit]     = useState(DEFAULT_USER_CREDITS);
+  const [myUnlimited,        setMyUnlimited]        = useState(false);
+  const [loadingUser,        setLoadingUser]        = useState(true);
+
+  // ── Alert settings ─────────────────────────────────────────────────────────
   const [creditAlertThresholdPct, setCreditAlertThresholdPct] = useState(80);
-  const [creditAlertsEnabled, setCreditAlertsEnabled] = useState(true);
-  const [loadingUser,    setLoadingUser]    = useState(true);
+  const [creditAlertsEnabled,     setCreditAlertsEnabled]     = useState(true);
 
-  // ── Real-time listener: system/global_usage ───────────────────────────────
+  // ── Real-time listener: system/global_usage ─────────────────────────────
   useEffect(() => {
     if (!currentUser) {
-      setMonthlyApiCost(0);
-      setTotalApiCalls(0);
+      setPlatformEnterpriseCallsUsed(0);
+      setPlatformTotalApiCalls(0);
+      setPlatformTotalCreditsUsed(0);
       setLoadingGlobal(false);
       return;
     }
 
     ensureGlobalUsageDoc().catch(() => {});
-    getCreditRuntimeSettings()
-      .then((cfg) => setEffectivePlatformCapUsd(cfg.globalCreditLimitUsd || MONTHLY_CAP_USD))
-      .catch(() => setEffectivePlatformCapUsd(MONTHLY_CAP_USD));
 
     const globalRef = doc(db, 'system', 'global_usage');
-    const unsub     = onSnapshot(
+    const unsub = onSnapshot(
       globalRef,
       (snap) => {
         if (snap.exists()) {
           const d     = snap.data();
           const month = currentMonthStr();
           if (d.month === month) {
-            setMonthlyApiCost(d.monthly_api_cost ?? 0);
-            setTotalApiCalls(d.totalApiCalls      ?? 0);
+            setPlatformEnterpriseCallsUsed(d.sku_enterprise_calls ?? 0);
+            setPlatformTotalApiCalls(d.totalApiCalls           ?? 0);
+            setPlatformTotalCreditsUsed(d.totalCreditsUsed     ?? 0);
           } else {
-            setMonthlyApiCost(0);
-            setTotalApiCalls(0);
+            setPlatformEnterpriseCallsUsed(0);
+            setPlatformTotalApiCalls(0);
+            setPlatformTotalCreditsUsed(0);
           }
         } else {
-          setMonthlyApiCost(0);
-          setTotalApiCalls(0);
+          setPlatformEnterpriseCallsUsed(0);
+          setPlatformTotalApiCalls(0);
+          setPlatformTotalCreditsUsed(0);
         }
         setLoadingGlobal(false);
       },
@@ -102,13 +108,13 @@ export const CreditProvider = ({ children }) => {
     return unsub;
   }, [currentUser?.uid]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Real-time listener: current user's Firestore document (analytics) ────
+  // ── Real-time listener: current user document ────────────────────────────
   useEffect(() => {
     if (!currentUser?.uid) {
       setMySearchCount(0);
-      setMyCallsUsed(0);
-      setMyMonthlyUsdUsed(0);
-      setMyMonthlyLimitUsd(DEFAULT_USER_BUDGET_USD);
+      setMyApiCallsUsed(0);
+      setMyCreditsUsed(0);
+      setMyCreditsLimit(DEFAULT_USER_CREDITS);
       setMyUnlimited(false);
       setLoadingUser(false);
       return;
@@ -119,32 +125,32 @@ export const CreditProvider = ({ children }) => {
       userRef,
       (snap) => {
         if (snap.exists()) {
-          const d = snap.data();
-          const effectiveMetrics = getEffectiveUserMonthMetrics(d, currentMonthStr());
+          const d       = snap.data();
+          const metrics = getEffectiveUserMonthMetrics(d, currentMonthStr());
 
           setMySearchCount(d.searchCount ?? 0);
-          setMyCallsUsed(effectiveMetrics.monthlyApiCalls);
-          setMyMonthlyUsdUsed(effectiveMetrics.monthlyApiCost);
+          setMyApiCallsUsed(metrics.monthlyApiCalls);
+          setMyCreditsUsed(metrics.monthlyCreditsUsed);
 
           if (d.creditLimit === 'unlimited') {
             setMyUnlimited(true);
-            setMyMonthlyLimitUsd(0);
+            setMyCreditsLimit(0);
           } else if (typeof d.creditLimit === 'number') {
             setMyUnlimited(false);
-            setMyMonthlyLimitUsd(Math.max(0, d.creditLimit));
+            setMyCreditsLimit(Math.max(0, Math.round(d.creditLimit)));
           } else if (typeof d.creditLimit === 'string' && d.creditLimit.trim() !== '') {
             const parsed = Number.parseFloat(d.creditLimit);
             setMyUnlimited(false);
-            setMyMonthlyLimitUsd(Number.isFinite(parsed) ? Math.max(0, parsed) : DEFAULT_USER_BUDGET_USD);
+            setMyCreditsLimit(Number.isFinite(parsed) ? Math.max(0, Math.round(parsed)) : DEFAULT_USER_CREDITS);
           } else {
             setMyUnlimited(false);
-            setMyMonthlyLimitUsd(DEFAULT_USER_BUDGET_USD);
+            setMyCreditsLimit(DEFAULT_USER_CREDITS);
           }
         } else {
           setMySearchCount(0);
-          setMyCallsUsed(0);
-          setMyMonthlyUsdUsed(0);
-          setMyMonthlyLimitUsd(DEFAULT_USER_BUDGET_USD);
+          setMyApiCallsUsed(0);
+          setMyCreditsUsed(0);
+          setMyCreditsLimit(DEFAULT_USER_CREDITS);
           setMyUnlimited(false);
         }
         setLoadingUser(false);
@@ -157,117 +163,122 @@ export const CreditProvider = ({ children }) => {
     return unsub;
   }, [currentUser?.uid]);
 
-  // ── Runtime email-alert settings ──────────────────────────────────────────
+  // ── Alert settings loader ─────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-
-    const loadAlertSettings = async () => {
+    const load = async () => {
       if (!currentUser?.uid) {
         setCreditAlertThresholdPct(80);
         setCreditAlertsEnabled(true);
         return;
       }
-
       try {
         const snap = await getDoc(doc(db, 'systemConfig', 'globalSettings'));
         if (!snap.exists() || cancelled) return;
-
         const data = snap.data() || {};
-        const parsedThreshold = Number.parseInt(data.creditAlertThreshold, 10);
+        const parsed = Number.parseInt(data.creditAlertThreshold, 10);
         setCreditAlertThresholdPct(
-          Number.isFinite(parsedThreshold)
-            ? Math.min(Math.max(parsedThreshold, 1), 100)
-            : 80
+          Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 100) : 80
         );
         setCreditAlertsEnabled((data.emailNotificationsEnabled ?? true) && (data.sendCreditAlerts ?? true));
       } catch {
-        if (!cancelled) {
-          setCreditAlertThresholdPct(80);
-          setCreditAlertsEnabled(true);
-        }
+        if (!cancelled) { setCreditAlertThresholdPct(80); setCreditAlertsEnabled(true); }
       }
     };
-
-    loadAlertSettings();
-    return () => {
-      cancelled = true;
-    };
+    load();
+    return () => { cancelled = true; };
   }, [currentUser?.uid]);
 
-  // ── deductCredits wrapper (stable reference) ─────────────────────────────
+  // ── deductCredits wrapper ─────────────────────────────────────────────────
   const deductCredits = useCallback(
     (apiCalls, meta = {}) => {
       if (!currentUser?.uid) return Promise.reject(new Error('Not signed in.'));
-      return deductCreditsService(currentUser.uid, apiCalls, meta);
+      // All current calls are Enterprise tier (phone+website+ratings in FIELD_MASK)
+      return deductCreditsService(currentUser.uid, apiCalls, 'enterprise', meta);
     },
     [currentUser?.uid]
   );
 
   // ── Derived values ────────────────────────────────────────────────────────
-  const remainingCalls  = Math.max(0, MONTHLY_FREE_CALLS - totalApiCalls);
-  const myCreditRemainingUsd = myUnlimited
+  const myCreditsRemaining = myUnlimited
     ? null
-    : Math.max(0, +(myMonthlyLimitUsd - myMonthlyUsdUsed).toFixed(4));
+    : Math.max(0, myCreditsLimit - myCreditsUsed);
+
   const myCreditPctUsed = myUnlimited
     ? 0
-    : Math.min(+((myMonthlyUsdUsed / Math.max(myMonthlyLimitUsd, 0.0001)) * 100).toFixed(1), 100);
-  const platformPctUsed = Math.min(
-    +((monthlyApiCost / Math.max(effectivePlatformCapUsd, 0.0001)) * 100).toFixed(1),
+    : Math.min(+((myCreditsUsed / Math.max(myCreditsLimit, 1)) * 100).toFixed(1), 100);
+
+  const platformCreditPctUsed = Math.min(
+    +((platformEnterpriseCallsUsed / CREDIT_CONFIG.SKU_FREE_CAPS.enterprise) * 100).toFixed(1),
     100
   );
 
-  // ── Auto-send credit alert when threshold is crossed (global, not page-specific)
+  // ── User alert at 80% ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!currentUser?.uid || !currentUser?.email) return;
     if (myUnlimited || !creditAlertsEnabled) return;
     if (myCreditPctUsed < creditAlertThresholdPct) return;
 
-    const now = new Date();
+    const now      = new Date();
     const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const dedupeKey = `credit-alert-email:${currentUser.uid}:${monthKey}:${creditAlertThresholdPct}`;
     if (window.localStorage.getItem(dedupeKey) === 'sent') return;
 
     triggerSystemEmail('credit_alert', {
-      userEmail: currentUser.email,
-      usagePct: myCreditPctUsed,
-      remainingUsd: Number((myCreditRemainingUsd ?? 0).toFixed(2)),
+      userEmail:        currentUser.email,
+      usagePct:         myCreditPctUsed,
+      creditsRemaining: myCreditsRemaining ?? 0,
+      creditsTotal:     myCreditsLimit,
+      remainingUsd:     0,          // legacy field — kept for Cloud Function compat
       requestedAmountUsd: 0,
-      reason: `Usage crossed configured threshold (${creditAlertThresholdPct}%)`,
+      reason: `You have used ${myCreditPctUsed}% of your ${myCreditsLimit} monthly credits`,
     }).then((result) => {
-      if (result?.ok) {
-        window.localStorage.setItem(dedupeKey, 'sent');
-      }
+      if (result?.ok) window.localStorage.setItem(dedupeKey, 'sent');
     });
   }, [
     currentUser?.uid,
     currentUser?.email,
     myUnlimited,
     myCreditPctUsed,
-    myCreditRemainingUsd,
+    myCreditsRemaining,
+    myCreditsLimit,
     creditAlertsEnabled,
     creditAlertThresholdPct,
   ]);
 
   const value = {
-    // Global platform stats
-    totalApiCalls,
-    monthlyApiCost,
-    monthlyCapUsd:  effectivePlatformCapUsd,
-    remainingCalls,
-    platformPctUsed,
-    // Per-user analytics
+    // ── Platform stats (for admin dashboard) ──────────────────────────────
+    platformEnterpriseCallsUsed,
+    platformTotalApiCalls,
+    platformTotalCreditsUsed,
+    platformCreditPctUsed,
+    platformEnterpriseCap: CREDIT_CONFIG.SKU_FREE_CAPS.enterprise,
+
+    // ── Per-user credits ───────────────────────────────────────────────────
     mySearchCount,
-    myCallsUsed,
-    myMonthlyUsdUsed,
-    myMonthlyLimitUsd,
-    myCreditRemainingUsd,
+    myApiCallsUsed,
+    myCreditsUsed,
+    myCreditsLimit,
+    myCreditsRemaining,
     myCreditPctUsed,
     myCreditIsUnlimited: myUnlimited,
-    // Legacy aliases — keeps any existing consumers working
-    credits:     myUnlimited ? 'unlimited' : myCreditRemainingUsd,
-    creditsUsed: myCallsUsed,
-    // Actions
-    loading:       loadingUser || loadingGlobal,
+
+    // ── Legacy aliases — keeps existing consumers working ──────────────────
+    // SearchPanel, Sidebar, PlatformUsagePage still reference these names
+    totalApiCalls:       platformTotalApiCalls,
+    monthlyApiCost:      0,
+    monthlyCapUsd:       0,
+    remainingCalls:      Math.max(0, CREDIT_CONFIG.SKU_FREE_CAPS.enterprise - platformEnterpriseCallsUsed),
+    platformPctUsed:     platformCreditPctUsed,
+    myCallsUsed:         myApiCallsUsed,
+    myMonthlyUsdUsed:    0,
+    myMonthlyLimitUsd:   myCreditsLimit,       // repurposed: now holds credit count
+    myCreditRemainingUsd: myCreditsRemaining,  // repurposed: now holds credit count
+    credits:             myUnlimited ? 'unlimited' : myCreditsRemaining,
+    creditsUsed:         myApiCallsUsed,
+
+    // ── Actions ────────────────────────────────────────────────────────────
+    loading: loadingUser || loadingGlobal,
     deductCredits,
   };
 
@@ -277,5 +288,3 @@ export const CreditProvider = ({ children }) => {
     </CreditContext.Provider>
   );
 };
-
-// default export removed — nothing imports it and it breaks React Fast Refresh

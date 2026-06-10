@@ -315,12 +315,12 @@ const SettingsNew = () => {
                 className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 disabled={!canEdit}
               >
-                <option value="25">$25 monthly</option>
-                <option value="50">$50 monthly</option>
-                <option value="75">$75 monthly</option>
-                <option value="100">$100 monthly</option>
-                <option value="150">$150 monthly</option>
-                <option value="200">$200 monthly</option>
+                <option value="1400">1,400 credits/month</option>
+                <option value="2800">2,800 credits/month (default)</option>
+                <option value="4200">4,200 credits/month</option>
+                <option value="5600">5,600 credits/month</option>
+                <option value="8400">8,400 credits/month</option>
+                <option value="11200">11,200 credits/month</option>
                 <option value="unlimited">Unlimited</option>
               </select>
             </SettingRow>
