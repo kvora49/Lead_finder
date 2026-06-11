@@ -969,7 +969,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v10`);
+    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v11`);
 
     if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
@@ -1209,7 +1209,59 @@ const _searchSingle = async (keyword, location, options = {}) => {
       log(`[filter-C] ${beforeC} → ${finalLeads.length} after anti-stock filter`);
     }
 
-    log(`[relevance] THREE-LAYER | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
+    // ── Layer D: Keyword-Relevance Gate ────────────────────────────────
+    // Layer A proves a place is a shop. Layers B/C exclude bad names.
+    // But a shop can sell ANYTHING — "Patel Hardware" passes type-whitelist
+    // for a "ball" search even though it has zero relation to balls.
+    // Layer D requires at least ONE affinity signal:
+    //   • keyword or synonym appears in the business name
+    //   • a store_name_keyword appears in the business name
+    //   • keyword or synonym appears in customer reviews
+    //   • place has a highly specific matching type (e.g. sporting_goods_store)
+    // Safety net: if filtering would leave < 3 results, keep unfiltered.
+    if (intent) {
+      const affinityWords = [
+        kwLower,
+        ...(intent.synonyms || []).map(s => s.toLowerCase()),
+        ...(intent.review_keywords || []).map(s => s.toLowerCase()),
+      ];
+      const storeHints = (intent.store_name_keywords || []).map(s => s.toLowerCase());
+
+      // Types that are specific enough to count as a signal on their own
+      // (a sporting_goods_store IS relevant for "ball" even without name match)
+      const HIGHLY_SPECIFIC_TYPES = new Set([
+        'sporting_goods_store', 'toy_store', 'bicycle_store',
+        'book_store', 'pet_store', 'florist',
+      ]);
+
+      const beforeD = finalLeads.length;
+      const gated = finalLeads.filter((lead) => {
+        const name = (lead.displayName?.text || '').toLowerCase();
+        const reviewText = (lead._reviewText || '').toLowerCase();
+        const types = lead.types || [];
+
+        // Signal 1: keyword/synonym in name
+        if (affinityWords.some(w => name.includes(w))) return true;
+        // Signal 2: store-hint keyword in name
+        if (storeHints.some(w => name.includes(w))) return true;
+        // Signal 3: keyword/synonym in reviews
+        if (reviewText && affinityWords.some(w => reviewText.includes(w))) return true;
+        // Signal 4: highly specific matching type
+        if (types.some(t => HIGHLY_SPECIFIC_TYPES.has(t))) return true;
+
+        return false;
+      });
+
+      // Safety net: don't nuke all results
+      if (gated.length >= 3) {
+        finalLeads = gated;
+        log(`[filter-D] ${beforeD} → ${finalLeads.length} after keyword-relevance gate`);
+      } else {
+        log(`[filter-D] safety net — kept ${beforeD} results (gate would leave ${gated.length})`);
+      }
+    }
+
+    log(`[relevance] FOUR-LAYER | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
 
     } else if (isProductType && isFoodSearch) {
     const foodAndProductTypes = new Set([...FOOD_DRINK_TYPES, ...PRODUCT_SELLER_TYPES]);
@@ -1288,9 +1340,9 @@ const _searchSingle = async (keyword, location, options = {}) => {
 
     // Drop "possible" results only when we have enough verified/likely results
     // to not leave the user with an empty result set.
-    const CONFIDENCE_THRESHOLD = 10;
+    const CONFIDENCE_THRESHOLD = 20;
     const highQuality = finalLeads.filter(l => (l.confidenceScore || 0) >= CONFIDENCE_THRESHOLD);
-    if (highQuality.length >= 5) {
+    if (highQuality.length >= 3) {
       finalLeads = highQuality;
       log(`[confidence] threshold filter: kept ${finalLeads.length} results (score ≥ ${CONFIDENCE_THRESHOLD})`);
     }
