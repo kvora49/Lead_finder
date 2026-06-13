@@ -387,6 +387,8 @@ const _fallbackIntent = (keyword) => {
     store_name_keywords: [kw],
     review_keywords:     [kw],
     synonyms:            [],
+    indian_synonyms:     [],
+    category_keywords:   [],
     exclude_name_words:  [],
     anti_stock_keywords: [],
     is_food:  FOOD_KEYWORDS.test(kw),
@@ -413,7 +415,7 @@ const getKeywordIntent = async (keyword, options = {}) => {
   const cacheKey = _intentCacheKey(kw);
 
   // ── 1. Check permanent intent cache ────────────────────────────────────────
-  const CURRENT_INTENT_SCHEMA = 5;   // bump when Gemini prompt schema changes — v5: type_queries instead of search_queries
+  const CURRENT_INTENT_SCHEMA = 6;   // bump when Gemini prompt schema changes — v6: category_keywords and indian_synonyms
   try {
     const cacheRef = doc(db, GEMINI_CONFIG.INTENT_CACHE_COLLECTION, cacheKey);
     const cacheSnap = await getDoc(cacheRef);
@@ -492,6 +494,8 @@ Given the keyword "${kw}", return a JSON object with these fields:
   - Do NOT include broad generic phrases like "shop ahmedabad" without the product name
   - All 4 keys must always be present, even if you have to approximate for unusual keywords
 
+- review_keywords: array of words customers write in Google reviews when they bought this product. For "kurti" → ["kurti", "kurta", "ethnic wear"]. For "bat" → ["bat", "cricket bat", "sports"].
+
 - store_name_keywords: array of SPECIFIC phrases likely in the NAME of shops that actually SELL this product.
   CRITICAL RULE: These must be SPECIFIC to this product — words that would ONLY appear in a shop name if it actually sells this product. Do NOT include broad single-word categories.
   BAD example for "ball"  → ["sports", "games"] (too broad — matches Sports Cafe, Sports Club, Sports Academy)
@@ -502,9 +506,47 @@ Given the keyword "${kw}", return a JSON object with these fields:
   GOOD example for "kurti" → ["ladies wear", "ethnic wear", "kurti house", "garment shop"]
   Provide 4-6 specific multi-word phrases.
 
-- review_keywords: array of words customers write in Google reviews when they bought this product. For "kurti" → ["kurti", "kurta", "ethnic wear"]. For "bat" → ["bat", "cricket bat", "sports"].
+- category_keywords: array of 6-10 words/phrases that describe the TYPE OF SHOP that sells "${kw}" in India. These are the words that appear in Indian shop NAMES even when the product name itself does not appear.
+
+  The category_keywords should answer: "What kind of shop sells this product in India?"
+
+  Examples:
+  "chair" → the shops are called furniture stores, interior shops, home furnishing shops
+    category_keywords: ["furniture", "interior", "furnishing", "home decor", "office furniture", "sofa", "wooden furniture", "modular furniture"]
+
+  "curtains" → the shops are called handloom, parda, window decor, home furnishing
+    category_keywords: ["handloom", "parda", "furnishing", "window decor", "drapes", "home decor", "curtain", "blinds", "textile"]
+
+  "cement" → the shops are called building material, hardware, construction material
+    category_keywords: ["building material", "hardware", "construction", "cement dealer", "sanitary", "tiles", "plumbing"]
+
+  "paint" → the shops are called paint house, colour point, hardware
+    category_keywords: ["paint", "colour", "hardware", "asian paints", "berger", "nerolac", "wall care", "decorative"]
+
+  "bat" → the shops actually use the product name — use ["sports goods", "cricket", "sports equipment"]
+  (When the product name DOES appear in shop names, category_keywords can overlap with store_name_keywords)
+
+  CRITICAL:
+  - Include BOTH English AND common Indian/Hindi/Gujarati terms for the shop type
+  - Include brand names that appear in shop names (Asian Paints, Berger, etc.) when relevant
+  - Include 6-10 items, not just 2-3
+  - These are for NAME matching only — they can be single words unlike store_name_keywords
 
 - synonyms: alternate Indian names for this product. For "kurti" → ["kurta", "kurtee"]. For "cement" → ["concrete", "mortar"].
+
+- indian_synonyms: array of Hindi/Gujarati/regional language words for "${kw}" that commonly appear in Indian shop names and reviews.
+
+  Examples:
+  "curtains" → ["parda", "pardah", "drapes"]
+  "chair" → ["kursi", "khursi"]
+  "sofa" → ["sofa", "settee", "divan"]
+  "carpet" → ["carpet", "dari", "gaddi", "kaleen"]
+  "paint" → ["rang", "colour"]
+  "pillow" → ["takiya", "gaddi"]
+  "shirt" → ["shirt", "kameez"]
+
+  Include these in addition to the existing "synonyms" field.
+  These will be used as name-matching words alongside the product keyword.
 
 - exclude_name_words: 8-12 words in business names that DISQUALIFY them. Must include BOTH types:
   (a) FALSE COGNATES — other products or businesses sharing the same word but in a completely different industry.
@@ -595,6 +637,8 @@ Return ONLY valid JSON. No markdown, no explanation, no code fences.`;
     intent.type_queries.manufacturer = Array.isArray(intent.type_queries.manufacturer) ? intent.type_queries.manufacturer : [`${kw} manufacturer`, `${kw} factory`];
     intent.type_queries.distributor  = Array.isArray(intent.type_queries.distributor) ? intent.type_queries.distributor : [`${kw} distributor`, `${kw} supplier`];
   }
+  intent.category_keywords   = Array.isArray(intent.category_keywords) ? intent.category_keywords : [];
+  intent.indian_synonyms     = Array.isArray(intent.indian_synonyms) ? intent.indian_synonyms : [];
   intent.store_name_keywords = Array.isArray(intent.store_name_keywords) ? intent.store_name_keywords : [kw];
   intent.review_keywords     = Array.isArray(intent.review_keywords) ? intent.review_keywords : [kw];
   intent.synonyms            = Array.isArray(intent.synonyms) ? intent.synonyms : [];
@@ -1067,7 +1111,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v13`);
+    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v14`);
 
     if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
@@ -1321,8 +1365,10 @@ const _searchSingle = async (keyword, location, options = {}) => {
       const affinityWords = [
         kwLower,
         ...(intent.synonyms || []).map(s => s.toLowerCase()),
+        ...(intent.indian_synonyms || []).map(s => s.toLowerCase()),
         ...(intent.review_keywords || []).map(s => s.toLowerCase()),
       ];
+      const categoryWords = (intent.category_keywords || []).map(s => s.toLowerCase());
       const storeHints = (intent.store_name_keywords || []).map(s => s.toLowerCase());
 
       // Types that are specific enough to count as a signal on their own
@@ -1331,6 +1377,8 @@ const _searchSingle = async (keyword, location, options = {}) => {
         'sporting_goods_store', 'toy_store', 'bicycle_store',
         'book_store', 'pet_store', 'florist',
         'clothing_store', 'jewelry_store',
+        'furniture_store', 'home_goods_store',
+        'hardware_store', 'paint_store', 'electronics_store',
       ]);
 
       const beforeD = finalLeads.length;
@@ -1339,14 +1387,16 @@ const _searchSingle = async (keyword, location, options = {}) => {
         const reviewText = (lead._reviewText || '').toLowerCase();
         const types = lead.types || [];
 
-        // Signal 1: keyword/synonym in name
+        // Signal 1: product keyword OR indian synonym in name
         if (affinityWords.some(w => w && name.includes(w))) return true;
-        // Signal 2: store-hint keyword in name
-        if (storeHints.some(w => w && name.includes(w))) return true;
-        // Signal 3: keyword/synonym in reviews
+        // Signal 2: category keyword in name
+        if (categoryWords.some(w => w && name.includes(w))) return true;
+        // Signal 3: product keyword OR synonym in reviews
         if (reviewText && affinityWords.some(w => w && reviewText.includes(w))) return true;
-        // Signal 4: highly specific matching type
+        // Signal 4: highly specific OR category Google type
         if (types.some(t => HIGHLY_SPECIFIC_TYPES.has(t))) return true;
+        // Signal 5: specific store hint phrase in name (bonus)
+        if (storeHints.some(w => w && name.includes(w))) return true;
 
         return false;
       });
@@ -1428,9 +1478,26 @@ const _searchSingle = async (keyword, location, options = {}) => {
     const reviewWords = [
       ...(intent.review_keywords || []),
       ...(intent.synonyms || []),
+      ...(intent.indian_synonyms || []),
       kwLower,
     ].map(w => w.toLowerCase());
+    
+    const affinityWords = [
+      kwLower,
+      ...(intent.synonyms || []),
+      ...(intent.indian_synonyms || []),
+    ].map(w => w.toLowerCase());
+
+    const categoryWords = (intent.category_keywords || []).map(w => w.toLowerCase());
     const storeHintWords = (intent.store_name_keywords || []).map(w => w.toLowerCase());
+
+    const HIGHLY_SPECIFIC_TYPES = new Set([
+      'sporting_goods_store', 'toy_store', 'bicycle_store',
+      'book_store', 'pet_store', 'florist',
+      'clothing_store', 'jewelry_store',
+      'furniture_store', 'home_goods_store',
+      'hardware_store', 'paint_store', 'electronics_store',
+    ]);
 
     for (const lead of finalLeads) {
       let score = 0;
@@ -1438,16 +1505,12 @@ const _searchSingle = async (keyword, location, options = {}) => {
       const reviewText = (lead._reviewText || '').toLowerCase();
       const types = lead.types || [];
 
-      // Reviews are the strongest signal — customers explicitly mention the product
-      if (reviewText && reviewWords.some(w => reviewText.includes(w))) score += 60;
-      // Keyword directly in business name — very strong signal (raised from 20→50)
+      if (reviewText && reviewWords.some(w => w && reviewText.includes(w))) score += 60;
       if (name.includes(kwLower)) score += 50;
-      // Specific store-hint phrase in name (e.g. "sports goods" for "ball") — moderate signal
+      if (affinityWords.some(w => w.length > 2 && name.includes(w))) score += 40;
+      if (categoryWords.some(w => w && name.includes(w))) score += 35;
       if (storeHintWords.some(w => w && name.includes(w))) score += 30;
-      // Being a product-seller type — weak signal alone (reduced from 30→20)
-      // A hardware store, clothing store etc. is ANY shop — doesn't mean it sells THIS product
-      if (types.some(t => PRODUCT_SELLER_TYPES.has(t))) score += 20;
-      // Penalise places with only generic types — they are unverified (raised from -10→-20)
+      if (types.some(t => HIGHLY_SPECIFIC_TYPES.has(t))) score += 25;
       if (types.length > 0 && types.filter(t => !GENERIC_PLACE_TYPES.has(t)).length === 0) score -= 20;
 
       lead.confidenceScore = score;
