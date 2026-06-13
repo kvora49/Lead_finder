@@ -125,9 +125,9 @@ const FIELD_MASK = [
 //   neighbourhood: 4×3 = 12 cells × 2 variants × 1 page = 24 calls
 //   specific:      1×1 =  1 cell  × 3 variants × ≤3 pages = ≤9 calls
 const GRID_CONFIG = {
-  city:          { cols: 4, rows: 4, pagesPerCell: 1 },  // 16 cells × 2 variants × 1 page = 32 calls exact
-  neighbourhood: { cols: 4, rows: 3, pagesPerCell: 1 },  // 12 cells × 2 variants × 1 page = 24 calls exact
-  specific:      { cols: 1, rows: 1, pagesPerCell: 3 },  //  1 cell  × 3 variants × ≤3 pages = ≤9 calls
+  city:          { cols: 4, rows: 4, pagesPerCell: 1 }, // 16 cells
+  neighbourhood: { cols: 3, rows: 3, pagesPerCell: 1 }, //  9 cells
+  specific:      { cols: 2, rows: 2, pagesPerCell: 2 }, //  4 cells × 2 pages = 8 page-calls per query
 };
 
 // Global fallback (should not be needed — all scopes are in GRID_CONFIG).
@@ -378,7 +378,12 @@ const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models
 const _fallbackIntent = (keyword) => {
   const kw = keyword.toLowerCase().trim();
   return {
-    search_queries:      [`${kw} shop`, `${kw} store`],
+    type_queries: {
+      retailer:     [`${kw} shop`, `${kw} store`],
+      wholesaler:   [`${kw} wholesale`, `${kw} thok`],
+      manufacturer: [`${kw} manufacturer`, `${kw} factory`],
+      distributor:  [`${kw} distributor`, `${kw} supplier`],
+    },
     store_name_keywords: [kw],
     review_keywords:     [kw],
     synonyms:            [],
@@ -408,7 +413,7 @@ const getKeywordIntent = async (keyword, options = {}) => {
   const cacheKey = _intentCacheKey(kw);
 
   // ── 1. Check permanent intent cache ────────────────────────────────────────
-  const CURRENT_INTENT_SCHEMA = 4;   // bump when Gemini prompt schema changes — v4: specific store_name_keywords, expanded exclude_name_words, is_ambiguous
+  const CURRENT_INTENT_SCHEMA = 5;   // bump when Gemini prompt schema changes — v5: type_queries instead of search_queries
   try {
     const cacheRef = doc(db, GEMINI_CONFIG.INTENT_CACHE_COLLECTION, cacheKey);
     const cacheSnap = await getDoc(cacheRef);
@@ -456,7 +461,36 @@ const getKeywordIntent = async (keyword, options = {}) => {
 
 Given the keyword "${kw}", return a JSON object with these fields:
 
-- search_queries: array of 3-5 India-specific Google Maps search phrases that a person would type to find shops SELLING this product. Include shop/store/dealer/market variants. Examples: for "kurti" → ["ladies kurti shop", "ethnic wear store", "women clothing boutique"]. For "cement" → ["cement dealer", "building material shop", "construction material supplier"]. For "bat" → ["cricket bat shop", "sports goods store", "sporting equipment dealer"].
+- type_queries: object with exactly 4 keys. Each key is an array of 4-6 India-specific Google Maps search phrases SPECIFIC to that business role for the keyword "${kw}".
+
+  Keys and their meaning:
+  "retailer"     → shops, stores, showrooms, outlets that sell this product to end customers
+  "wholesaler"   → bulk markets, wholesale dealers, thok bazaar, bulk suppliers
+  "manufacturer" → factories, production units, udyog, industries that MAKE this product
+  "distributor"  → distributors, stockists, authorised agents, C&F agents, sole agents
+
+  Example for "bat":
+  {
+    "retailer":     ["cricket bat shop", "sports goods store", "bat retail outlet", "cricket equipment shop"],
+    "wholesaler":   ["cricket bat wholesale", "sports goods wholesale market", "bat bulk supplier", "cricket equipment thok"],
+    "manufacturer": ["cricket bat manufacturer", "bat factory", "cricket bat udyog", "sports goods manufacturer"],
+    "distributor":  ["cricket bat distributor", "sports equipment stockist", "bat authorised dealer", "cricket goods agent"]
+  }
+
+  Example for "kurti":
+  {
+    "retailer":     ["kurti shop", "ladies ethnic wear store", "kurti boutique", "ethnic fashion outlet"],
+    "wholesaler":   ["kurti wholesale", "ethnic wear wholesale market", "kurti thok", "ladies garment wholesale"],
+    "manufacturer": ["kurti manufacturer", "ladies garment factory", "ethnic wear production unit", "kurti udyog"],
+    "distributor":  ["kurti distributor", "ethnic wear stockist", "ladies garment agent", "kurti supplier"]
+  }
+
+  Rules:
+  - Each array must have exactly 4-6 items
+  - Phrases must be specific to the product + role combination
+  - Include Indian variants: "thok", "bhandar", "udyog", "mart", "house"
+  - Do NOT include broad generic phrases like "shop ahmedabad" without the product name
+  - All 4 keys must always be present, even if you have to approximate for unusual keywords
 
 - store_name_keywords: array of SPECIFIC phrases likely in the NAME of shops that actually SELL this product.
   CRITICAL RULE: These must be SPECIFIC to this product — words that would ONLY appear in a shop name if it actually sells this product. Do NOT include broad single-word categories.
@@ -548,7 +582,19 @@ Return ONLY valid JSON. No markdown, no explanation, no code fences.`;
   }
 
   // ── 4. Validate & normalize ────────────────────────────────────────────────
-  intent.search_queries      = Array.isArray(intent.search_queries) ? intent.search_queries : [`${kw} shop`, `${kw} store`];
+  if (typeof intent.type_queries !== 'object' || intent.type_queries === null) {
+    intent.type_queries = {
+      retailer:     [`${kw} shop`, `${kw} store`],
+      wholesaler:   [`${kw} wholesale`, `${kw} thok`],
+      manufacturer: [`${kw} manufacturer`, `${kw} factory`],
+      distributor:  [`${kw} distributor`, `${kw} supplier`],
+    };
+  } else {
+    intent.type_queries.retailer     = Array.isArray(intent.type_queries.retailer) ? intent.type_queries.retailer : [`${kw} shop`, `${kw} store`];
+    intent.type_queries.wholesaler   = Array.isArray(intent.type_queries.wholesaler) ? intent.type_queries.wholesaler : [`${kw} wholesale`, `${kw} thok`];
+    intent.type_queries.manufacturer = Array.isArray(intent.type_queries.manufacturer) ? intent.type_queries.manufacturer : [`${kw} manufacturer`, `${kw} factory`];
+    intent.type_queries.distributor  = Array.isArray(intent.type_queries.distributor) ? intent.type_queries.distributor : [`${kw} distributor`, `${kw} supplier`];
+  }
   intent.store_name_keywords = Array.isArray(intent.store_name_keywords) ? intent.store_name_keywords : [kw];
   intent.review_keywords     = Array.isArray(intent.review_keywords) ? intent.review_keywords : [kw];
   intent.synonyms            = Array.isArray(intent.synonyms) ? intent.synonyms : [];
@@ -978,13 +1024,34 @@ const _searchSingle = async (keyword, location, options = {}) => {
   let queries;
   const includedType = INCLUDED_TYPE_MAP[type] ?? null;
 
-  if (isProductType && intent && !isFoodSearch && !isServiceSearch && intent.search_queries?.length) {
-    // AI-generated queries — append location
+  if (isProductType && intent && !isFoodSearch && !isServiceSearch && intent.type_queries) {
     const loc = fullLocation;
-    const aiQueries = intent.search_queries.map(q => `${q} in ${loc}`);
-    // Trim to 2 for city/neighbourhood, 3 for specific
-    queries = searchScope === 'specific' ? aiQueries.slice(0, 3) : aiQueries.slice(0, 2);
-    log('[search] using AI queries:', queries);
+    const QUERY_LIMITS = {
+      city:          8,
+      neighbourhood: 6,
+      specific:      4,
+    };
+    const queryLimit = QUERY_LIMITS[searchScope] ?? 6;
+
+    let aiQueries;
+    if (!type || type === '') {
+      // Any type — combine all arrays
+      const combined = [
+        ...(intent.type_queries?.retailer     || []),
+        ...(intent.type_queries?.wholesaler   || []),
+        ...(intent.type_queries?.manufacturer || []),
+        ...(intent.type_queries?.distributor  || []),
+      ];
+      // Deduplicate and limit
+      aiQueries = [...new Set(combined)].slice(0, queryLimit);
+    } else {
+      // Specific type — use that type's queries only
+      const typeKey = type === 'store' ? 'retailer' : type;
+      aiQueries = (intent.type_queries?.[typeKey] || intent.type_queries?.retailer || []).slice(0, queryLimit);
+    }
+
+    queries = aiQueries.map(q => `${q} in ${loc}`);
+    log('[search] using AI type-queries:', queries);
   } else {
     // Fallback to static query builder (food, service, category types)
     queries = buildQueries(keyword.trim(), fullLocation, searchScope, type);
@@ -1000,7 +1067,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v12`);
+    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v13`);
 
     if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
@@ -1263,6 +1330,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
       const HIGHLY_SPECIFIC_TYPES = new Set([
         'sporting_goods_store', 'toy_store', 'bicycle_store',
         'book_store', 'pet_store', 'florist',
+        'clothing_store', 'jewelry_store',
       ]);
 
       const beforeD = finalLeads.length;
@@ -1392,7 +1460,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
     //   • keyword in business name (+50) OR
     //   • customer reviews mention the keyword (+60)
     // Just being a shop (+20) no longer qualifies on its own.
-    const CONFIDENCE_THRESHOLD = 50;
+    const CONFIDENCE_THRESHOLD = 35;
     const highQuality = finalLeads.filter(l => (l.confidenceScore || 0) >= CONFIDENCE_THRESHOLD);
     if (highQuality.length > 0) {
       finalLeads = highQuality;
@@ -1593,10 +1661,10 @@ export const deduplicateResults = (leads) => {
 //   restaurant · lodging · hospital · bank · school · gym · real estate
 const SUBTYPE_DEFS = {
   product: [
-    { value: 'retailer',      label: 'Retailer',        hint: 'Shops, stores, showrooms, outlets',              pattern: null },
-    { value: 'wholesaler',    label: 'Wholesaler',       hint: 'Wholesale markets, bulk dealers',                pattern: /wholesal|\bthok\b|bulk\s*(deal|sale|trade|suppl)|whole\s*sale/ },
-    { value: 'distributor',   label: 'Distributor',      hint: 'Distributors, stockists, authorised agents',     pattern: /distribut|stockist|\bc\s*[&]\s*f\b|authoris[ae]d\s*(dealer|distribut)|sole\s*(agent|distribut)|supply\s*(house|co\.?)|\bsupplier/ },
-    { value: 'manufacturer',  label: 'Manufacturer',     hint: 'Factories, industries, fabricators',             pattern: /manufactur|\bfactory\b|\bindustr(ies|ial|y)\b|\bfabricat|\bmfg\.?\b|\bproducer|\bproduction\b|\bworks\b/ },
+    { value: 'retailer',      label: 'Retailer',        hint: 'Shops, stores, showrooms, outlets',              pattern: /shop|store|showroom|outlet|mart|retail|bhandar/i },
+    { value: 'wholesaler',    label: 'Wholesaler',       hint: 'Wholesale markets, bulk dealers',                pattern: /wholesal|\bthok\b|bulk\s*(deal|sale|trade|suppl)|whole\s*sale/i },
+    { value: 'distributor',   label: 'Distributor',      hint: 'Distributors, stockists, authorised agents',     pattern: /distribut|stockist|\bc\s*[&]\s*f\b|authoris[ae]d\s*(dealer|distribut)|sole\s*(agent|distribut)|supplier/i },
+    { value: 'manufacturer',  label: 'Manufacturer',     hint: 'Factories, industries, fabricators',             pattern: /manufactur|\bfactory\b|\bindustr(ies|ial|y)\b|\bfabricat|\bmfg\.?\b|\bproducer|\bproduction\b|\bworks/i },
   ],
   restaurant: [
     { value: 'dine_in',       label: 'Restaurant',       hint: 'Dine-in restaurants and eateries',               pattern: null },
@@ -1700,10 +1768,22 @@ const detectSubtype = (lead, subtypeDefs) => {
  * @param {string} subtype — subtype value from getFilterChips()
  */
 export const filterBySubtype = (leads, type, subtype) => {
-  if (!subtype) return leads;
   const key  = TYPE_TO_SUBTYPE_KEY[type] ?? 'product';
   const defs = SUBTYPE_DEFS[key]         ?? SUBTYPE_DEFS.product;
-  return (leads || []).filter((lead) => detectSubtype(lead, defs).has(subtype));
+
+  // If a specific subtype chip is selected, filter strictly by that chip
+  if (subtype) {
+    return (leads || []).filter((lead) => detectSubtype(lead, defs).has(subtype));
+  }
+
+  // If NO chip is selected, but a specific main 'type' is selected (e.g., 'manufacturer'),
+  // we filter strictly by that type. If 'Any type' (''), we pass all.
+  if (key === 'product' && type && type !== '') {
+    const targetSubtype = type === 'store' ? 'retailer' : type;
+    return (leads || []).filter((lead) => detectSubtype(lead, defs).has(targetSubtype));
+  }
+
+  return leads || [];
 };
 
 export default { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults, getFilterChips, filterBySubtype };
