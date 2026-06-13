@@ -386,6 +386,8 @@ const _fallbackIntent = (keyword) => {
     anti_stock_keywords: [],
     is_food:  FOOD_KEYWORDS.test(kw),
     is_service: SERVICE_KEYWORDS.test(kw),
+    is_ambiguous:    false,
+    primary_meaning: kw,
   };
 };
 
@@ -406,7 +408,7 @@ const getKeywordIntent = async (keyword, options = {}) => {
   const cacheKey = _intentCacheKey(kw);
 
   // ── 1. Check permanent intent cache ────────────────────────────────────────
-  const CURRENT_INTENT_SCHEMA = 3;   // bump when Gemini prompt schema changes
+  const CURRENT_INTENT_SCHEMA = 4;   // bump when Gemini prompt schema changes — v4: specific store_name_keywords, expanded exclude_name_words, is_ambiguous
   try {
     const cacheRef = doc(db, GEMINI_CONFIG.INTENT_CACHE_COLLECTION, cacheKey);
     const cacheSnap = await getDoc(cacheRef);
@@ -453,14 +455,41 @@ const getKeywordIntent = async (keyword, options = {}) => {
   const prompt = `You are a product-to-shop classifier for Indian local business search.
 
 Given the keyword "${kw}", return a JSON object with these fields:
+
 - search_queries: array of 3-5 India-specific Google Maps search phrases that a person would type to find shops SELLING this product. Include shop/store/dealer/market variants. Examples: for "kurti" → ["ladies kurti shop", "ethnic wear store", "women clothing boutique"]. For "cement" → ["cement dealer", "building material shop", "construction material supplier"]. For "bat" → ["cricket bat shop", "sports goods store", "sporting equipment dealer"].
-- store_name_keywords: array of words likely in the NAME of relevant shops. For "kurti" → ["fashion", "ladies", "women", "ethnic", "boutique", "garment"]. For "bat" → ["sports", "cricket", "games", "toy"].
-- review_keywords: array of words customers write in Google reviews when they bought this product. For "kurti" → ["kurti", "kurta", "ethnic wear"]. For "bat" → ["bat", "cricket", "sports"].
+
+- store_name_keywords: array of SPECIFIC phrases likely in the NAME of shops that actually SELL this product.
+  CRITICAL RULE: These must be SPECIFIC to this product — words that would ONLY appear in a shop name if it actually sells this product. Do NOT include broad single-word categories.
+  BAD example for "ball"  → ["sports", "games"] (too broad — matches Sports Cafe, Sports Club, Sports Academy)
+  GOOD example for "ball" → ["cricket ball", "sports goods", "sporting goods", "sports equipment"]
+  BAD example for "bat"   → ["sports", "cricket"] (too broad — matches Cricket Club, Cricket Academy)
+  GOOD example for "bat"  → ["cricket bat", "sports goods", "sports equipment", "bat and ball"]
+  BAD example for "kurti" → ["fashion", "ladies"] (too broad — matches Fashion Photography, Ladies Salon)
+  GOOD example for "kurti" → ["ladies wear", "ethnic wear", "kurti house", "garment shop"]
+  Provide 4-6 specific multi-word phrases.
+
+- review_keywords: array of words customers write in Google reviews when they bought this product. For "kurti" → ["kurti", "kurta", "ethnic wear"]. For "bat" → ["bat", "cricket bat", "sports"].
+
 - synonyms: alternate Indian names for this product. For "kurti" → ["kurta", "kurtee"]. For "cement" → ["concrete", "mortar"].
-- exclude_name_words: words in business names that DISQUALIFY them (wrong category entirely). For "bat" → ["motor", "car", "sanitary", "computer", "electronics"]. For "kurti" → ["motor", "hardware", "electrical", "computer", "plywood"].
+
+- exclude_name_words: 8-12 words in business names that DISQUALIFY them. Must include BOTH types:
+  (a) FALSE COGNATES — other products or businesses sharing the same word but in a completely different industry.
+      For "ball" → ["bearing", "valve", "bowling", "billiard", "ballroom"]
+      For "bat"  → ["batman", "batting cage", "cricket club", "cricket academy"]
+      For "pipe" → ["bagpipe", "pipe dream", "pipeline"]
+      For "ring" → ["boxing ring", "wrestling", "ringroad"]
+  (b) UNRELATED categories — motor, car, computer, hospital, school, salon, gym, cafe, restaurant, club, academy, coaching, etc.
+  Provide 8-12 words total.
+
 - anti_stock_keywords: words meaning the shop sells something DIFFERENT within same broad category. For "kurti" → ["jeans", "denim", "raymond", "suit", "nike", "adidas", "shoe", "footwear"]. For "bat" → ["shoe", "jewellery", "furniture"].
+
 - is_food: boolean, true ONLY if "${kw}" is a food/beverage item (biryani, pizza, cake, juice, etc.)
+
 - is_service: boolean, true ONLY if "${kw}" is a service (plumber, carpenter, AC repair, gym, salon, etc.)
+
+- is_ambiguous: boolean, true if "${kw}" could refer to completely different products in different industries. For "ball" → true (sports ball vs ball bearing). For "pipe" → true (plumbing pipe vs smoking pipe vs bagpipe). For "ring" → true (jewellery vs boxing ring). For "kurti" → false (only one meaning). For "cement" → false.
+
+- primary_meaning: string, the most common product meaning of "${kw}" for Indian retail context. For "ball" → "sports ball". For "pipe" → "plumbing pipe". For "ring" → "finger ring / jewellery ring". Only required when is_ambiguous is true.
 
 Return ONLY valid JSON. No markdown, no explanation, no code fences.`;
 
@@ -525,8 +554,10 @@ Return ONLY valid JSON. No markdown, no explanation, no code fences.`;
   intent.synonyms            = Array.isArray(intent.synonyms) ? intent.synonyms : [];
   intent.exclude_name_words  = Array.isArray(intent.exclude_name_words) ? intent.exclude_name_words : [];
   intent.anti_stock_keywords = Array.isArray(intent.anti_stock_keywords) ? intent.anti_stock_keywords : [];
-  intent.is_food    = !!intent.is_food;
-  intent.is_service = !!intent.is_service;
+  intent.is_food       = !!intent.is_food;
+  intent.is_service    = !!intent.is_service;
+  intent.is_ambiguous  = !!intent.is_ambiguous;
+  intent.primary_meaning = typeof intent.primary_meaning === 'string' ? intent.primary_meaning : kw;
 
   log('[intent] Gemini result for "' + kw + '":', intent);
 
@@ -969,7 +1000,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v11`);
+    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v12`);
 
     if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
@@ -1241,23 +1272,37 @@ const _searchSingle = async (keyword, location, options = {}) => {
         const types = lead.types || [];
 
         // Signal 1: keyword/synonym in name
-        if (affinityWords.some(w => name.includes(w))) return true;
+        if (affinityWords.some(w => w && name.includes(w))) return true;
         // Signal 2: store-hint keyword in name
-        if (storeHints.some(w => name.includes(w))) return true;
+        if (storeHints.some(w => w && name.includes(w))) return true;
         // Signal 3: keyword/synonym in reviews
-        if (reviewText && affinityWords.some(w => reviewText.includes(w))) return true;
+        if (reviewText && affinityWords.some(w => w && reviewText.includes(w))) return true;
         // Signal 4: highly specific matching type
         if (types.some(t => HIGHLY_SPECIFIC_TYPES.has(t))) return true;
 
         return false;
       });
 
-      // Safety net: don't nuke all results
-      if (gated.length >= 3) {
+      // ── No safety net — 0 accurate results > 20 wrong results ──────────
+      // Old code: if (gated.length >= 3) use gated, else skip filter entirely.
+      // That "safety net" was the #1 reason Layer D never applied — it bypassed
+      // the entire filter whenever fewer than 3 businesses passed, which is
+      // common for niche keywords in smaller cities.
+      if (gated.length > 0) {
+        // NORMAL PATH: filter produced results — use them
         finalLeads = gated;
         log(`[filter-D] ${beforeD} → ${finalLeads.length} after keyword-relevance gate`);
       } else {
-        log(`[filter-D] safety net — kept ${beforeD} results (gate would leave ${gated.length})`);
+        // FALLBACK PATH: filter produced 0 results
+        // Apply a weaker name-only filter instead of bypassing entirely.
+        // This still removes unrelated shops while keeping anything that
+        // at least mentions the keyword or a synonym in its name.
+        const nameOnly = finalLeads.filter(lead => {
+          const name = (lead.displayName?.text || '').toLowerCase();
+          return affinityWords.some(w => w && name.includes(w));
+        });
+        finalLeads = nameOnly;  // may be empty — that is correct and expected
+        log(`[filter-D] fallback name-only filter: ${beforeD} → ${finalLeads.length} (full gate returned 0)`);
       }
     }
 
@@ -1325,26 +1370,35 @@ const _searchSingle = async (keyword, location, options = {}) => {
       const reviewText = (lead._reviewText || '').toLowerCase();
       const types = lead.types || [];
 
+      // Reviews are the strongest signal — customers explicitly mention the product
       if (reviewText && reviewWords.some(w => reviewText.includes(w))) score += 60;
-      if (storeHintWords.some(w => name.includes(w))) score += 40;
-      if (types.some(t => PRODUCT_SELLER_TYPES.has(t))) score += 30;
-      if (name.includes(kwLower)) score += 20;
-      // Penalise places with only generic types — they are unverified
-      if (types.length > 0 && types.filter(t => !GENERIC_PLACE_TYPES.has(t)).length === 0) score -= 10;
+      // Keyword directly in business name — very strong signal (raised from 20→50)
+      if (name.includes(kwLower)) score += 50;
+      // Specific store-hint phrase in name (e.g. "sports goods" for "ball") — moderate signal
+      if (storeHintWords.some(w => w && name.includes(w))) score += 30;
+      // Being a product-seller type — weak signal alone (reduced from 30→20)
+      // A hardware store, clothing store etc. is ANY shop — doesn't mean it sells THIS product
+      if (types.some(t => PRODUCT_SELLER_TYPES.has(t))) score += 20;
+      // Penalise places with only generic types — they are unverified (raised from -10→-20)
+      if (types.length > 0 && types.filter(t => !GENERIC_PLACE_TYPES.has(t)).length === 0) score -= 20;
 
       lead.confidenceScore = score;
-      lead.confidenceLabel = score >= 60 ? 'verified' : score >= 20 ? 'likely' : 'possible';
+      lead.confidenceLabel = score >= 60 ? 'verified' : score >= 50 ? 'likely' : 'possible';
     }
 
     finalLeads.sort((a, b) => (b.confidenceScore || 0) - (a.confidenceScore || 0));
 
-    // Drop "possible" results only when we have enough verified/likely results
-    // to not leave the user with an empty result set.
-    const CONFIDENCE_THRESHOLD = 20;
+    // Threshold raised from 20→50: a business now needs at LEAST one of these to qualify:
+    //   • keyword in business name (+50) OR
+    //   • customer reviews mention the keyword (+60)
+    // Just being a shop (+20) no longer qualifies on its own.
+    const CONFIDENCE_THRESHOLD = 50;
     const highQuality = finalLeads.filter(l => (l.confidenceScore || 0) >= CONFIDENCE_THRESHOLD);
-    if (highQuality.length >= 3) {
+    if (highQuality.length > 0) {
       finalLeads = highQuality;
       log(`[confidence] threshold filter: kept ${finalLeads.length} results (score ≥ ${CONFIDENCE_THRESHOLD})`);
+    } else {
+      log(`[confidence] no results above threshold ${CONFIDENCE_THRESHOLD} — keeping all ${finalLeads.length} as-is`);
     }
 
     const v = finalLeads.filter(l => l.confidenceLabel === 'verified').length;
