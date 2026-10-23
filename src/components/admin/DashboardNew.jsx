@@ -26,6 +26,7 @@ import { useNavigate } from 'react-router-dom';
 import CountUp from 'react-countup';
 import { db } from '../../firebase';
 import { CREDIT_CONFIG } from '../../config';
+import { remainingSharedSearchCalls, remainingSearchesByScope } from '../../services/creditMath.js';
 import {
   AreaChart,
   Area,
@@ -47,7 +48,7 @@ const DashboardNew = () => {
     totalUsers:    0,
     activeUsers7d: 0,
     totalApiCalls: 0,
-    monthlyCost:   0, enterpriseCalls: 0,
+    monthlyCost:   0, enterpriseCalls: 0, skuUsage: {},
     freeTierPct:   0,
     currentMonth:  '',
   });
@@ -79,16 +80,18 @@ const DashboardNew = () => {
       let monthlyCost   = 0;
       let currentMonth  = '';
       let enterpriseCalls = 0;
+      let skuUsage = {};
       if (globalSnap.exists()) {
         const d   = globalSnap.data();
         totalApiCalls = d.totalApiCalls ?? 0;
         enterpriseCalls = d.sku_enterprise_calls ?? 0;
+        skuUsage = d;
         currentMonth  = d.month ?? '';
       }
 
       const freeTierPct = Math.min(100, parseFloat(((enterpriseCalls / ENTERPRISE_CAP) * 100).toFixed(1)));
 
-      setStats({ totalUsers, activeUsers7d, totalApiCalls, monthlyCost: 0, enterpriseCalls, freeTierPct, currentMonth });
+      setStats({ totalUsers, activeUsers7d, totalApiCalls, monthlyCost: 0, enterpriseCalls, skuUsage, freeTierPct, currentMonth });
 
       // 4. Recent system events (7-day bar)
       const logsSnap = await getDocs(
@@ -122,6 +125,8 @@ const DashboardNew = () => {
   useEffect(() => { load(); }, [load]);
 
   const handleRefresh = () => { setRefreshing(true); load(); };
+  const sharedSearchesLeft = remainingSearchesByScope(stats.skuUsage);
+  const sharedCallsLeft = remainingSharedSearchCalls(stats.skuUsage);
 
   const accentClasses = {
     blue:   'from-blue-500 to-blue-600',
@@ -268,6 +273,28 @@ const DashboardNew = () => {
           <span>0</span>
           <span className="text-gray-400">{stats.freeTierPct}% used this month</span>
           <span>7,000 Enterprise calls (free cap)</span>
+        </div>
+      </div>
+
+      <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <div>
+            <h3 className="text-white font-semibold">Shared free-tier searches remaining</h3>
+            <p className="text-xs text-slate-400 mt-1">One shared pool: each live search updates all scope estimates.</p>
+          </div>
+          <span className="text-sm text-cyan-200">{sharedCallsLeft.toLocaleString()} calls left</span>
+        </div>
+        <div className="grid grid-cols-3 gap-3 text-center">
+          {[
+            ['City', sharedSearchesLeft.city],
+            ['Neighbourhood', sharedSearchesLeft.neighbourhood],
+            ['Specific', sharedSearchesLeft.specific],
+          ].map(([scope, remaining]) => (
+            <div key={scope} className="bg-slate-950/30 rounded-lg p-3 border border-cyan-400/20">
+              <p className="text-xl font-bold text-cyan-200">{Number(remaining).toLocaleString()}</p>
+              <p className="text-xs text-slate-400">{scope} searches</p>
+            </div>
+          ))}
         </div>
       </div>
 

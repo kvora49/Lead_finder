@@ -997,7 +997,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-    const cacheKey = await makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v15`);
+    const cacheKey = await makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v16`);
 
     if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
@@ -1070,8 +1070,11 @@ const _searchSingle = async (keyword, location, options = {}) => {
     const allLeads    = [];
     let callIdx       = 0;   // counts (cell, variant) pairs dispatched
 
-    for (const rectangle of gridBoxes) {
-      for (const query of queries) {
+    for (const [cellIndex, rectangle] of gridBoxes.entries()) {
+      const cellQueries = useProductMatching
+        ? buildProductQueries(keyword.trim(), fullLocation, type, searchScope, intent || {}, cellIndex)
+        : queries;
+      for (const query of cellQueries) {
         throwIfAborted(signal);
       // 400 ms stagger before every call except the very first
         if (callIdx > 0) await delay(CALL_STAGGER_MS, signal);

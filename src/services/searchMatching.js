@@ -15,6 +15,7 @@ const matches = (text, terms) => terms.some(t => (` ${norm(text)} `).includes(` 
 const PROFILES = [
   { terms: ['bat', 'bats', 'cricket bat', 'cricket bats'], categories: ['sports goods', 'sports equipment', 'sporting goods', 'cricket equipment', 'sports store'], types: ['sporting_goods_store'], possible: ['stationery', 'gift articles', 'gift', 'toys'], possibleTypes: ['stationery_store', 'gift_shop', 'toy_store'] },
   { terms: ['kurti', 'kurtis', 'kurta', 'kurtas'], categories: ['clothing', 'boutique', 'ethnic wear', 'ladies wear', 'garments', 'garment', 'apparel'], types: ['clothing_store'], possible: ['department store', 'textiles'], possibleTypes: ['department_store'] },
+  { terms: ['jeans', 'denim'], categories: ['clothing', 'garments', 'apparel', 'denim wear'], types: ['clothing_store'], possible: ['department store', 'fashion'], possibleTypes: ['department_store'] },
 ];
 export function productProfile(keyword, intent = {}) {
   const local = PROFILES.find(p => p.terms.includes(norm(keyword)));
@@ -39,7 +40,7 @@ export function businessRoles(lead) {
   if (!roles.length && types.some(t => t.endsWith('_store') || t === 'gift_shop')) roles.push('retailer');
   return [...new Set(roles)];
 }
-export function buildProductQueries(keyword, location, type, scope, intent = {}) {
+export function buildProductQueries(keyword, location, type, scope, intent = {}, cellIndex = 0) {
   const p = productProfile(keyword, intent);
   const role = type === 'store' ? 'retailer' : type;
   const suffix = { retailer: 'shop', manufacturer: 'manufacturer', wholesaler: 'wholesale', distributor: 'distributor' };
@@ -48,11 +49,17 @@ export function buildProductQueries(keyword, location, type, scope, intent = {})
     `${keyword} ${suffix[r] || r}`,
     ...(p.categories.length ? [`${p.categories[0]} ${suffix[r] || r}`] : []),
     ...(r === 'retailer' ? p.possible.map(c => `${c} shop ${keyword}`) : []),
+    ...(p.terms.length > 1 ? [`${p.terms[1]} ${suffix[r] || r}`] : []),
     ...strings(intent.type_queries?.[r]),
   ]));
+  // Rotate query wording across restricted cells without adding a grid cell,
+  // page, or query slot. All-category searches still cover every role per cell.
+  const rotated = groups.map(group => group.length
+    ? [...group.slice(cellIndex % group.length), ...group.slice(0, cellIndex % group.length)]
+    : group);
   const queries = [];
-  for (let i = 0; i < Math.max(...groups.map(g => g.length)); i++) {
-    for (const group of groups) if (group[i] && !queries.includes(group[i])) queries.push(group[i]);
+  for (let i = 0; i < Math.max(...rotated.map(g => g.length)); i++) {
+    for (const group of rotated) if (group[i] && !queries.includes(group[i])) queries.push(group[i]);
   }
   return queries.slice(0, (SEARCH_PLAN[scope] || SEARCH_PLAN.city).queryLimit).map(q => `${q} in ${location}`);
 }

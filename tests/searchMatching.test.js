@@ -33,6 +33,21 @@ test('any-type queries include every role, even with long AI retailer query list
   for (const role of ['shop', 'manufacturer', 'wholesale', 'distributor']) assert.ok(queries.some(q => q.includes(role)));
   assert.ok(queries.every(q => q.endsWith('in Surat')));
 });
+test('neighbourhood cells vary jeans wording without adding query slots or dropping roles', () => {
+  const first = buildProductQueries('jeans', 'Gheekanta, Ahmedabad', '', 'neighbourhood', {}, 0);
+  const second = buildProductQueries('jeans', 'Gheekanta, Ahmedabad', '', 'neighbourhood', {}, 1);
+  const third = buildProductQueries('jeans', 'Gheekanta, Ahmedabad', '', 'neighbourhood', {}, 2);
+  for (const queries of [first, second, third]) {
+    assert.equal(queries.length, SEARCH_PLAN.neighbourhood.queryLimit);
+    for (const role of ['shop', 'manufacturer', 'wholesale', 'distributor']) {
+      assert.ok(queries.some(q => q.includes(role)));
+    }
+  }
+  assert.notDeepEqual(first, second);
+  assert.notDeepEqual(second, third);
+  assert.ok(Array.from({ length: 9 }, (_, i) => buildProductQueries('jeans', 'Gheekanta, Ahmedabad', '', 'neighbourhood', {}, i))
+    .some(queries => queries.some(q => q.startsWith('denim '))));
+});
 test('retail query expansion covers sports and secondary sellers without AI', () => {
   const queries = buildProductQueries('bat', 'Ahmedabad', 'store', 'city');
   assert.ok(queries.some(q => q.includes('sports goods')));

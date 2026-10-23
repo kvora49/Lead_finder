@@ -13,10 +13,10 @@
  * Does NOT touch credits — Phase 3 owns that layer.
  */
 
-import { useState, useCallback, useRef, useMemo } from 'react';
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import {
   Search, MapPin, Phone, Globe, Star, RefreshCw,
-  Zap, Database, AlertCircle, ChevronDown, X, Bookmark,
+  Zap, Database, AlertCircle, ChevronDown, ChevronLeft, ChevronRight, X, Bookmark,
   FileText, Table2, Copy, Clock, LayoutGrid, Map as MapIcon,
 } from 'lucide-react';
 import Papa from 'papaparse';
@@ -67,6 +67,16 @@ hint:  'Search within your neighbourhood boundary',
 hint:  'Search within the selected building or street area',
   },
 ];
+const RESULTS_PER_PAGE = 50;
+const paginationItems = (current, total) => {
+  if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1);
+  const items = [1];
+  if (current > 4) items.push('left-ellipsis');
+  for (let page = Math.max(2, current - 1); page <= Math.min(total - 1, current + 1); page++) items.push(page);
+  if (current < total - 3) items.push('right-ellipsis');
+  items.push(total);
+  return [...new Set(items)];
+};
 
 const SEARCH_SCOPE_LABELS = {
   city: 'Entire City',
@@ -526,6 +536,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   });
   const [showSavedDropdown, setShowSavedDropdown] = useState(false);
   const [viewMode, setViewMode] = useState('grid');
+  const [resultPage, setResultPage] = useState(1);
 
   // ── Selection + save state ──────────────────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false);
@@ -589,6 +600,14 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
     if (filterRating > 0) out = out.filter((l) => (l.rating ?? 0) >= filterRating);
     return out;
   }, [results, filterPhone, filterWebsite, subtype, type, filterRating]);
+
+  useEffect(() => { setResultPage(1); }, [results, filterPhone, filterWebsite, subtype, type, filterRating]);
+  const resultPageCount = Math.max(1, Math.ceil(visible.length / RESULTS_PER_PAGE));
+  const safeResultPage = Math.min(resultPage, resultPageCount);
+  const paginatedResults = visible.slice(
+    (safeResultPage - 1) * RESULTS_PER_PAGE,
+    safeResultPage * RESULTS_PER_PAGE,
+  );
 
   const isCreditError = !!error && /not enough credits|insufficient user credits|credit allocation|monthly allocation/i.test(error);
 
@@ -1106,9 +1125,8 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
       )}
 
       {/* ── Search Form ──────────────────────────────────────────────── */}
-      <div className={`bg-white dark:bg-[#171717] rounded-2xl border border-slate-200 dark:border-white/10 shadow-sm w-full ${
-        hasResults ? 'p-3 md:p-6' : 'max-w-4xl p-4 md:p-8 shadow-xl shadow-slate-200/60 dark:shadow-black/50 overflow-hidden'
-      }`}>
+      {!hasResults && (
+      <div className="bg-white dark:bg-[#171717] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl shadow-slate-200/60 dark:shadow-black/50 w-full max-w-4xl p-4 md:p-8 overflow-hidden">
         {hasResults && (
           <div className="flex items-center gap-2 mb-5">
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600
@@ -1355,6 +1373,7 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
 
         </form>
       </div>
+      )}
 
       {/* ── Progress ─────────────────────────────────────────────────── */}
       {progress && <ProgressBar progress={progress} />}
@@ -1657,11 +1676,41 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
           </div> {/* end space-y-2.5 toolbar wrapper */}
 
           <p className="text-xs text-slate-500 dark:text-gray-400">Strong matches appear first, possible sellers last. Matches use business listing evidence; current stock is not verified.</p>
+          {visible.length > RESULTS_PER_PAGE && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#171717] px-3 py-2">
+              <p className="text-xs text-slate-500 dark:text-gray-400">
+                Showing {(safeResultPage - 1) * RESULTS_PER_PAGE + 1}–{Math.min(safeResultPage * RESULTS_PER_PAGE, visible.length)} of {visible.length}
+              </p>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={() => setResultPage((p) => Math.max(1, p - 1))} disabled={safeResultPage === 1}
+                  className="p-1.5 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-gray-300 disabled:opacity-40">
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="text-xs font-medium text-slate-700 dark:text-gray-200">Page {safeResultPage} of {resultPageCount}</span>
+                <div className="hidden sm:flex items-center gap-1">
+                  {paginationItems(safeResultPage, resultPageCount).map((item) => typeof item === 'number' ? (
+                    <button key={item} type="button" onClick={() => setResultPage(item)}
+                      className={`min-w-7 h-7 rounded-lg text-xs font-semibold transition-colors ${
+                        item === safeResultPage
+                          ? 'bg-indigo-600 text-white'
+                          : 'border border-slate-200 dark:border-white/10 text-slate-600 dark:text-gray-300 hover:border-indigo-300'
+                      }`}>
+                      {item}
+                    </button>
+                  ) : <span key={item} className="px-0.5 text-xs text-slate-400">…</span>)}
+                </div>
+                <button type="button" onClick={() => setResultPage((p) => Math.min(resultPageCount, p + 1))} disabled={safeResultPage === resultPageCount}
+                  className="p-1.5 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-gray-300 disabled:opacity-40">
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
           {/* Grid / Map */}
           {visible.length > 0 ? (
             viewMode === 'grid' ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-                {visible.map((lead, index) => {
+                {paginatedResults.map((lead, index) => {
                   const key        = getLeadKey(lead);
                   const isSelected = selected.has(key);
                   return (
@@ -1686,7 +1735,7 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
                 })}
               </div>
             ) : (
-              <LeadMapView leads={visible} apiKey={GOOGLE_API_KEY} />
+              <LeadMapView leads={paginatedResults} apiKey={GOOGLE_API_KEY} />
             )
           ) : (
             <div className="text-center py-10 text-slate-400 text-sm">

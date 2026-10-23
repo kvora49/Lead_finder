@@ -35,6 +35,17 @@ import {
 } from '../services/listService';
 import ConfirmDangerModal from './ConfirmDangerModal';
 
+const LEADS_PER_PAGE = 50;
+const paginationItems = (current, total) => {
+  if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1);
+  const items = [1];
+  if (current > 4) items.push('left-ellipsis');
+  for (let page = Math.max(2, current - 1); page <= Math.min(total - 1, current + 1); page++) items.push(page);
+  if (current < total - 3) items.push('right-ellipsis');
+  items.push(total);
+  return [...new Set(items)];
+};
+
 // ─── CSV row → normalised lead ────────────────────────────────────────────────
 const csvRowToLead = (row) => ({
   name:        row.name        || row.Name        || '',
@@ -381,6 +392,7 @@ const MyLists = () => {
   const [bulkMode,       setBulkMode]       = useState(false);
   const [bulkSelected,   setBulkSelected]   = useState(new Set());
   const [mobileView,     setMobileView]     = useState('lists'); // 'lists' | 'detail'
+  const [leadPage,       setLeadPage]       = useState(1);
 
   // ── Danger modal state (Safe Delete) ────────────────────────────────────
   const [dangerModal, setDangerModal] = useState({
@@ -413,6 +425,7 @@ const MyLists = () => {
     setSelectedList(list);
     setLeads([]);
     setSearchFilter('');
+    setLeadPage(1);
     setBulkMode(false);
     setBulkSelected(new Set());
     setImportResult(null);
@@ -559,6 +572,12 @@ const MyLists = () => {
         );
       })
     : leads;
+  const leadPageCount = Math.max(1, Math.ceil(visibleLeads.length / LEADS_PER_PAGE));
+  const safeLeadPage = Math.min(leadPage, leadPageCount);
+  const paginatedLeads = visibleLeads.slice(
+    (safeLeadPage - 1) * LEADS_PER_PAGE,
+    safeLeadPage * LEADS_PER_PAGE,
+  );
 
   const handleBulkDelete = async () => {
     const ids = Array.from(bulkSelected);
@@ -741,7 +760,7 @@ const MyLists = () => {
                         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
                         <input
                           value={searchFilter}
-                          onChange={(e) => setSearchFilter(e.target.value)}
+                          onChange={(e) => { setSearchFilter(e.target.value); setLeadPage(1); }}
                           placeholder="Filter leads…"
                           className="pl-8 pr-3 py-1.5 text-xs border border-slate-200 dark:border-white/10 rounded-lg
                             bg-slate-50 dark:bg-white/5 text-slate-800 dark:text-gray-200
@@ -901,7 +920,7 @@ const MyLists = () => {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {visibleLeads.map((lead) => (
+                          {paginatedLeads.map((lead) => (
                             <LeadRow
                               key={lead.id}
                               lead={lead}
@@ -941,6 +960,36 @@ const MyLists = () => {
                           ))}
                         </tbody>
                       </table>
+                    </div>
+                  )}
+                  {visibleLeads.length > LEADS_PER_PAGE && (
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 dark:border-white/10 px-4 py-3">
+                      <p className="text-xs text-slate-500 dark:text-gray-400">
+                        Showing {(safeLeadPage - 1) * LEADS_PER_PAGE + 1}–{Math.min(safeLeadPage * LEADS_PER_PAGE, visibleLeads.length)} of {visibleLeads.length}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button type="button" onClick={() => setLeadPage((p) => Math.max(1, p - 1))} disabled={safeLeadPage === 1}
+                          className="p-1.5 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-gray-300 disabled:opacity-40">
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <span className="text-xs font-medium text-slate-700 dark:text-gray-200">Page {safeLeadPage} of {leadPageCount}</span>
+                        <div className="hidden sm:flex items-center gap-1">
+                          {paginationItems(safeLeadPage, leadPageCount).map((item) => typeof item === 'number' ? (
+                            <button key={item} type="button" onClick={() => setLeadPage(item)}
+                              className={`min-w-7 h-7 rounded-lg text-xs font-semibold transition-colors ${
+                                item === safeLeadPage
+                                  ? 'bg-indigo-600 text-white'
+                                  : 'border border-slate-200 dark:border-white/10 text-slate-600 dark:text-gray-300 hover:border-indigo-300'
+                              }`}>
+                              {item}
+                            </button>
+                          ) : <span key={item} className="px-0.5 text-xs text-slate-400">…</span>)}
+                        </div>
+                        <button type="button" onClick={() => setLeadPage((p) => Math.min(leadPageCount, p + 1))} disabled={safeLeadPage === leadPageCount}
+                          className="p-1.5 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-gray-300 disabled:opacity-40">
+                          <ChevronRight className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>

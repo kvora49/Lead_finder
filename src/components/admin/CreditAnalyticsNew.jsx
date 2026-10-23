@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AlertTriangle, Download, Zap, Users, Activity, Target } from 'lucide-react';
+import { AlertTriangle, Download, Zap, Users, Activity, Target, Search } from 'lucide-react';
 import { collection, doc, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { CREDIT_CONFIG } from '../../config';
-import { SKU_CREDITS, SKU_FREE_CAPS, skuStop, weightedCredits } from '../../services/creditMath.js';
+import { SKU_CREDITS, SKU_FREE_CAPS, skuStop, weightedCredits, remainingSharedSearchCalls, remainingSearchesByScope } from '../../services/creditMath.js';
 import { getEffectiveUserMonthMetrics } from '../../services/creditService';
 import {
   ResponsiveContainer, AreaChart, Area, CartesianGrid,
@@ -143,6 +143,8 @@ const CreditAnalyticsNew = () => {
   const weightedTotal = weightedCredits(skuUsage);
   const creditPoolPct   = Math.min(+((weightedTotal / PLATFORM_POOL) * 100).toFixed(1), 100);
   const enterpriseStatus = getSkuStatus(enterpriseCalls, ENTERPRISE_CAP);
+  const sharedCallsLeft = remainingSharedSearchCalls(skuUsage);
+  const searchesLeft = remainingSearchesByScope(skuUsage);
 
   const alerts = useMemo(() =>
     usersData.filter((u) => u.creditLimit !== 'unlimited' && u.pctUsed >= 80)
@@ -264,6 +266,27 @@ const CreditAnalyticsNew = () => {
         <StatCard icon={Target}   label="Enterprise Usage"   value={`${enterprisePct}%`} />
         <StatCard icon={Activity} label="Weighted Credits Used" value={weightedTotal.toLocaleString()}  subtitle={`Global stop ${CREDIT_CONFIG.PLATFORM_KILL_CREDITS.toLocaleString()}`} />
         <StatCard icon={Users}    label="Tracked Users"      value={usersData.length} />
+      </div>
+
+      <div className="bg-cyan-500/10 border border-cyan-500/30 rounded-xl p-5 text-white">
+        <div className="flex flex-col gap-1 mb-4">
+          <h2 className="font-semibold flex items-center gap-2"><Search className="w-5 h-5 text-cyan-300" /> Shared free-tier searches remaining</h2>
+          <p className="text-sm text-slate-300">One platform-wide budget: every live search reduces all three estimates. Cached searches use no calls.</p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {[
+            ['Entire city', searchesLeft.city, '128 max calls/search'],
+            ['Neighbourhood', searchesLeft.neighbourhood, '72 max calls/search'],
+            ['Specific area', searchesLeft.specific, '32 max calls/search'],
+          ].map(([label, value, detail]) => (
+            <div key={label} className="rounded-lg bg-slate-950/30 border border-cyan-400/20 p-3">
+              <p className="text-sm text-slate-300">{label}</p>
+              <p className="text-2xl font-bold text-cyan-200 mt-1">{Number(value).toLocaleString()}</p>
+              <p className="text-xs text-slate-400 mt-1">{detail}</p>
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-slate-400 mt-3">{sharedCallsLeft.toLocaleString()} Enterprise-equivalent calls remain before the 90% safety stop. Figures use the maximum request budget, so they are conservative.</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
