@@ -112,7 +112,7 @@ const parseUserLimit = (creditLimitRaw) => {
     const n = Number.parseFloat(creditLimitRaw);
     if (Number.isFinite(n)) return { isUnlimited: false, limitCredits: Math.max(0, Math.round(n)) };
   }
-  return { isUnlimited: false, limitCredits: 2800 }; // DEFAULT_USER_CREDITS
+  return { isUnlimited: false, limitCredits: 2000 }; // DEFAULT_USER_CREDITS
 };
 
 const getMonthlyCreditsForCurrentMonth = (userData, monthKey) => {
@@ -760,11 +760,11 @@ exports.helloWorld = onRequest((request, response) => {
 // ════════════════════════════════════════════════════════════════════════════
 // onGlobalUsageUpdated
 // Firestore trigger on system/global_usage.
-// Sends admin-only emails when Enterprise SKU hits 80% or 95% of free cap.
+// Sends admin-only emails when Enterprise SKU hits 80% or 90% of free cap.
 // ════════════════════════════════════════════════════════════════════════════
 const SKU_FREE_CAPS   = { enterprise: 7000 };
 const SKU_ADMIN_ALERT = { enterprise: 5600 };   // 80%
-const SKU_KILL_SWITCH = { enterprise: 6650 };   // 95%
+const SKU_KILL_SWITCH = { enterprise: 6300 };   // 90%
 
 exports.onGlobalUsageUpdated = onDocumentUpdated(
   { document: "system/global_usage", timeoutSeconds: 30, region: "asia-south1", database: "(default)" },
@@ -795,7 +795,7 @@ exports.onGlobalUsageUpdated = onDocumentUpdated(
       return;
     }
 
-    const alertType = crossedKill ? "HARD_KILL_95PCT" : "ADMIN_ALERT_80PCT";
+    const alertType = crossedKill ? "HARD_KILL_90PCT" : "ADMIN_ALERT_80PCT";
     const pct       = ((currentCalls / SKU_FREE_CAPS[tier]) * 100).toFixed(1);
 
     const trackingId  = `admin-${alertType}-${tier}-${month}`;
@@ -829,7 +829,7 @@ exports.onGlobalUsageUpdated = onDocumentUpdated(
         <p><strong>Resets:</strong> 1st of next month (automatic)</p>
         ${crossedKill
           ? "<p style='color:#dc2626'>Users are now blocked from new searches. Cached results still work. Resets automatically on the 1st.</p>"
-          : `<p>No action needed yet. Hard kill triggers at ${SKU_KILL_SWITCH[tier].toLocaleString()} calls (95%).</p>`}
+          : `<p>No action needed yet. Hard kill triggers at ${SKU_KILL_SWITCH[tier].toLocaleString()} calls (90%).</p>`}
         <p style="color:#6b7280;font-size:12px">Sent: ${formatAlertTimestamp()}</p>
       </div>
     `;

@@ -41,6 +41,11 @@ export const normaliseLead = (b) => ({
   status:  b.businessStatus     || b.business_status || '',
   lat:     b.location?.latitude  ?? b.geometry?.location?.lat ?? null,
   lng:     b.location?.longitude ?? b.geometry?.location?.lng ?? null,
+  matchStatus: b.matchStatus || '',
+  roleUnverified: b.roleUnverified ?? true,
+  businessRoles: b.businessRoles || [],
+  matchReason: b.matchReason || '',
+  matchedKeywords: b.matchedKeywords || [],
   savedAt: new Date().toISOString(),
 });
 

@@ -8,7 +8,7 @@ export const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 export const GEMINI_CONFIG = {
   MODEL:                   'gemini-2.5-flash',   // Stable GA model — won't be deprecated without notice
   TEMPERATURE:             0.1,
-  MAX_OUTPUT_TOKENS:       600,
+  MAX_OUTPUT_TOKENS:       3000,
   INTENT_CACHE_COLLECTION: 'keyword_intent_cache',
   USAGE_COLLECTION:        'gemini_usage',
   USAGE_DOC:               'current_month',
@@ -20,20 +20,20 @@ export const APP_NAME    = 'Lead Finder';
 export const APP_VERSION = '2.0.0';
 
 // ─── SKU-Based Credit System ──────────────────────────────────────────────────
-// Google Places API (New) — India region, per key, per month:
-//   Enterprise SKU (phone, website, ratings, reviews): 7,000 calls  ← BOTTLENECK
+// Google Maps Platform India free requests are per billing account and SKU/month.
+// The current Text Search mask includes reviews, so it triggers Enterprise + Atmosphere.
+// The enterprise bucket tracks this 7,000-request SKU separately in the dashboard.
 //   Pro SKU        (displayName):                     35,000 calls
 //   Essentials SKU (address, id, types, location):    70,000 calls
 //
 // Current FIELD_MASK includes Enterprise fields → every call = Enterprise billing.
-// 7,000 × 10 credits = 70,000 platform credits ÷ 25 users = 2,800 credits/user
+// 7,000 × 10 credits; stop at 90% = 63,000 spendable enterprise-group credits.
+// 25 users × 2,000 default credits = 50,000, leaving a 13,000-credit reserve.
 //
-// Searches per user on 2,800 credits:
-//   City scope        (32 calls × 10) = 320 credits →  ~8 searches/month
-//   Neighbourhood     (24 calls × 10) = 240 credits → ~11 searches/month
-//   Specific          ( 9 calls × 10) =  90 credits → ~31 searches/month
+// Maximum search costs after the search redesign: city 1,280, neighbourhood
+// 720, specific 320 credits per keyword/location pair. Actual calls may be fewer.
 export const CREDIT_CONFIG = {
-  DEFAULT_USER_CREDITS:   2800,
+  DEFAULT_USER_CREDITS:   2000,
   USER_ALERT_PCT:         80,
 
   CREDITS_PER_TIER: {
@@ -49,12 +49,12 @@ export const CREDIT_CONFIG = {
   },
 
   ADMIN_ALERT_PCT: 80,
-  HARD_KILL_PCT:   95,
+  HARD_KILL_PCT:   90,
 
   SKU_KILL_SWITCH: {
-    essentials: 66500,
-    pro:        33250,
-    enterprise:  6650,
+    essentials: 63000,
+    pro:        31500,
+    enterprise:  6300,
   },
   SKU_ADMIN_ALERT: {
     essentials: 56000,
@@ -62,9 +62,9 @@ export const CREDIT_CONFIG = {
     enterprise:  5600,
   },
 
-  PLATFORM_CREDITS_POOL:  70000,
-  PLATFORM_KILL_CREDITS:  66500,
-  PLATFORM_ALERT_CREDITS: 56000,
+  PLATFORM_CREDITS_POOL:  280000,
+  PLATFORM_KILL_CREDITS:  252000,
+  PLATFORM_ALERT_CREDITS: 224000,
 };
 
 // Backward-compat alias (admin components import CREDIT_PRICING)

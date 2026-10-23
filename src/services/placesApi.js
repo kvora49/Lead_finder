@@ -1,37 +1,13 @@
 /**
- * Lead Finder — Places API Service  (v7 — AI Intent Engine Edition)
- *
- * PURPOSE: Universal business search engine. User types a keyword and selects
- * a business type filter. The engine finds every relevant place.
- *
- * API CALL BUDGET (exact — never changes):
- *   city:          4×4 = 16 cells × 2 variants × 1 page  = 32 calls exact
- *   neighbourhood: 4×3 = 12 cells × 2 variants × 1 page  = 24 calls exact
- *   specific:      1×1 =  1 cell  × 3 variants × ≤3 pages = ≤9 calls
- *
- * GRID STRATEGY:
- *   Geocode location → get viewport bounding box → split into NxM grid cells
- *   → search each cell independently with a rectangle restriction
- *   → deduplicate results by place.id across all cells
- *   This bypasses Google Places API's 20-results-per-query limit.
- *
- * RELEVANCE FILTER (whitelist-based, type-aware):
- *   Product searches (Store/Any/Manufacturer/Wholesaler):
- *     → WHITELIST approach: keep only places with product-selling types
- *     → Completely eliminates restaurants, banks, temples etc.
- *     → Food keywords auto-detected and routed to food-type search
- *   Service searches (Restaurant/Hospital/Bank/etc.):
- *     → Google's includedType restriction does the filtering at API level
- *
- * GEO FENCE (two-layer):
- *   Layer 1: geo.bounds bbox filter (tight admin boundary)
- *   Layer 2: Address-string verification — formattedAddress must contain area name
- *   Prevents Maninagar results including Isanpur, Saraspur, Gomtipur.
- *
- * CACHE: Firestore public_search_cache, TTL 24h, 0 API calls on cache hit.
+ * Product-aware searches with independent business-role evidence.
+ * Grid geometry and geographic fences are retained; SEARCH_PLAN bounds calls.
+ * Strong matches sort first, possible sellers last. Unknown roles are labeled.
  */
 
 import { db } from '../firebase';
+import { SEARCH_PLAN, buildProductQueries, classifyLead, mergeMatches, businessRoles } from './searchMatching.js';
+import { checkBudget } from './creditMath.js';
+import { getGlobalUsage } from './creditService.js';
 import {
   doc, getDoc, setDoc, serverTimestamp, increment,
 } from 'firebase/firestore';
@@ -91,6 +67,7 @@ const PLACES_V1_TEXT = 'https://places.googleapis.com/v1/places:searchText';
 
 // Field mask — controls which fields & billing tiers are used
 const FIELD_MASK = [
+  'nextPageToken',
   'places.id',
   'places.displayName',
   'places.formattedAddress',
@@ -104,31 +81,8 @@ const FIELD_MASK = [
   'places.reviews',
 ].join(',');
 
-// ── Grid dimensions per searchScope ──────────────────────────────────────────
-// The ONLY variable that reliably increases unique yield is geographic cell
-// count.  Each cell covers a different physical zone of the city so Google
-// returns different top-20 businesses.  More variants on the same cell
-// returns the same businesses (deduplicated → wasted calls).
-//
-// pagesPerCell = 1 for city locks the call count to exactly n_cells.
-// Neighbourhood uses 1 page (smaller area, cells do breadth work).
-// ── Double-Lock Viewport Architecture ───────────────────────────────────────
-// Lock 1 (Geo):  locationRestriction.rectangle = geocoder viewport grid cell.
-//                Viewport is the exact bounding box Google keeps for each
-//                named place — never a radius, never padded.
-// Lock 2 (NLP):  Every textQuery ends with "in [location]".
-//                Google's NLP sees an address in an adjacent locality and
-//                ranks it below Maninagar results → bleed eliminated.
-//
-// Grid budgets (exact for city — no paging variability):
-//   city:          4×4 = 16 cells × 2 variants × 1 page = 32 calls
-//   neighbourhood: 4×3 = 12 cells × 2 variants × 1 page = 24 calls
-//   specific:      1×1 =  1 cell  × 3 variants × ≤3 pages = ≤9 calls
-const GRID_CONFIG = {
-  city:          { cols: 4, rows: 4, pagesPerCell: 1 }, // 16 cells
-  neighbourhood: { cols: 3, rows: 3, pagesPerCell: 1 }, //  9 cells
-  specific:      { cols: 2, rows: 2, pagesPerCell: 2 }, //  4 cells × 2 pages = 8 page-calls per query
-};
+// Grid dimensions are shared with the credit estimator.
+const GRID_CONFIG = SEARCH_PLAN;
 
 // Global fallback (should not be needed — all scopes are in GRID_CONFIG).
 const PAGES_PER_CELL_DEFAULT = 3;
@@ -294,51 +248,7 @@ const buildQueries = (keyword, location, searchScope, type) => {
   return searchScope === 'specific' ? all : all.slice(0, 2);
 };
 
-// ── GENERIC: types that carry zero category information.
-// These are ignored when determining what kind of place it is.
-// CRITICAL: 'store' is treated as generic because Google tags nearly EVERY
-// business as 'store'. If we treated it as specific, the whitelist would
-// pass everything through — defeating the entire filter.
-const GENERIC_PLACE_TYPES = new Set([
-  'point_of_interest',
-  'establishment',
-  'store',             // Almost every business is tagged 'store' — treat as generic
-]);
 
-// ── PRODUCT SELLER WHITELIST ─────────────────────────────────────────────────
-// DESIGN PRINCIPLE (WHITELIST, not blacklist):
-// For product searches, a place is KEPT only if it has ≥1 type in this set.
-// This is far more accurate than a blacklist because it ONLY passes places
-// that are categorically capable of selling products — any new unknown type
-// from Google is excluded by default (safe), whereas a blacklist would let
-// unknown types through (unsafe).
-//
-// This set covers all Google Places types that represent businesses which
-// sell, manufacture, distribute, or deal in physical products.
-const PRODUCT_SELLER_TYPES = new Set([
-  // ── Multi-product retail (sell diverse goods → relevant for any keyword) ──
-  'shopping_mall', 'supermarket', 'department_store',
-  'convenience_store', 'wholesale_store', 'warehouse_store',
-  'grocery_or_supermarket', 'market',
-
-  // ── Specialised retail (Google returns these when they match the keyword) ──
-  'clothing_store', 'electronics_store', 'hardware_store',
-  'book_store', 'toy_store', 'sporting_goods_store',
-  'home_goods_store', 'furniture_store', 'shoe_store',
-  'pet_store', 'bicycle_store', 'auto_parts_store',
-  'car_dealer', 'gift_shop', 'stationery_store',
-  'mobile_phone_store', 'computer_store',
-
-  // ── Florist / garden / home improvement ──
-  'florist', 'home_improvement_store', 'garden_center',
-
-  // ── Liquor / wine ──
-  'liquor_store', 'wine_store',
-
-  // NOTE: 'store' is intentionally EXCLUDED — treated as generic (see above).
-  // NOTE: 'pharmacy', 'drugstore', 'gas_station' excluded — niche sellers.
-  //       Pharmacies still appear for 'medicine'/'medical' via SERVICE_KEYWORDS.
-]);
 
 // ── FOOD/DRINK TYPES ─────────────────────────────────────────────────────────
 // Used when the search is food-related (keyword or type = restaurant).
@@ -362,8 +272,7 @@ const SERVICE_TYPE_WHITELIST = {
   'real_estate_agency': new Set(['real_estate_agency', 'real_estate_agent']),
 };
 
-// ── JEWELLERY KEYWORDS — used for jewelry_store handling ─────────────────────
-const JEWELLERY_KEYWORDS = /\b(watch|ring|chain|necklace|bracelet|bangle|earring|gold|silver|diamond|jewel|jewellery|jewelry|pendant|locket|bead|haar|kangan|mangalsutra|payal|anklet)\b/i;
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTENT ENGINE (Gemini 2.5 Flash-Lite)
@@ -415,7 +324,7 @@ const getKeywordIntent = async (keyword, options = {}) => {
   const cacheKey = _intentCacheKey(kw);
 
   // ── 1. Check permanent intent cache ────────────────────────────────────────
-  const CURRENT_INTENT_SCHEMA = 6;   // bump when Gemini prompt schema changes — v6: category_keywords and indian_synonyms
+  const CURRENT_INTENT_SCHEMA = 7;   // bump when Gemini prompt schema changes — v6: category_keywords and indian_synonyms
   try {
     const cacheRef = doc(db, GEMINI_CONFIG.INTENT_CACHE_COLLECTION, cacheKey);
     const cacheSnap = await getDoc(cacheRef);
@@ -462,6 +371,9 @@ const getKeywordIntent = async (keyword, options = {}) => {
   const prompt = `You are a product-to-shop classifier for Indian local business search.
 
 Given the keyword "${kw}", return a JSON object with these fields:
+
+- seller_types: Google Places type identifiers relevant to this product (for bat: sporting_goods_store; for kurti: clothing_store). Never list unrelated categories.
+- possible_seller_categories: up to 3 secondary store categories that might stock this product (for bat: stationery, gift articles, toy). These are possibilities, not proof of inventory.
 
 - type_queries: object with exactly 4 keys. Each key is an array of 4-6 India-specific Google Maps search phrases SPECIFIC to that business role for the keyword "${kw}".
 
@@ -742,9 +654,10 @@ const generateGridBoxes = (viewport, searchScope) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Deterministic Firestore-safe cache key from search params */
-const makeCacheKey = (keyword, location, tag) => {
+const makeCacheKey = async (keyword, location, tag) => {
   const raw = `${keyword.toLowerCase().trim()}|${location.toLowerCase().trim()}|${(tag || '').toLowerCase().trim()}`;
-  return btoa(unescape(encodeURIComponent(raw))).replace(/[^a-zA-Z0-9]/g, '').slice(0, 60);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
+  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
 };
 
 /** Return cached doc data if fresh, else null */
@@ -870,7 +783,7 @@ const searchQueryPage = async (textQuery, rectangle, pageToken = null, includedT
   throwIfAborted(signal);
   const body = {
     textQuery,
-    maxResultCount: 20,
+    pageSize: 20,
     locationRestriction: { rectangle },
   };
   // includedType restricts Google's results to a specific category at source.
@@ -968,7 +881,7 @@ const searchQueryPaged = async (
     //   1. No more pages from Google.
     //   2. Sparse page (< 20) — Google is running out of results in this cell.
     //   3. Zero new uniques — all results already collected from prior cells.
-    if (!nextPageToken || places.length < 20 || pageNewUniques === 0) break;
+    if (!nextPageToken) break;
     pageToken = nextPageToken;
   }
 
@@ -1049,7 +962,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   // Call getKeywordIntent for product-type searches. Routes food/service
   // keywords based on AI classification. Provides search_queries, exclude_name_words,
   // anti_stock_keywords, review_keywords, synonyms, store_name_keywords.
-  const isProductType = (type === '' || type === 'store' || type === 'manufacturer' || type === 'wholesaler');
+  const isProductType = (type === '' || type === 'store' || type === 'manufacturer' || type === 'wholesaler' || type === 'distributor');
   let intent = null;
 
     if (isProductType) {
@@ -1061,45 +974,18 @@ const _searchSingle = async (keyword, location, options = {}) => {
   // Determine routing based on intent (AI) or type dropdown
   const isFoodSearch    = intent ? intent.is_food    : FOOD_KEYWORDS.test(keyword.trim().toLowerCase());
   const isServiceSearch = intent ? intent.is_service : SERVICE_KEYWORDS.test(keyword.trim().toLowerCase());
+  const useProductMatching = isProductType && ((!isFoodSearch && !isServiceSearch) || !!type);
 
   // ── Build queries ──────────────────────────────────────────────────────────
   // For product searches with AI intent: use intent.search_queries + location
   // For food/service/category: use existing buildQueries with TYPE_QUERY_SUFFIXES
   let queries;
-  const includedType = INCLUDED_TYPE_MAP[type] ?? null;
+  const includedType = isProductType ? null : (INCLUDED_TYPE_MAP[type] ?? null);
 
-  if (isProductType && intent && !isFoodSearch && !isServiceSearch && intent.type_queries) {
-    const loc = fullLocation;
-    const QUERY_LIMITS = {
-      city:          8,
-      neighbourhood: 6,
-      specific:      4,
-    };
-    const queryLimit = QUERY_LIMITS[searchScope] ?? 6;
-
-    let aiQueries;
-    if (!type || type === '') {
-      // Any type — combine all arrays
-      const combined = [
-        ...(intent.type_queries?.retailer     || []),
-        ...(intent.type_queries?.wholesaler   || []),
-        ...(intent.type_queries?.manufacturer || []),
-        ...(intent.type_queries?.distributor  || []),
-      ];
-      // Deduplicate and limit
-      aiQueries = [...new Set(combined)].slice(0, queryLimit);
-    } else {
-      // Specific type — use that type's queries only
-      const typeKey = type === 'store' ? 'retailer' : type;
-      aiQueries = (intent.type_queries?.[typeKey] || intent.type_queries?.retailer || []).slice(0, queryLimit);
-    }
-
-    queries = aiQueries.map(q => `${q} in ${loc}`);
-    log('[search] using AI type-queries:', queries);
+  if (useProductMatching) {
+    queries = buildProductQueries(keyword.trim(), fullLocation, type, searchScope, intent || {});
   } else {
-    // Fallback to static query builder (food, service, category types)
     queries = buildQueries(keyword.trim(), fullLocation, searchScope, type);
-    log('[search] using static queries:', queries);
   }
 
   const { cols, rows, pagesPerCell = PAGES_PER_CELL_DEFAULT } = GRID_CONFIG[searchScope] ?? GRID_CONFIG.city;
@@ -1111,7 +997,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
   );
 
   // ── 1. Cache check ─────────────────────────────────────────────────────────
-    const cacheKey = makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v14`);
+    const cacheKey = await makeCacheKey(keyword.trim(), fullLocation, `${type}:${searchScope}:v15`);
 
     if (onProgress) onProgress({ phase: 'cache', message: 'Checking cache…', current: 0, total: 1 });
 
@@ -1122,6 +1008,11 @@ const _searchSingle = async (keyword, location, options = {}) => {
         if (onProgress) onProgress({ phase: 'done', message: 'Loaded from cache', found: cached.results.length, cached: true });
         return { results: cached.results, apiCalls: 0, cached: true, totalResults: cached.results.length };
       }
+    }
+
+    const globalUsage = await getGlobalUsage();
+    if (checkBudget(globalUsage, 'enterprise', totalCalls)) {
+      throw new Error('Platform free-tier safety limit reached. Live searches resume next month; cached results remain available.');
     }
 
   // ── 2. Geocode ──────────────────────────────────────────────────────────────
@@ -1276,267 +1167,20 @@ const _searchSingle = async (keyword, location, options = {}) => {
     );
     }
 
-  // ── 7. Three-Layer Relevance Filter (AI-powered for product searches) ──────
-    const kwLower = keyword.trim().toLowerCase();
-    const isJewellerySearch = JEWELLERY_KEYWORDS.test(kwLower);
-    const beforeRelevance = finalLeads.length;
-
-    if (isProductType && !isFoodSearch && !isServiceSearch) {
-    // ── Layer A: Type-Based Exclusion ────────────────────────────────────
-    const NON_PRODUCT_TYPES = new Set([
-      'restaurant', 'cafe', 'bar', 'food', 'bakery', 'meal_delivery',
-      'meal_takeaway', 'fast_food_restaurant', 'ice_cream_shop',
-      'coffee_shop', 'night_club', 'caterer',
-      'bank', 'atm', 'accounting', 'insurance_agency',
-      'hospital', 'doctor', 'dentist', 'physiotherapist', 'veterinary_care',
-      'lodging', 'hotel', 'motel',
-      'movie_theater', 'amusement_park', 'casino', 'stadium',
-      'zoo', 'aquarium', 'art_gallery', 'museum',
-      'tourist_attraction', 'event_venue', 'banquet_hall', 'wedding_venue',
-      'beauty_salon', 'hair_care', 'spa', 'nail_salon',
-      'school', 'university', 'library',
-      'airport', 'bus_station', 'train_station', 'transit_station',
-      'subway_station', 'parking',
-      'church', 'mosque', 'hindu_temple', 'place_of_worship', 'cemetery',
-      'local_government_office', 'courthouse', 'embassy',
-      'fire_station', 'police',
-      'car_rental', 'car_repair', 'car_wash',
-      'gym', 'fitness_center',
-    ]);
-    if (!isJewellerySearch) NON_PRODUCT_TYPES.add('jewelry_store');
-
-    const beforeA = finalLeads.length;
-    finalLeads = finalLeads.filter((lead) => {
-      const types = lead.types || [];
-      const name = (lead.displayName?.text || '').toLowerCase();
-      // Name match always wins — if the business name contains the keyword, keep it
-      if (name.includes(kwLower)) return true;
-      // No types at all — keep (can't determine category)
-      if (types.length === 0) return true;
-      const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
-      if (specific.length === 0) {
-        // Place has only generic types — keep ONLY if the business name contains
-        // the search keyword (strong signal it actually deals in that product).
-        return name.includes(kwLower);
-      }
-      // Whitelist: keep only if place has ≥1 type that is a known product seller
-      const hasProductType = specific.some(t => PRODUCT_SELLER_TYPES.has(t));
-      if (hasProductType) return true;
-      // Has specific types but none are product-seller types → drop
-      return false;
-    });
-    log(`[filter-A] ${beforeA} → ${finalLeads.length} after type whitelist`);
-
-    // ── Layer B: Intent Name Exclusion ───────────────────────────────────
-    if (intent?.exclude_name_words?.length) {
-      const excludeWords = intent.exclude_name_words.map(w => w.toLowerCase());
-      const beforeB = finalLeads.length;
-      finalLeads = finalLeads.filter((lead) => {
-        const name = (lead.displayName?.text || '').toLowerCase();
-        if (name.includes(kwLower)) return true;
-        return !excludeWords.some(w => name.includes(w));
-      });
-      log(`[filter-B] ${beforeB} → ${finalLeads.length} after name exclusion`);
-    }
-
-    // ── Layer C: Anti-Stock Keyword Filter ───────────────────────────────
-    if (intent?.anti_stock_keywords?.length) {
-      const antiWords = intent.anti_stock_keywords.map(w => w.toLowerCase());
-      const beforeC = finalLeads.length;
-      finalLeads = finalLeads.filter((lead) => {
-        const name = (lead.displayName?.text || '').toLowerCase();
-        if (name.includes(kwLower)) return true;
-        return !antiWords.some(w => name.includes(w));
-      });
-      log(`[filter-C] ${beforeC} → ${finalLeads.length} after anti-stock filter`);
-    }
-
-    // ── Layer D: Keyword-Relevance Gate ────────────────────────────────
-    // Layer A proves a place is a shop. Layers B/C exclude bad names.
-    // But a shop can sell ANYTHING — "Patel Hardware" passes type-whitelist
-    // for a "ball" search even though it has zero relation to balls.
-    // Layer D requires at least ONE affinity signal:
-    //   • keyword or synonym appears in the business name
-    //   • a store_name_keyword appears in the business name
-    //   • keyword or synonym appears in customer reviews
-    //   • place has a highly specific matching type (e.g. sporting_goods_store)
-    // Safety net: if filtering would leave < 3 results, keep unfiltered.
-    if (intent) {
-      const affinityWords = [
-        kwLower,
-        ...(intent.synonyms || []).map(s => s.toLowerCase()),
-        ...(intent.indian_synonyms || []).map(s => s.toLowerCase()),
-        ...(intent.review_keywords || []).map(s => s.toLowerCase()),
-      ];
-      const categoryWords = (intent.category_keywords || []).map(s => s.toLowerCase());
-      const storeHints = (intent.store_name_keywords || []).map(s => s.toLowerCase());
-
-      // Types that are specific enough to count as a signal on their own
-      // (a sporting_goods_store IS relevant for "ball" even without name match)
-      const HIGHLY_SPECIFIC_TYPES = new Set([
-        'sporting_goods_store', 'toy_store', 'bicycle_store',
-        'book_store', 'pet_store', 'florist',
-        'clothing_store', 'jewelry_store',
-        'furniture_store', 'home_goods_store',
-        'hardware_store', 'paint_store', 'electronics_store',
-      ]);
-
-      const beforeD = finalLeads.length;
-      const gated = finalLeads.filter((lead) => {
-        const name = (lead.displayName?.text || '').toLowerCase();
-        const reviewText = (lead._reviewText || '').toLowerCase();
-        const types = lead.types || [];
-
-        // Signal 1: product keyword OR indian synonym in name
-        if (affinityWords.some(w => w && name.includes(w))) return true;
-        // Signal 2: category keyword in name
-        if (categoryWords.some(w => w && name.includes(w))) return true;
-        // Signal 3: product keyword OR synonym in reviews
-        if (reviewText && affinityWords.some(w => w && reviewText.includes(w))) return true;
-        // Signal 4: highly specific OR category Google type
-        if (types.some(t => HIGHLY_SPECIFIC_TYPES.has(t))) return true;
-        // Signal 5: specific store hint phrase in name (bonus)
-        if (storeHints.some(w => w && name.includes(w))) return true;
-
-        return false;
-      });
-
-      // ── No safety net — 0 accurate results > 20 wrong results ──────────
-      // Old code: if (gated.length >= 3) use gated, else skip filter entirely.
-      // That "safety net" was the #1 reason Layer D never applied — it bypassed
-      // the entire filter whenever fewer than 3 businesses passed, which is
-      // common for niche keywords in smaller cities.
-      if (gated.length > 0) {
-        // NORMAL PATH: filter produced results — use them
-        finalLeads = gated;
-        log(`[filter-D] ${beforeD} → ${finalLeads.length} after keyword-relevance gate`);
-      } else {
-        // FALLBACK PATH: filter produced 0 results
-        // Apply a weaker name-only filter instead of bypassing entirely.
-        // This still removes unrelated shops while keeping anything that
-        // at least mentions the keyword or a synonym in its name.
-        const nameOnly = finalLeads.filter(lead => {
-          const name = (lead.displayName?.text || '').toLowerCase();
-          return affinityWords.some(w => w && name.includes(w));
-        });
-        finalLeads = nameOnly;  // may be empty — that is correct and expected
-        log(`[filter-D] fallback name-only filter: ${beforeD} → ${finalLeads.length} (full gate returned 0)`);
-      }
-    }
-
-    log(`[relevance] FOUR-LAYER | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
-
-    } else if (isProductType && isFoodSearch) {
-    const foodAndProductTypes = new Set([...FOOD_DRINK_TYPES, ...PRODUCT_SELLER_TYPES]);
-    finalLeads = finalLeads.filter((lead) => {
-      const types = lead.types || [];
-      if (types.length === 0) return true;
-      const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
-      if (specific.length === 0) return true;
-      return specific.some(t => foodAndProductTypes.has(t));
-    });
-    log(`[relevance] FOOD whitelist | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
-
-    } else if (isProductType && isServiceSearch) {
-    // Look up a whitelist for this service keyword if one exists
-    const serviceTypeKey = Object.keys(SERVICE_TYPE_WHITELIST).find(k => kwLower.includes(k));
-    if (serviceTypeKey) {
-      const whitelist = SERVICE_TYPE_WHITELIST[serviceTypeKey];
-      finalLeads = finalLeads.filter((lead) => {
-        const types = lead.types || [];
-        const name = (lead.displayName?.text || '').toLowerCase();
-        if (name.includes(kwLower)) return true;   // name match always wins
-        if (types.length === 0) return true;
-        const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
-        if (specific.length === 0) return name.includes(kwLower);
-        return specific.some(t => whitelist.has(t));
-      });
-      log(`[relevance] SERVICE keyword whitelist | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
-    } else {
-      // No whitelist for this service — apply name-based filter at minimum
-      finalLeads = finalLeads.filter((lead) => {
-        const name = (lead.displayName?.text || '').toLowerCase();
-        return name.includes(kwLower) || (lead.types || []).some(t => t.includes(kwLower.replace(/\s+/g, '_')));
-      });
-      log(`[relevance] SERVICE keyword name-filter | "${kwLower}" | ${beforeRelevance} → ${finalLeads.length}`);
-    }
-
-    } else if (SERVICE_TYPE_WHITELIST[type]) {
-    const whitelist = SERVICE_TYPE_WHITELIST[type];
-    finalLeads = finalLeads.filter((lead) => {
-      const types = lead.types || [];
-      if (types.length === 0) return true;
-      const specific = types.filter(t => !GENERIC_PLACE_TYPES.has(t));
-      if (specific.length === 0) return true;
-      return specific.some(t => whitelist.has(t));
-    });
-    log(`[relevance] SERVICE whitelist type="${type}" | ${beforeRelevance} → ${finalLeads.length}`);
-    }
-
-  // ── 8. Confidence Scoring & Review Mining ─────────────────────────────────
-    if (isProductType && !isFoodSearch && !isServiceSearch && intent) {
-    const reviewWords = [
-      ...(intent.review_keywords || []),
-      ...(intent.synonyms || []),
-      ...(intent.indian_synonyms || []),
-      kwLower,
-    ].map(w => w.toLowerCase());
-    
-    const affinityWords = [
-      kwLower,
-      ...(intent.synonyms || []),
-      ...(intent.indian_synonyms || []),
-    ].map(w => w.toLowerCase());
-
-    const categoryWords = (intent.category_keywords || []).map(w => w.toLowerCase());
-    const storeHintWords = (intent.store_name_keywords || []).map(w => w.toLowerCase());
-
-    const HIGHLY_SPECIFIC_TYPES = new Set([
-      'sporting_goods_store', 'toy_store', 'bicycle_store',
-      'book_store', 'pet_store', 'florist',
-      'clothing_store', 'jewelry_store',
-      'furniture_store', 'home_goods_store',
-      'hardware_store', 'paint_store', 'electronics_store',
-    ]);
-
-    for (const lead of finalLeads) {
-      let score = 0;
-      const name = (lead.displayName?.text || '').toLowerCase();
-      const reviewText = (lead._reviewText || '').toLowerCase();
-      const types = lead.types || [];
-
-      if (reviewText && reviewWords.some(w => w && reviewText.includes(w))) score += 60;
-      if (name.includes(kwLower)) score += 50;
-      if (affinityWords.some(w => w.length > 2 && name.includes(w))) score += 40;
-      if (categoryWords.some(w => w && name.includes(w))) score += 35;
-      if (storeHintWords.some(w => w && name.includes(w))) score += 30;
-      if (types.some(t => HIGHLY_SPECIFIC_TYPES.has(t))) score += 25;
-      if (types.length > 0 && types.filter(t => !GENERIC_PLACE_TYPES.has(t)).length === 0) score -= 20;
-
-      lead.confidenceScore = score;
-      lead.confidenceLabel = score >= 60 ? 'verified' : score >= 50 ? 'likely' : 'possible';
-    }
-
-    finalLeads.sort((a, b) => (b.confidenceScore || 0) - (a.confidenceScore || 0));
-
-    // Threshold raised from 20→50: a business now needs at LEAST one of these to qualify:
-    //   • keyword in business name (+50) OR
-    //   • customer reviews mention the keyword (+60)
-    // Just being a shop (+20) no longer qualifies on its own.
-    const CONFIDENCE_THRESHOLD = 35;
-    const highQuality = finalLeads.filter(l => (l.confidenceScore || 0) >= CONFIDENCE_THRESHOLD);
-    if (highQuality.length > 0) {
-      finalLeads = highQuality;
-      log(`[confidence] threshold filter: kept ${finalLeads.length} results (score ≥ ${CONFIDENCE_THRESHOLD})`);
-    } else {
-      log(`[confidence] no results above threshold ${CONFIDENCE_THRESHOLD} — keeping all ${finalLeads.length} as-is`);
-    }
-
-    const v = finalLeads.filter(l => l.confidenceLabel === 'verified').length;
-    const lk = finalLeads.filter(l => l.confidenceLabel === 'likely').length;
-    const ps = finalLeads.filter(l => l.confidenceLabel === 'possible').length;
-    log(`[confidence] ${v} VERIFIED, ${lk} LIKELY, ${ps} POSSIBLE out of ${finalLeads.length}`);
-    }
+    const afterGeography = finalLeads.length;
+    finalLeads = mergeMatches(finalLeads
+      .filter(lead => !SERVICE_TYPE_WHITELIST[type] || !lead.types?.length || lead.types.some(t => SERVICE_TYPE_WHITELIST[type].has(t)))
+      .map(lead => classifyLead(lead, keyword.trim(), type, intent || {}, useProductMatching))
+      .filter(Boolean));
+    const diagnostics = {
+      collected: allLeads.length,
+      afterGeography,
+      afterMatching: finalLeads.length,
+      strongMatches: finalLeads.filter(l => l.matchStatus === 'strong').length,
+      possibleSellers: finalLeads.filter(l => l.matchStatus === 'possible').length,
+      unverifiedRoles: finalLeads.filter(l => l.roleUnverified).length,
+    };
+    log('[matching]', diagnostics);
 
   // ── 9. Strip _reviewText before cache/return ──────────────────────────────
     for (const lead of finalLeads) { delete lead._reviewText; }
@@ -1555,6 +1199,7 @@ const _searchSingle = async (keyword, location, options = {}) => {
       apiCalls:     totalApiCalls,
       cached:       false,
       totalResults: finalLeads.length,
+      diagnostics,
     };
   } catch (err) {
     if (isAbortError(err)) {
@@ -1648,24 +1293,9 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
     }
   }
 
-  // ── Flatten + deduplicate by place.id across all pairs ───────────────────
-  const seen        = new Set();
-  const combined    = [];
-  let totalApiCalls = 0;
-
-  for (const res of allResponses) {
-    totalApiCalls += (res.apiCalls || 0);
-    for (const lead of (res.results || [])) {
-      const key = lead.id || lead.placeId;
-      if (key && !seen.has(key)) {
-        seen.add(key);
-        combined.push(lead);
-      }
-    }
-  }
-
-  // Re-sort combined results by confidence score (product searches have it; others get 0)
-  combined.sort((a, b) => (b.confidenceScore || 0) - (a.confidenceScore || 0));
+  const totalApiCalls = allResponses.reduce((sum, res) => sum + (res.apiCalls || 0), 0);
+  const ranked = mergeMatches(allResponses.flatMap(res => res.results || []));
+  const combined = ranked;
 
   if (onProgress) {
     onProgress({
@@ -1678,10 +1308,10 @@ export const searchBusinesses = async (keyword, location, options = {}) => {
   }
 
   return {
-    results:      combined,
+    results:      ranked,
     apiCalls:     totalApiCalls,
-    cached:       false,
-    totalResults: combined.length,
+    cached:       allResponses.every(res => res.cached),
+    totalResults: ranked.length,
   };
 };
 
@@ -1777,6 +1407,7 @@ const TYPE_TO_SUBTYPE_KEY = {
   'store':              'product',
   'manufacturer':       'product',
   'wholesaler':         'product',
+  'distributor':        'product',
   'restaurant':         'restaurant',
   'lodging':            'lodging',
   'hospital':           'hospital',
@@ -1806,6 +1437,7 @@ export const getFilterChips = (type) => {
  * Falls back to the first defined subtype ("default" role) when no pattern matches.
  */
 const detectSubtype = (lead, subtypeDefs) => {
+  if (subtypeDefs === SUBTYPE_DEFS.product) return new Set(lead.businessRoles || businessRoles(lead));
   const name  = (lead.displayName?.text || '').toLowerCase();
   const addr  = (lead.formattedAddress  || '').toLowerCase();
   const types = (lead.types || []).join(' ').toLowerCase();

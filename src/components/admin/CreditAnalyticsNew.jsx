@@ -4,6 +4,7 @@ import { AlertTriangle, Download, Zap, Users, Activity, Target } from 'lucide-re
 import { collection, doc, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { CREDIT_CONFIG } from '../../config';
+import { SKU_CREDITS, SKU_FREE_CAPS, skuStop, weightedCredits } from '../../services/creditMath.js';
 import { getEffectiveUserMonthMetrics } from '../../services/creditService';
 import {
   ResponsiveContainer, AreaChart, Area, CartesianGrid,
@@ -16,13 +17,13 @@ const currentMonthStr = () => {
 };
 
 const ENTERPRISE_CAP   = CREDIT_CONFIG.SKU_FREE_CAPS.enterprise;      // 7,000
-const ENTERPRISE_KILL  = CREDIT_CONFIG.SKU_KILL_SWITCH.enterprise;    // 6,650
+const ENTERPRISE_KILL  = CREDIT_CONFIG.SKU_KILL_SWITCH.enterprise;    // 6,300
 const ENTERPRISE_ALERT = CREDIT_CONFIG.SKU_ADMIN_ALERT.enterprise;    // 5,600
 const PLATFORM_POOL    = CREDIT_CONFIG.PLATFORM_CREDITS_POOL;         // 70,000
 
 const getSkuStatus = (used, cap) => {
   const pct = (used / cap) * 100;
-  if (pct >= 95) return { color: 'text-red-400',    bar: 'bg-red-500',    label: 'BLOCKED'  };
+  if (pct >= 90) return { color: 'text-red-400',    bar: 'bg-red-500',    label: 'BLOCKED'  };
   if (pct >= 80) return { color: 'text-orange-400', bar: 'bg-orange-500', label: 'WARNING'  };
   if (pct >= 50) return { color: 'text-yellow-400', bar: 'bg-yellow-500', label: 'MODERATE' };
   return           { color: 'text-emerald-400', bar: 'bg-emerald-500', label: 'HEALTHY'  };
@@ -32,6 +33,7 @@ const CreditAnalyticsNew = () => {
   const navigate = useNavigate();
   const [loading,              setLoading]              = useState(true);
   const [enterpriseCalls,      setEnterpriseCalls]      = useState(0);
+  const [skuUsage,             setSkuUsage]             = useState({});
   const [totalApiCalls,        setTotalApiCalls]        = useState(0);
   const [totalCreditsUsed,     setTotalCreditsUsed]     = useState(0);
   const [usersData,            setUsersData]            = useState([]);
@@ -42,9 +44,10 @@ const CreditAnalyticsNew = () => {
   useEffect(() => {
     const globalRef = doc(db, 'system', 'global_usage');
     const unsub = onSnapshot(globalRef, (snap) => {
-      if (!snap.exists()) { setEnterpriseCalls(0); setTotalApiCalls(0); setTotalCreditsUsed(0); return; }
+      if (!snap.exists()) { setEnterpriseCalls(0); setTotalApiCalls(0); setTotalCreditsUsed(0); setSkuUsage({}); return; }
       const data = snap.data();
-      if (data.month !== currentMonthStr()) { setEnterpriseCalls(0); setTotalApiCalls(0); setTotalCreditsUsed(0); return; }
+      if (data.month !== currentMonthStr()) { setEnterpriseCalls(0); setTotalApiCalls(0); setTotalCreditsUsed(0); setSkuUsage({}); return; }
+      setSkuUsage(data);
       setEnterpriseCalls(data.sku_enterprise_calls ?? 0);
       setTotalApiCalls(data.totalApiCalls          ?? 0);
       setTotalCreditsUsed(data.totalCreditsUsed    ?? 0);
@@ -137,7 +140,8 @@ const CreditAnalyticsNew = () => {
   }, []);
 
   const enterprisePct   = Math.min(+((enterpriseCalls / ENTERPRISE_CAP) * 100).toFixed(1), 100);
-  const creditPoolPct   = Math.min(+((totalCreditsUsed / PLATFORM_POOL) * 100).toFixed(1), 100);
+  const weightedTotal = weightedCredits(skuUsage);
+  const creditPoolPct   = Math.min(+((weightedTotal / PLATFORM_POOL) * 100).toFixed(1), 100);
   const enterpriseStatus = getSkuStatus(enterpriseCalls, ENTERPRISE_CAP);
 
   const alerts = useMemo(() =>
@@ -166,7 +170,7 @@ const CreditAnalyticsNew = () => {
       ['Enterprise free cap (India)',     ENTERPRISE_CAP].join(','),
       ['Enterprise usage %',              `${enterprisePct}%`].join(','),
       ['Enterprise kill switch at',       ENTERPRISE_KILL].join(','),
-      ['Total credits used',              totalCreditsUsed].join(','),
+      ['Total weighted credits used',     weightedTotal].join(','),
       ['Total credits pool',              PLATFORM_POOL].join(','),
       [],
       ['Top users by credits used'].join(','),
@@ -204,7 +208,7 @@ const CreditAnalyticsNew = () => {
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-white mb-2">Platform Usage</h1>
-          <p className="text-gray-400">SKU credit tracking — Enterprise cap is the primary constraint</p>
+          <p className="text-gray-400">India free-tier request counters and weighted credits</p>
         </div>
         <div className="flex flex-wrap gap-3">
           <button
@@ -225,7 +229,7 @@ const CreditAnalyticsNew = () => {
 
       {/* SKU Status Banner */}
       <div className={`rounded-xl border p-4 ${
-        enterprisePct >= 95 ? 'bg-red-500/10 border-red-500/50'
+        enterprisePct >= 90 ? 'bg-red-500/10 border-red-500/50'
         : enterprisePct >= 80 ? 'bg-orange-500/10 border-orange-500/50'
         : 'bg-slate-800/50 border-slate-700/50'
       }`}>
@@ -250,7 +254,7 @@ const CreditAnalyticsNew = () => {
           <span>Alert at {ENTERPRISE_ALERT.toLocaleString()} · Kill at {ENTERPRISE_KILL.toLocaleString()}</span>
         </div>
         <p className="text-xs text-gray-500 mt-1">
-          Includes: phone numbers, websites, ratings, reviews (Contact + Atmosphere Data)
+          Current searches request reviews, so they use Enterprise + Atmosphere. The Enterprise group includes these calls.
         </p>
       </div>
 
@@ -258,9 +262,23 @@ const CreditAnalyticsNew = () => {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6">
         <StatCard icon={Zap}      label="Enterprise Calls"   value={enterpriseCalls.toLocaleString()}   subtitle={`Cap ${ENTERPRISE_CAP.toLocaleString()}`} />
         <StatCard icon={Target}   label="Enterprise Usage"   value={`${enterprisePct}%`} />
-        <StatCard icon={Activity} label="Total Credits Used" value={totalCreditsUsed.toLocaleString()}  subtitle={`Pool ${PLATFORM_POOL.toLocaleString()}`} />
+        <StatCard icon={Activity} label="Weighted Credits Used" value={weightedTotal.toLocaleString()}  subtitle={`Global stop ${CREDIT_CONFIG.PLATFORM_KILL_CREDITS.toLocaleString()}`} />
         <StatCard icon={Users}    label="Tracked Users"      value={usersData.length} />
       </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {Object.keys(SKU_CREDITS).map((tier) => {
+          const calls = Number(skuUsage[`sku_${tier}_calls`] || 0);
+          return <div key={tier} className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 text-white">
+            <h3 className="font-semibold capitalize">{tier} SKU</h3>
+            <p className="text-xl font-bold mt-2">{calls.toLocaleString()} / {SKU_FREE_CAPS[tier].toLocaleString()} requests</p>
+            <p className="text-sm text-slate-300">{(calls * SKU_CREDITS[tier]).toLocaleString()} weighted credits · {SKU_CREDITS[tier]} per request</p>
+            <p className="text-xs text-slate-400">Stops at {skuStop(tier).toLocaleString()} requests (90%)</p>
+            {tier === 'enterprise' && <p className="text-xs text-amber-300 mt-1">Enterprise + Atmosphere: {Number(skuUsage.sku_atmosphere_calls || 0).toLocaleString()} requests</p>}
+          </div>;
+        })}
+      </div>
+      <p className="text-xs text-amber-300">Usage here is app-recorded. Verify Google Cloud Billing and set provider quotas; browser requests and concurrent searches can exceed this counter.</p>
 
       {/* User Alerts */}
       {alerts.length > 0 && (

@@ -2,12 +2,12 @@
  * Lead Finder - Credit Context (SKU-Based)
  *
  * Exposes SKU-based credit state to the whole app.
- * All users are equal — same 2,800 credits/month, no tiers.
+ * Default users receive 2,000 credits/month; admins may override this.
  * Admin can override creditLimit per user (integer credits or 'unlimited').
  *
  * Key values exposed:
  *   myCreditsUsed        — credits consumed this month
- *   myCreditsLimit       — monthly credit limit (default 2,800)
+ *   myCreditsLimit       — monthly credit limit (default 2,000)
  *   myCreditsRemaining   — credits left this month
  *   myCreditPctUsed      — percentage used (0–100)
  *   myCreditIsUnlimited  — true if admin set 'unlimited'
@@ -193,7 +193,7 @@ export const CreditProvider = ({ children }) => {
   const deductCredits = useCallback(
     (apiCalls, meta = {}) => {
       if (!currentUser?.uid) return Promise.reject(new Error('Not signed in.'));
-      // All current calls are Enterprise tier (phone+website+ratings in FIELD_MASK)
+      // Reviews make current Text Search requests Enterprise + Atmosphere.
       return deductCreditsService(currentUser.uid, apiCalls, 'enterprise', meta);
     },
     [currentUser?.uid]
@@ -209,7 +209,7 @@ export const CreditProvider = ({ children }) => {
     : Math.min(+((myCreditsUsed / Math.max(myCreditsLimit, 1)) * 100).toFixed(1), 100);
 
   const platformCreditPctUsed = Math.min(
-    +((platformEnterpriseCallsUsed / CREDIT_CONFIG.SKU_FREE_CAPS.enterprise) * 100).toFixed(1),
+    +((platformTotalCreditsUsed / CREDIT_CONFIG.PLATFORM_CREDITS_POOL) * 100).toFixed(1),
     100
   );
 

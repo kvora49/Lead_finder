@@ -4,9 +4,9 @@
  * Model:
  * - All users share a single API key.
  * - Google bills at the highest SKU tier present in FIELD_MASK (Enterprise).
- * - Enterprise free cap: 7,000 calls/month (India region).
- * - Each call costs 10 credits. All users get 2,800 credits/month.
- * - Platform hard kill at 95% of Enterprise cap (6,650 calls).
+ * - Current review field makes Text Search Enterprise + Atmosphere (India).
+ * - Enterprise-group free cap: 7,000 calls/month; platform stops at 6,300.
+ * - Each current call costs 10 credits. Default user allocation: 2,000/month.
  * - Admin email alert at 80% of Enterprise cap (5,600 calls) via Cloud Function trigger.
  * - All users have the same credit allocation — no tiers, no pro/standard split.
  */
@@ -23,8 +23,9 @@ import {
   increment,
 } from 'firebase/firestore';
 import { CREDIT_CONFIG } from '../config';
+import { checkBudget, weightedCredits } from './creditMath.js';
 
-const DEFAULT_USER_CREDITS = CREDIT_CONFIG.DEFAULT_USER_CREDITS; // 2800
+const DEFAULT_USER_CREDITS = CREDIT_CONFIG.DEFAULT_USER_CREDITS;
 const GLOBAL_DOC_PATH = ['system', 'global_usage'];
 
 const currentMonth = () => {
@@ -88,7 +89,7 @@ export const getEffectiveUserMonthMetrics = (userData = {}, month = currentMonth
  * Deduct credits for an API search.
  *
  * Flow:
- *   1. Pre-check: read global_usage to enforce platform kill switch (95%).
+ *   1. Pre-check: read global_usage to enforce platform stop (90%).
  *   2. Transaction on user doc: check user credit limit, write user counters.
  *   3. increment() on global doc: contention-free counter update.
  *   4. Write credit_log entry inside user transaction.
@@ -111,10 +112,9 @@ export const deductCredits = async (userId, apiCalls, tier = 'enterprise', meta 
   // ── Step 1: Platform kill switch pre-check (read-only, fast) ────────────────
   const globalSnap = await getDoc(globalRef);
   if (globalSnap.exists() && globalSnap.data().month === month) {
-    const currentSkuCalls = globalSnap.data()[`sku_${tier}_calls`] ?? 0;
-    if (currentSkuCalls + apiCalls > CREDIT_CONFIG.SKU_KILL_SWITCH[tier]) {
+    if (checkBudget(globalSnap.data(), tier, apiCalls)) {
       throw new Error(
-        `Platform monthly search limit reached (95% of free tier). ` +
+        `Platform monthly search limit reached (90% of free tier). ` +
         `Resets on the 1st of next month. Cached results are still free.`
       );
     }
@@ -189,6 +189,7 @@ export const deductCredits = async (userId, apiCalls, tier = 'enterprise', meta 
       [`sku_${tier}_calls`]: apiCalls,
       totalApiCalls:         apiCalls,
       totalCreditsUsed:      creditsToDeduct,
+      sku_atmosphere_calls: tier === 'enterprise' ? apiCalls : 0,
       monthly_api_cost:      0,   // legacy field frozen at 0
       lastUpdated:           serverTimestamp(),
     });
@@ -197,6 +198,7 @@ export const deductCredits = async (userId, apiCalls, tier = 'enterprise', meta 
       [`sku_${tier}_calls`]: increment(apiCalls),
       totalApiCalls:         increment(apiCalls),
       totalCreditsUsed:      increment(creditsToDeduct),
+      ...(tier === 'enterprise' ? { sku_atmosphere_calls: increment(apiCalls) } : {}),
       lastUpdated:           serverTimestamp(),
     });
   }
@@ -215,6 +217,7 @@ export const getGlobalUsage = async () => {
       sku_enterprise_calls: 0,
       sku_pro_calls:        0,
       sku_essentials_calls: 0,
+      sku_atmosphere_calls: 0,
       totalApiCalls:        0,
       totalCreditsUsed:     0,
       monthly_api_cost:     0,
@@ -227,6 +230,7 @@ export const getGlobalUsage = async () => {
       sku_enterprise_calls: 0,
       sku_pro_calls:        0,
       sku_essentials_calls: 0,
+      sku_atmosphere_calls: 0,
       totalApiCalls:        0,
       totalCreditsUsed:     0,
       monthly_api_cost:     0,
@@ -246,6 +250,7 @@ export const ensureGlobalUsageDoc = async () => {
       sku_enterprise_calls: 0,
       sku_pro_calls:        0,
       sku_essentials_calls: 0,
+      sku_atmosphere_calls: 0,
       totalApiCalls:        0,
       totalCreditsUsed:     0,
       monthly_api_cost:     0,
@@ -256,9 +261,8 @@ export const ensureGlobalUsageDoc = async () => {
 
 // ── Platform credit % used (based on Enterprise — the real bottleneck) ────────
 export const getPlatformCreditPct = (globalData = {}) => {
-  const enterpriseCalls = globalData.sku_enterprise_calls ?? 0;
   return Math.min(
-    +((enterpriseCalls / CREDIT_CONFIG.SKU_FREE_CAPS.enterprise) * 100).toFixed(1),
+    +((weightedCredits(globalData) / CREDIT_CONFIG.PLATFORM_CREDITS_POOL) * 100).toFixed(1),
     100
   );
 };

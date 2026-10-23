@@ -293,8 +293,8 @@ const SettingsNew = () => {
             <h2 className="text-xl font-bold text-white mb-4">Credit Management</h2>
             
             <SettingRow
-              label="Global Monthly Budget Limit (USD)"
-              description="Maximum total monthly API spend allowed system-wide"
+              label="Legacy global budget setting"
+              description="Display setting only. Live searches use the 90% free-tier SKU limits shown in Platform Usage."
             >
               <input
                 type="number"
@@ -306,8 +306,8 @@ const SettingsNew = () => {
             </SettingRow>
 
             <SettingRow
-              label="Default User Monthly Budget (USD)"
-              description="Default monthly API spend limit applied to new users"
+              label="Default User Monthly Credits"
+              description="Monthly internal credits assigned to new users"
             >
               <select
                 value={settings.defaultUserCreditLimit}
@@ -316,7 +316,8 @@ const SettingsNew = () => {
                 disabled={!canEdit}
               >
                 <option value="1400">1,400 credits/month</option>
-                <option value="2800">2,800 credits/month (default)</option>
+                <option value="2000">2,000 credits/month (recommended)</option>
+                <option value="2800">2,800 credits/month</option>
                 <option value="4200">4,200 credits/month</option>
                 <option value="5600">5,600 credits/month</option>
                 <option value="8400">8,400 credits/month</option>

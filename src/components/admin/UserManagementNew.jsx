@@ -188,7 +188,7 @@ const CreditModal = ({ user, onClose, onUpdate }) => {
               type="number"
               value={amount}
               onChange={e => setAmount(e.target.value)}
-              placeholder="e.g. 2800"
+              placeholder="e.g. 2000"
               className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           )}
@@ -453,7 +453,7 @@ const UserManagementNew = () => {
       creditsUsed: effectiveMetrics.monthlyCreditsUsed ?? 0,
       searchCount: u.searchCount  ?? 0,
       status:      resolvedStatus,
-      creditLimit: u.creditLimit   ?? 2800,
+      creditLimit: u.creditLimit   ?? CREDIT_CONFIG.DEFAULT_USER_CREDITS,
       role:        u.role          ?? 'user',
     };
   };

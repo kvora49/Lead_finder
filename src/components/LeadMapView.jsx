@@ -70,6 +70,7 @@ const LeadMapView = ({ leads, apiKey }) => {
               <p style="font-weight:600;font-size:13px;margin:0 0 4px;color:#0f172a">
                 ${lead.displayName?.text || 'Unknown'}
               </p>
+              ${lead.matchStatus ? `<p style="font-size:11px;color:#92400e;margin:0 0 4px">${lead.matchStatus === 'possible' ? 'Possible seller' : 'Strong match'}${lead.roleUnverified ? ' · Business role unverified' : ''}</p>` : ''}
               ${lead.formattedAddress
                 ? `<p style="font-size:11px;color:#64748b;margin:0 0 4px;line-height:1.4">
                      ${lead.formattedAddress}

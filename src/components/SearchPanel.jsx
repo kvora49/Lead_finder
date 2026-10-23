@@ -29,6 +29,7 @@ import CreditRequestModal from './CreditRequestModal.jsx';
 import { searchBusinesses, filterByPhoneNumber, filterByAddress, deduplicateResults, getFilterChips, filterBySubtype } from '../services/placesApi';
 import { createCreditRequest, logSearch, logActivity } from '../services/analyticsService';
 import { GOOGLE_API_KEY, CREDIT_CONFIG } from '../config.js';
+import { maxSearchCalls } from '../services/searchMatching.js';
 import { useAuth }   from '../contexts/AuthContext';
 import { useCredit } from '../contexts/CreditContext';
 // deduplicateResults is always applied — not a user toggle
@@ -45,24 +46,25 @@ const BUSINESS_TYPES = [
   { value: 'bank',               label: 'Bank / Finance' },
   { value: 'real_estate_agency', label: 'Real Estate' },
   { value: 'manufacturer',       label: 'Manufacturer' },
-  { value: 'wholesaler',         label: 'Wholesaler / Distributor' },
+{ value: 'wholesaler',         label: 'Wholesaler' },
+  { value: 'distributor',        label: 'Distributor' },
 ];
 
 const SEARCH_SCOPES = [
   {
     value: 'city',
     label: 'Entire City',
-    hint:  '4×4 grid — covers the entire city (32 API calls)',
+hint:  'Search across the city boundary',
   },
   {
     value: 'neighbourhood',
     label: 'Neighbourhood',
-    hint:  '4×3 grid — focused on your area (24 API calls)',
+hint:  'Search within your neighbourhood boundary',
   },
   {
     value: 'specific',
     label: 'Specific Area',
-    hint:  '1×1 grid — one exact building or street (≤9 API calls)',
+hint:  'Search within the selected building or street area',
   },
 ];
 
@@ -72,11 +74,7 @@ const SEARCH_SCOPE_LABELS = {
   specific: 'Specific Area',
 };
 
-const MAX_API_CALLS_PER_PAIR = {
-  city: 32,
-  neighbourhood: 24,
-  specific: 9,
-};
+
 
 
 // ─── Export helpers (work on raw Places API result objects) ──────────────────
@@ -96,6 +94,10 @@ const downloadSearchExcel = async (leads, keyword, location) => {
     'Website':       leadWeb(l),
     'Rating':        leadRate(l),
     'Total Reviews': leadRevs(l),
+    'Match': l.matchStatus === 'possible' ? 'Possible seller' : l.matchStatus === 'strong' ? 'Strong match' : '',
+    'Business Roles': (l.businessRoles || []).join(', '),
+    'Role Status': l.roleUnverified ? 'Business role unverified' : 'Supported by listing',
+    'Match Reason': l.matchReason || '',
   }));
 
   const ws = utils.json_to_sheet(rows);
@@ -372,6 +374,20 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
           )}
         </div>
 
+        {lead.matchStatus && (
+          <div className="space-y-1">
+            <div className="flex flex-wrap gap-1">
+              <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${lead.matchStatus === 'possible' ? 'bg-amber-100 text-amber-800' : 'bg-emerald-100 text-emerald-800'}`}>
+                {lead.matchStatus === 'possible' ? 'Possible seller' : 'Strong match'}
+              </span>
+              {lead.roleUnverified && <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Business role unverified</span>}
+              {(lead.businessRoles || []).map(role => <span key={role} className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 capitalize">{role}</span>)}
+            </div>
+            <p className="text-[10px] text-slate-500 dark:text-gray-400">{lead.matchReason}</p>
+            {lead.matchedKeywords?.length > 1 && <p className="text-[10px] text-slate-500">Matches: {lead.matchedKeywords.join(', ')}</p>}
+          </div>
+        )}
+
         {/* Address + copy */}
         <div className="flex items-start gap-1.5">
           <MapPin className="w-3 h-3 mt-0.5 flex-none text-slate-400 dark:text-gray-600" />
@@ -537,7 +553,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     const keywordCount = keyword.split(',').map((k) => k.trim()).filter(Boolean).length || 1;
     const locationCount = location.split(',').map((l) => l.trim()).filter(Boolean).length || 1;
     const pairCount = keywordCount * locationCount;
-    const callsPerPair = MAX_API_CALLS_PER_PAIR[searchScope] ?? MAX_API_CALLS_PER_PAIR.city;
+const callsPerPair = maxSearchCalls(searchScope);
     return pairCount * callsPerPair * 10; // 10 credits per Enterprise call
   }, [keyword, location, searchScope]);
 
@@ -550,7 +566,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
     if (myCreditIsUnlimited) return true;
     const estimatedCredits = estimateMaxSearchCredits();
 
-    if (remainingCredits < estimatedCredits) {
+if ((myCreditsRemaining ?? 0) < estimatedCredits) {
       const actionLabel = forRefresh ? 'refresh search' : 'search';
       const message =
         `Not enough credits to ${actionLabel}. ` +
@@ -1640,6 +1656,7 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
 
           </div> {/* end space-y-2.5 toolbar wrapper */}
 
+          <p className="text-xs text-slate-500 dark:text-gray-400">Strong matches appear first, possible sellers last. Matches use business listing evidence; current stock is not verified.</p>
           {/* Grid / Map */}
           {visible.length > 0 ? (
             viewMode === 'grid' ? (
