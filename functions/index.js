@@ -93,13 +93,7 @@ const INVITE_TTL = 24 * 60 * 60 * 1000; // 24 hours in ms
 const OTP_TTL_MS = 15 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
-const EMAIL_SECRETS = [
-  "SMTP_HOST",
-  "SMTP_PORT",
-  "SMTP_SECURE",
-  "SMTP_USER",
-  "SMTP_PASS",
-];
+// SMTP credentials are loaded from functions/.env (no Secret Manager needed)
 const CREDIT_ALERT_TRACKING_COLLECTION = "credit_alert_dispatches";
 
 const currentMonthKey = () => {
@@ -133,7 +127,8 @@ exports.sendCreditAlertOnUsageThreshold = onDocumentUpdated(
   {
     document: "users/{userId}",
     timeoutSeconds: 30,
-    secrets: EMAIL_SECRETS,
+    region: "asia-south1",
+    database: "(default)",
   },
   async (event) => {
     const userId = event.params.userId;
@@ -232,7 +227,7 @@ exports.sendCreditAlertOnUsageThreshold = onDocumentUpdated(
   }
 );
 
-exports.sendEmailOtp = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS }, async (request) => {
+exports.sendEmailOtp = onCall({ timeoutSeconds: 30 }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Must be signed in.");
 
   const uid = request.auth.uid;
@@ -342,7 +337,7 @@ exports.verifyEmailOtp = onCall({ timeoutSeconds: 20 }, async (request) => {
   return { ok: true, verified: true };
 });
 
-exports.sendSystemEmail = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS }, async (request) => {
+exports.sendSystemEmail = onCall({ timeoutSeconds: 30 }, async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Must be signed in.');
 
   const { type, payload = {} } = request.data || {};
@@ -464,7 +459,7 @@ exports.sendSystemEmail = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS },
 // Generates a secure random invite token, stores it in admin_invites/{token},
 // and sends an invitation email via SMTP.
 // ════════════════════════════════════════════════════════════════════════════
-exports.sendAdminInvite = onCall({ timeoutSeconds: 30, secrets: EMAIL_SECRETS }, async (request) => {
+exports.sendAdminInvite = onCall({ timeoutSeconds: 30 }, async (request) => {
   if (!request.auth) throw new HttpsError("unauthenticated", "Must be signed in.");
 
   // Verify caller role from Firestore (cannot trust client-side claim)
@@ -772,7 +767,7 @@ const SKU_ADMIN_ALERT = { enterprise: 5600 };   // 80%
 const SKU_KILL_SWITCH = { enterprise: 6650 };   // 95%
 
 exports.onGlobalUsageUpdated = onDocumentUpdated(
-  { document: "system/global_usage", timeoutSeconds: 30, secrets: EMAIL_SECRETS },
+  { document: "system/global_usage", timeoutSeconds: 30, region: "asia-south1", database: "(default)" },
   async (event) => {
     const after  = event.data.after.data()  || {};
     const before = event.data.before.data() || {};
