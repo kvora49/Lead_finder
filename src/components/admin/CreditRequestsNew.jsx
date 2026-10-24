@@ -193,7 +193,7 @@ const CreditRequestsNew = () => {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <StatCard label="Pending" value={pendingCount} color="blue" />
         <StatCard label="Approved" value={approvedCount} color="emerald" />
         <StatCard label="Rejected" value={rejectedCount} color="red" />
@@ -243,7 +243,7 @@ const CreditRequestsNew = () => {
               {/* Request Header */}
               <button
                 onClick={() => setExpandedId(expandedId === request.id ? null : request.id)}
-                className="w-full px-6 py-4 flex items-center justify-between hover:bg-slate-700/30 transition-colors"
+                className="w-full px-4 sm:px-6 py-4 flex items-center justify-between hover:bg-slate-700/30 transition-colors"
               >
                 <div className="flex items-center gap-4 flex-1 min-w-0 text-left">
                   <div className="flex-1 min-w-0">
@@ -264,9 +264,9 @@ const CreditRequestsNew = () => {
               {/* Request Details (Expanded) */}
               {expandedId === request.id && (
                 <>
-                  <div className="border-t border-slate-700 px-6 py-4 bg-slate-900/30 space-y-4">
+                  <div className="border-t border-slate-700 px-4 sm:px-6 py-4 bg-slate-900/30 space-y-4">
                     {/* Search Details */}
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
                         <p className="text-xs text-gray-400 uppercase tracking-widest mb-1">Keyword</p>
                         <p className="text-white font-medium">{request.keyword || '—'}</p>
@@ -286,7 +286,7 @@ const CreditRequestsNew = () => {
                     </div>
 
                     {/* Request Details */}
-                    <div className="grid grid-cols-2 gap-4 pt-2 border-t border-slate-700">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-700">
                       <div className="flex items-center gap-2 text-sm text-gray-300">
                         <Mail className="w-4 h-4 text-gray-500" />
                         {request.userEmail}

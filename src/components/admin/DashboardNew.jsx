@@ -179,7 +179,7 @@ const DashboardNew = () => {
             {stats.currentMonth ? `${stats.currentMonth} · ` : ''}Real-time system analytics
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <button
             onClick={() => navigate('/admin/users')}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors text-white text-sm font-medium"

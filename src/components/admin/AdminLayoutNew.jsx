@@ -139,7 +139,7 @@ const AdminLayoutNew = () => {
         <div className="px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             {/* Logo & Menu Toggle */}
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 sm:gap-4">
               {/* Mobile Menu Toggle */}
               <button
                 onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -189,7 +189,7 @@ const AdminLayoutNew = () => {
                       className="fixed inset-0 z-40"
                       onClick={() => setShowNotifications(false)}
                     />
-                    <div className="absolute right-0 mt-2 w-80 bg-slate-800
+                    <div className="absolute right-0 mt-2 w-[min(20rem,calc(100vw-2rem))] bg-slate-800
                       border border-slate-700 rounded-xl shadow-2xl z-50 overflow-hidden">
                       <div className="flex items-center justify-between px-4 py-3
                         border-b border-slate-700">
@@ -241,7 +241,7 @@ const AdminLayoutNew = () => {
               <div className="relative">
                 <button
                   onClick={() => setProfileMenuOpen(!profileMenuOpen)}
-                  className="flex items-center gap-3 px-3 py-2 bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors"
+                  className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2 bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors"
                 >
                   <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
                     <span className="text-white text-sm font-semibold">

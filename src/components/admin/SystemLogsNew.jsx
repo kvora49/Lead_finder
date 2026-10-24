@@ -424,7 +424,7 @@ const SystemLogsNew = () => {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <StatCard
           icon={FileText}
           label="Total (this page)"

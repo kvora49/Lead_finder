@@ -67,7 +67,18 @@ hint:  'Search within your neighbourhood boundary',
 hint:  'Search within the selected building or street area',
   },
 ];
-const RESULTS_PER_PAGE = 50;
+const useResponsiveResultPageSize = () => {
+  const [pageSize, setPageSize] = useState(50);
+  useEffect(() => {
+    const update = () => setPageSize(window.innerWidth < 768
+      ? (window.matchMedia('(orientation: landscape)').matches ? 16 : 12)
+      : 50);
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+  return pageSize;
+};
 const paginationItems = (current, total) => {
   if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1);
   const items = [1];
@@ -493,6 +504,52 @@ const LeadCard = ({ lead, selectionMode = false, isSelected = false, onToggle })
   );
 };
 
+const MobileLeadRow = ({ lead, selectionMode = false, isSelected = false, onToggle, onOpen }) => {
+  const name = lead.displayName?.text || 'Unknown Business';
+  const address = lead.formattedAddress || 'Address not available';
+  return (
+    <button type="button" onClick={selectionMode ? onToggle : onOpen}
+      className={`w-full text-left rounded-xl border px-3 py-2.5 transition-colors ${
+        isSelected ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-500/15' : 'border-slate-200 dark:border-white/10 bg-white dark:bg-[#171717]'
+      }`}>
+      <div className="flex items-start gap-2">
+        {selectionMode && <span className={`mt-0.5 h-4 w-4 rounded border-2 flex-none ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300'}`} />}
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-slate-900 dark:text-white line-clamp-1">{name}</p>
+          <p className="mt-1 flex items-center gap-1 text-xs text-slate-500 dark:text-gray-400 line-clamp-1"><MapPin className="w-3 h-3 flex-none" />{address}</p>
+          <div className="mt-1.5 flex items-center gap-2 text-xs">
+            {lead.rating && <span className="flex items-center gap-1 text-slate-600 dark:text-gray-300"><Star className="w-3 h-3 fill-amber-400 text-amber-400" />{lead.rating}</span>}
+            {lead.matchStatus && <span className={lead.matchStatus === 'possible' ? 'text-amber-600' : 'text-emerald-600'}>{lead.matchStatus === 'possible' ? 'Possible seller' : 'Strong match'}</span>}
+          </div>
+        </div>
+        <ChevronRight className="mt-2 h-4 w-4 flex-none text-slate-400" />
+      </div>
+    </button>
+  );
+};
+
+const MobileLeadDetail = ({ lead, onClose }) => {
+  if (!lead) return null;
+  const name = lead.displayName?.text || 'Unknown Business';
+  const address = lead.formattedAddress || 'Address not available';
+  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+  return <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
+    <button type="button" aria-label="Close lead details" onClick={onClose} className="absolute inset-0 bg-black/55" />
+    <section className="absolute inset-x-0 bottom-0 max-h-[82dvh] overflow-y-auto rounded-t-3xl bg-white dark:bg-[#171717] p-5 shadow-2xl">
+      <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-slate-300 dark:bg-white/20" />
+      <div className="flex items-start justify-between gap-3"><h2 className="text-lg font-bold text-slate-900 dark:text-white">{name}</h2><button type="button" onClick={onClose} className="p-1 text-slate-400"><X className="w-5 h-5" /></button></div>
+      <p className="mt-3 flex gap-2 text-sm text-slate-600 dark:text-gray-300"><MapPin className="mt-0.5 w-4 h-4 flex-none" />{address}</p>
+      {lead.rating && <p className="mt-3 flex items-center gap-1 text-sm text-slate-600 dark:text-gray-300"><Star className="w-4 h-4 fill-amber-400 text-amber-400" />{lead.rating} {lead.userRatingCount ? `(${lead.userRatingCount})` : ''}</p>}
+      {lead.matchReason && <p className="mt-3 text-xs text-slate-500 dark:text-gray-400">{lead.matchReason}</p>}
+      <div className="mt-5 grid grid-cols-2 gap-2">
+        {lead.nationalPhoneNumber && <a href={`tel:${lead.nationalPhoneNumber}`} className="rounded-xl bg-emerald-600 px-3 py-3 text-center text-sm font-semibold text-white">Call</a>}
+        {lead.websiteUri && <a href={lead.websiteUri.startsWith('http') ? lead.websiteUri : `https://${lead.websiteUri}`} target="_blank" rel="noopener noreferrer" className="rounded-xl bg-indigo-600 px-3 py-3 text-center text-sm font-semibold text-white">Website</a>}
+        <a href={mapsUrl} target="_blank" rel="noopener noreferrer" className="col-span-2 rounded-xl border border-slate-200 py-3 text-center text-sm font-semibold text-slate-700 dark:border-white/10 dark:text-gray-200">Open map</a>
+      </div>
+    </section>
+  </div>;
+};
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 const SearchPanel = () => {  // ── Auth + Credits ─────────────────────────────────────────────────────────────────
@@ -537,6 +594,8 @@ const SearchPanel = () => {  // ── Auth + Credits ────────�
   const [showSavedDropdown, setShowSavedDropdown] = useState(false);
   const [viewMode, setViewMode] = useState('grid');
   const [resultPage, setResultPage] = useState(1);
+  const [expandedLead, setExpandedLead] = useState(null);
+  const resultPageSize = useResponsiveResultPageSize();
 
   // ── Selection + save state ──────────────────────────────────────────────────
   const [selectionMode, setSelectionMode] = useState(false);
@@ -601,13 +660,14 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
     return out;
   }, [results, filterPhone, filterWebsite, subtype, type, filterRating]);
 
-  useEffect(() => { setResultPage(1); }, [results, filterPhone, filterWebsite, subtype, type, filterRating]);
-  const resultPageCount = Math.max(1, Math.ceil(visible.length / RESULTS_PER_PAGE));
+  useEffect(() => { setResultPage(1); }, [results, filterPhone, filterWebsite, subtype, type, filterRating, resultPageSize]);
+  const resultPageCount = Math.max(1, Math.ceil(visible.length / resultPageSize));
   const safeResultPage = Math.min(resultPage, resultPageCount);
   const paginatedResults = visible.slice(
-    (safeResultPage - 1) * RESULTS_PER_PAGE,
-    safeResultPage * RESULTS_PER_PAGE,
+    (safeResultPage - 1) * resultPageSize,
+    safeResultPage * resultPageSize,
   );
+  useEffect(() => { setExpandedLead(null); }, [safeResultPage]);
 
   const isCreditError = !!error && /not enough credits|insufficient user credits|credit allocation|monthly allocation/i.test(error);
 
@@ -1676,10 +1736,10 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
           </div> {/* end space-y-2.5 toolbar wrapper */}
 
           <p className="text-xs text-slate-500 dark:text-gray-400">Strong matches appear first, possible sellers last. Matches use business listing evidence; current stock is not verified.</p>
-          {visible.length > RESULTS_PER_PAGE && (
+          {visible.length > resultPageSize && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#171717] px-3 py-2">
               <p className="text-xs text-slate-500 dark:text-gray-400">
-                Showing {(safeResultPage - 1) * RESULTS_PER_PAGE + 1}–{Math.min(safeResultPage * RESULTS_PER_PAGE, visible.length)} of {visible.length}
+                Showing {(safeResultPage - 1) * resultPageSize + 1}–{Math.min(safeResultPage * resultPageSize, visible.length)} of {visible.length}
               </p>
               <div className="flex items-center gap-2">
                 <button type="button" onClick={() => setResultPage((p) => Math.max(1, p - 1))} disabled={safeResultPage === 1}
@@ -1687,6 +1747,10 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
                   <ChevronLeft className="w-4 h-4" />
                 </button>
                 <span className="text-xs font-medium text-slate-700 dark:text-gray-200">Page {safeResultPage} of {resultPageCount}</span>
+                <select aria-label="Jump to results page" value={safeResultPage} onChange={(e) => setResultPage(Number(e.target.value))}
+                  className="sm:hidden rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#171717] px-1.5 py-1 text-xs text-slate-700 dark:text-gray-200">
+                  {Array.from({ length: resultPageCount }, (_, index) => <option key={index + 1} value={index + 1}>Page {index + 1}</option>)}
+                </select>
                 <div className="hidden sm:flex items-center gap-1">
                   {paginationItems(safeResultPage, resultPageCount).map((item) => typeof item === 'number' ? (
                     <button key={item} type="button" onClick={() => setResultPage(item)}
@@ -1709,7 +1773,14 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
           {/* Grid / Map */}
           {visible.length > 0 ? (
             viewMode === 'grid' ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+              <>
+              <div className="grid grid-cols-1 [@media(orientation:landscape)]:grid-cols-2 gap-2 md:hidden max-h-[62dvh] overflow-y-auto pr-1">
+                {paginatedResults.map((lead) => {
+                  const key = getLeadKey(lead);
+                  return <MobileLeadRow key={key} lead={lead} selectionMode={selectionMode} isSelected={selected.has(key)} onToggle={() => toggleLead(lead)} onOpen={() => setExpandedLead(lead)} />;
+                })}
+              </div>
+              <div className="hidden md:grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                 {paginatedResults.map((lead, index) => {
                   const key        = getLeadKey(lead);
                   const isSelected = selected.has(key);
@@ -1734,6 +1805,7 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
                   );
                 })}
               </div>
+              </>
             ) : (
               <LeadMapView leads={paginatedResults} apiKey={GOOGLE_API_KEY} />
             )
@@ -1742,6 +1814,7 @@ if ((myCreditsRemaining ?? 0) < estimatedCredits) {
               No results match the active filters.
             </div>
           )}
+          <MobileLeadDetail lead={expandedLead} onClose={() => setExpandedLead(null)} />
         </div>
       )}
 

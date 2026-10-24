@@ -35,7 +35,18 @@ import {
 } from '../services/listService';
 import ConfirmDangerModal from './ConfirmDangerModal';
 
-const LEADS_PER_PAGE = 50;
+const useResponsiveLeadsPageSize = () => {
+  const [pageSize, setPageSize] = useState(50);
+  useEffect(() => {
+    const update = () => setPageSize(window.innerWidth < 768
+      ? (window.matchMedia('(orientation: landscape)').matches ? 16 : 12)
+      : 50);
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+  return pageSize;
+};
 const paginationItems = (current, total) => {
   if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1);
   const items = [1];
@@ -393,6 +404,7 @@ const MyLists = () => {
   const [bulkSelected,   setBulkSelected]   = useState(new Set());
   const [mobileView,     setMobileView]     = useState('lists'); // 'lists' | 'detail'
   const [leadPage,       setLeadPage]       = useState(1);
+  const leadsPageSize = useResponsiveLeadsPageSize();
 
   // ── Danger modal state (Safe Delete) ────────────────────────────────────
   const [dangerModal, setDangerModal] = useState({
@@ -572,11 +584,12 @@ const MyLists = () => {
         );
       })
     : leads;
-  const leadPageCount = Math.max(1, Math.ceil(visibleLeads.length / LEADS_PER_PAGE));
+  useEffect(() => { setLeadPage(1); }, [searchFilter, activeListId, leadsPageSize]);
+  const leadPageCount = Math.max(1, Math.ceil(visibleLeads.length / leadsPageSize));
   const safeLeadPage = Math.min(leadPage, leadPageCount);
   const paginatedLeads = visibleLeads.slice(
-    (safeLeadPage - 1) * LEADS_PER_PAGE,
-    safeLeadPage * LEADS_PER_PAGE,
+    (safeLeadPage - 1) * leadsPageSize,
+    safeLeadPage * leadsPageSize,
   );
 
   const handleBulkDelete = async () => {
@@ -906,7 +919,23 @@ const MyLists = () => {
                       }
                     </div>
                   ) : (
-                    <div className="overflow-auto flex-1">
+                    <>
+                    <div className="md:hidden space-y-2 overflow-y-auto flex-1 p-3 max-h-[62dvh]">
+                      {paginatedLeads.map((lead) => (
+                        <div key={lead.id} className="rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#171717] p-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900 dark:text-white">{lead.name || '—'}</p><p className="mt-1 line-clamp-1 text-xs text-slate-500 dark:text-gray-400">{lead.address || '—'}</p></div>
+                            <button type="button" onClick={() => requestDeleteLead(lead.id)} className="p-1 text-slate-400 hover:text-red-500"><Trash2 className="w-4 h-4" /></button>
+                          </div>
+                          <div className="mt-2 flex items-center gap-3 text-xs">
+                            {lead.rating && <span className="flex items-center gap-1 text-slate-600 dark:text-gray-300"><Star className="w-3 h-3 fill-amber-400 text-amber-400" />{lead.rating}</span>}
+                            {lead.phone && <a href={`tel:${lead.phone}`} className="text-emerald-600">Call</a>}
+                            {lead.website && <a href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`} target="_blank" rel="noopener noreferrer" className="text-indigo-600">Website</a>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="hidden md:block overflow-auto flex-1">
                       <table className="w-full text-left">
                         <thead className="sticky top-0 bg-slate-50 dark:bg-white/5 border-b border-slate-200 dark:border-white/10 z-10">
                           <tr>
@@ -961,11 +990,12 @@ const MyLists = () => {
                         </tbody>
                       </table>
                     </div>
+                    </>
                   )}
-                  {visibleLeads.length > LEADS_PER_PAGE && (
+                  {visibleLeads.length > leadsPageSize && (
                     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 dark:border-white/10 px-4 py-3">
                       <p className="text-xs text-slate-500 dark:text-gray-400">
-                        Showing {(safeLeadPage - 1) * LEADS_PER_PAGE + 1}–{Math.min(safeLeadPage * LEADS_PER_PAGE, visibleLeads.length)} of {visibleLeads.length}
+                        Showing {(safeLeadPage - 1) * leadsPageSize + 1}–{Math.min(safeLeadPage * leadsPageSize, visibleLeads.length)} of {visibleLeads.length}
                       </p>
                       <div className="flex items-center gap-2">
                         <button type="button" onClick={() => setLeadPage((p) => Math.max(1, p - 1))} disabled={safeLeadPage === 1}
@@ -973,6 +1003,10 @@ const MyLists = () => {
                           <ChevronLeft className="w-4 h-4" />
                         </button>
                         <span className="text-xs font-medium text-slate-700 dark:text-gray-200">Page {safeLeadPage} of {leadPageCount}</span>
+                        <select aria-label="Jump to saved leads page" value={safeLeadPage} onChange={(e) => setLeadPage(Number(e.target.value))}
+                          className="sm:hidden rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#171717] px-1.5 py-1 text-xs text-slate-700 dark:text-gray-200">
+                          {Array.from({ length: leadPageCount }, (_, index) => <option key={index + 1} value={index + 1}>Page {index + 1}</option>)}
+                        </select>
                         <div className="hidden sm:flex items-center gap-1">
                           {paginationItems(safeLeadPage, leadPageCount).map((item) => typeof item === 'number' ? (
                             <button key={item} type="button" onClick={() => setLeadPage(item)}
